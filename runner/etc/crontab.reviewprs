@@ -37,6 +37,14 @@ MAILTO=""
 # weekly percentages headlessly - no calibration needed.
 35 * * * *   $HOME/review/bin/claude-usage-probe.sh hourly
 
+# HANDOVER, 2026-09-16 to 2026-09-30. Commenting moved to the AP-Review bot, but
+# only a comment's author may edit it, so the bot cannot collapse the reviews the
+# previous account left behind. This job does that one edit as the old account,
+# using the box's own gh login rather than the bot token. It no-ops after
+# REVIEW_DEPRECATE_UNTIL, so a forgotten line costs nothing - but delete it then,
+# because after that date the bot is the only account this box needs.
+20 * * * *   $HOME/review/bin/deprecate-legacy-comments.sh >> $HOME/review/logs/deprecate.log 2>&1
+
 # Keep the runs dashboard current even when no run has fired recently. It is
 # published to $REVIEW_PUBLIC_URL/DevCallReviews/runs.html
 */10 * * * *   $HOME/review/bin/publish-runs-page.sh

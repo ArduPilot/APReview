@@ -32,3 +32,7 @@ REVIEW_PUBLIC_URL="https://reviews.example.org"
 # Token for the account that posts comments. gh prefers this over its keyring,
 # so a runner can post as a bot without changing the box's interactive login.
 #GH_TOKEN="ghp_..."
+
+# Last day the handover job (deprecate-legacy-comments.sh) does anything. After
+# it the bot is the only account, and that job and its cron line can go.
+#REVIEW_DEPRECATE_UNTIL="2026-09-30"
