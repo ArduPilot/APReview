@@ -168,3 +168,7 @@ A few things worth knowing before changing it:
   against a PR whose outcome you already know.
 - **Claims in a review need evidence, and so do changes to the rules.** If you add a rule,
   say which review it would have fixed.
+
+## License
+
+GPLv3, like the rest of ArduPilot — see [LICENSE](LICENSE).
