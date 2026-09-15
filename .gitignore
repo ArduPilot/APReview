@@ -1,0 +1,10 @@
+# site configuration and secrets, never committed
+runner/etc/local.conf
+runner/etc/account.conf
+runner/etc/rsync.password
+runner/etc/gitconfig
+runner/etc/claude-rsync/
+runner/etc/reviewprs.lock
+
+__pycache__/
+*.pyc

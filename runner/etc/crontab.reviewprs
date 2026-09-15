@@ -1,0 +1,42 @@
+# APReview runner crontab. Master copy; edit here then re-run:
+#   crontab $HOME/review/etc/crontab.reviewprs
+# Inspect with:  crontab -l          Disable with: crontab -r
+#
+# Times are the runner's local time. Everything is serialised on one flock, so
+# an overrunning job makes the next slot log "SKIPPED" rather than pile up.
+SHELL=/bin/bash
+MAILTO=""
+# No PATH is set here on purpose: cron does not expand variables in these lines,
+# so any value would hardcode one machine's layout. Every script below sources
+# review-env.sh first, which puts the toolchain, ccache and the npm-global bin
+# (claude, codex) on PATH for everything it runs.
+
+# Base clones refreshed nightly, well clear of the review slots.
+30 2 * * *   $HOME/review/bin/refresh-repos.sh
+
+# Follow-ups: frequent and cheap. Does nothing when nothing has moved.
+# Waits up to 30m for the lock: a followup slot falls 34m after an `all` slot,
+# so a long `all` run (34-71m observed) would otherwise skip the next followup
+# every time. 30m rescues that without letting slots pile up: the next followup
+# is 3h away regardless.
+47 1,4,7,10,13,16,19,22 * * *   REVIEWPRS_LOCK_WAIT=1800 $HOME/review/bin/run-reviewprs.sh followup
+
+# The full label sweep, every 6 hours.
+13 0,6,12,18 * * *   $HOME/review/bin/run-reviewprs.sh all
+
+# A separate project, reviewed once a day. It waits up to 2h for the lock rather
+# than skipping: a once-a-day job that loses the race does not run at all that day.
+25 5 * * *   REVIEWPRS_LOCK_WAIT=7200 $HOME/review/bin/run-reviewprs.sh rsync
+
+# Backstop reaper: catches anything a run left behind that its own exit trap
+# missed (e.g. a run killed outright). No-ops while a run is active.
+50 * * * *   $HOME/review/bin/reap-orphans.sh >> $HOME/review/logs/reap.log 2>&1
+
+# Sample Claude's real usage meter hourly, so the dashboard has a trace even
+# across stretches with no runs. `claude -p /usage` reports the true session and
+# weekly percentages headlessly - no calibration needed.
+35 * * * *   $HOME/review/bin/claude-usage-probe.sh hourly
+
+# Keep the runs dashboard current even when no run has fired recently. It is
+# published to $REVIEW_PUBLIC_URL/DevCallReviews/runs.html
+*/10 * * * *   $HOME/review/bin/publish-runs-page.sh
