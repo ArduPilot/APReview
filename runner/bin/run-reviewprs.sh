@@ -19,6 +19,22 @@
 # The log is line-buffered and streamed, so `tail -f` is useful mid-run.
 
 set -u
+
+# --dry-run: do every pre-flight and then stop, printing the command that would
+# have run. Nothing is launched, no log or dashboard row is written, no usage
+# reading is taken and the run lock is left alone, so it is safe while a real run
+# is in flight. It exists because the only way to exercise the guards used to be
+# to start a review and interrupt it - which on 2026-09-16 twice started one for
+# real, against an ArduPilot PR and then an rsync PR.
+DRY=0
+ARGS=""
+for a in "$@"; do
+    case "$a" in
+        --dry-run) DRY=1 ;;
+        *) ARGS="${ARGS:+$ARGS }$a" ;;
+    esac
+done
+set -- $ARGS
 MODE="${1:-all}"
 
 # The skill accepts `rsync`, `RSYNC`, `--rsync` and `/rsync` as the same mode, so
@@ -40,24 +56,47 @@ esac
 # Per-mode Claude account, chosen before anything can spend quota: the EXIT trap
 # below takes a closing usage reading, and on a lock-skipped rsync run that would
 # otherwise be charged to - and recorded against - the wrong account.
-if [ "$MODE" = "rsync" ] && [ -n "${REVIEW_RSYNC_CLAUDE_DIR:-}" ]; then
+# `rsync` mode, and a single PR in that project asked for by hand, both belong to
+# the separate account: review-now.sh resolves rsync#1060 to RsyncProject/rsync#1060,
+# and without this that run would quietly spend the main subscription instead.
+RSYNC_TARGET=0
+case "$MODE" in
+    rsync|RsyncProject/rsync\#*) RSYNC_TARGET=1 ;;
+esac
+if [ "$RSYNC_TARGET" = 1 ] && [ -n "${REVIEW_RSYNC_CLAUDE_DIR:-}" ]; then
     export CLAUDE_CONFIG_DIR="$REVIEW_RSYNC_CLAUDE_DIR"
 fi
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 STAMP=$(date +%Y%m%d_%H%M%S)
-LOG="$REVIEW_LOGS/reviewprs-${MODE}-${STAMP}.log"
-LATEST="$REVIEW_LOGS/latest-${MODE}.log"
+# The mode can be a PR reference - ArduPilot/ardupilot#34206 from review-now.sh -
+# which cannot go in a filename: the slash names a directory that does not exist,
+# so `exec >>"$LOG"` fails, and a redirection error on exec makes a
+# non-interactive shell exit. With MAILTO empty the run then dies before its
+# first line of output, in silence. Flatten it for the filename only; for every
+# other mode the name is unchanged.
+TAG=$(printf %s "$MODE" | tr '/#' '--')
+LOG="$REVIEW_LOGS/reviewprs-${TAG}-${STAMP}.log"
+LATEST="$REVIEW_LOGS/latest-${TAG}.log"
 LOCK="$REVIEW_ROOT/etc/reviewprs.lock"
 mkdir -p "$REVIEW_LOGS" "$REVIEW_ROOT/etc"
 
+if [ "$DRY" = 1 ]; then
+    echo "DRY RUN: mode=$MODE  host=$(hostname)"
+    echo "  log would be:   $LOG"
+    echo "  claude account: ${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+fi
+
 # Keep 30 days of logs; they are the only record of an unattended run.
-find "$REVIEW_LOGS" -name 'reviewprs-*.log' -mtime +30 -delete 2>/dev/null
+[ "$DRY" = 1 ] || find "$REVIEW_LOGS" -name 'reviewprs-*.log' -mtime +30 -delete 2>/dev/null
 
-# A stable name to tail, always pointing at the newest run of this mode.
-ln -sfn "$LOG" "$LATEST"
-
-exec >>"$LOG" 2>&1
+# A stable name to tail, always pointing at the newest run of this mode. A dry
+# run writes no log at all: it must not appear on the runs dashboard as a run
+# that happened, and must not move the symlink someone is tailing.
+if [ "$DRY" = 0 ]; then
+    ln -sfn "$LOG" "$LATEST"
+    exec >>"$LOG" 2>&1
+fi
 echo "=============================================================="
 echo "reviewprs mode=$MODE  host=$(hostname)  start=$(date -Is)"
 echo "REVIEW_DATA=$REVIEW_DATA  TMPDIR=$TMPDIR"
@@ -78,11 +117,15 @@ WAIT="${REVIEWPRS_LOCK_WAIT:-0}"
 # its output goes to the run log, so a leak is visible where you would look for
 # it rather than discovered days later by the fans.
 LOCKED=0
+[ "$DRY" = 1 ] || \
 trap 'FR=""; [ "$LOCKED" = 1 ] && FR="--from-run"; \
       "$HOME/review/bin/reap-orphans.sh" $FR 2>&1; \
       "$HOME/review/bin/claude-usage-probe.sh" end >/dev/null 2>&1; \
       "$HOME/review/bin/publish-runs-page.sh" >/dev/null 2>&1 || true' EXIT
 
+if [ "$DRY" = 1 ]; then
+    flock -n 9 9>"$LOCK" && echo "  run lock: free" || echo "  run lock: held by a run in flight (a real run would wait or skip)"
+else
 exec 9>"$LOCK"
 if [ "$WAIT" -gt 0 ]; then
     echo "waiting up to ${WAIT}s for the run lock..."
@@ -101,6 +144,7 @@ else
 fi
 echo $$ >&9
 LOCKED=1
+fi
 
 case "$MODE" in
     all) PROMPT="/reviewprs" ;;
@@ -122,7 +166,7 @@ except Exception:
 print(d.get("email","") if d.get("loggedIn") else "")
 ' 2>/dev/null)
 WANT=""
-if [ "$MODE" = "rsync" ]; then
+if [ "$RSYNC_TARGET" = 1 ]; then
     WANT="${REVIEW_RSYNC_CLAUDE_ACCOUNT:-}"
     # An unset account must stop the run, not quietly fall through to the
     # default one: a missing etc/account.conf would otherwise put tridge's own
@@ -183,6 +227,10 @@ echo "gh pre-flight OK: $(gh auth status 2>&1 | sed -n 's/.*Logged in to [^ ]* a
 # limit". They were harmless - nothing was written, posted or published - but
 # they looked like plain rc=1 failures, so ~30h of silence took a human noticing
 # that reviews had gone quiet. Check the meter first and say so plainly instead.
+if [ "$DRY" = 1 ]; then
+    QMSG=""; QRC=0
+    echo "  usage probe: skipped"
+else
 QMSG=$("$HOME/review/bin/claude-usage-probe.sh" start 2>&1)
 QRC=$?
 if [ "$QRC" -ne 2 ] && [ -n "$QMSG" ]; then
@@ -191,6 +239,14 @@ fi
 if [ "$QRC" -eq 2 ]; then
     echo "SKIPPED: Claude quota exhausted -- ${QMSG:-weekly limit reached}"
     echo "finish=$(date -Is) status=quota-exhausted"
+    exit 0
+fi
+fi
+
+if [ "$DRY" = 1 ]; then
+    echo "  would run: claude -p \"$PROMPT\" --model claude-opus-5 --effort high"
+    echo "             --permission-mode auto --add-dir $REVIEW_ROOT"
+    echo "DRY RUN: every pre-flight passed; nothing was started."
     exit 0
 fi
 

@@ -19,6 +19,9 @@
 # kill whatever run currently holds it.
 
 set -u
+# The PR pre-check below calls gh, so it needs the same environment - and the
+# same account - as the run it is about to start.
+. "$HOME/review/bin/review-env.sh"
 export REVIEWPRS_LOCK_WAIT="${REVIEWPRS_LOCK_WAIT:-14400}"
 ARG="${1:-all}"
 
