@@ -92,6 +92,14 @@ export REVIEW_BOX_NAME="${REVIEW_BOX_NAME:-$(hostname -s 2>/dev/null || echo run
 # run as. Kept out of git because it names hosts, paths and an account.
 [ -f "$REVIEW_ROOT/etc/local.conf" ] && . "$REVIEW_ROOT/etc/local.conf"
 
+# local.conf sets plain shell variables. Everything above was exported before it
+# was sourced, so those values carry into child processes - but a variable named
+# only in local.conf does not, and gh reads its token from the environment. Set
+# but not exported, GH_TOKEN is silently useless: runs keep posting as whoever
+# the keyring holds, with nothing in the log to say the bot was not used.
+[ -n "${GH_TOKEN:-}" ] && export GH_TOKEN
+[ -n "${GITHUB_TOKEN:-}" ] && export GITHUB_TOKEN
+
 # Globally-installed npm modules (jsdom, used by the wiki JS test harnesses) are
 # not found by a bare require() from an arbitrary cwd without this.
 export NODE_PATH="$(npm root -g 2>/dev/null)"

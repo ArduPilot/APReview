@@ -29,8 +29,9 @@ REVIEW_PUBLIC_URL="https://reviews.example.org"
 # before an account switch stop being recognised and get duplicated.
 #REVIEW_COMMENT_ACCOUNTS="AP-Review tridge"
 
-# Token for the account that posts comments. gh prefers this over its keyring,
-# so a runner can post as a bot without changing the box's interactive login.
+# Token for the account that posts comments (classic PAT, public_repo scope). gh
+# prefers this over its keyring, so a runner can post as a bot without changing
+# the box's interactive login. review-env.sh exports it for you.
 #GH_TOKEN="ghp_..."
 
 # Last day the handover job (deprecate-legacy-comments.sh) does anything. After
