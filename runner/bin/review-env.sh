@@ -62,6 +62,19 @@ clear_stale_oauth_lock() {
     fi
 }
 
+# Which GitHub accounts' comments count as ours: the account posting now, plus
+# any it replaced. When commenting moves from one account to another, every
+# comment posted before the switch would otherwise stop being recognised as ours,
+# and the next run would post a duplicate instead of updating what is already
+# there. Set REVIEW_COMMENT_ACCOUNTS in local.conf as a space-separated list,
+# newest first. Prints a JSON array for jq: ["AP-Review","tridge"]
+review_comment_accounts() {
+    local list="${REVIEW_COMMENT_ACCOUNTS:-}" a out=
+    [ -n "$list" ] || list=$(gh api user --jq .login 2>/dev/null)
+    for a in $list; do out="$out\"$a\","; done
+    printf '[%s]' "${out%,}"
+}
+
 # --- publishing ---------------------------------------------------------------
 # Where finished reports are rsynced, and the public URL they end up at. Both are
 # site-specific: set them in etc/local.conf (see local.conf.example), which is not

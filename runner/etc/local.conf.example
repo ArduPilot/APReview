@@ -23,3 +23,12 @@ REVIEW_PUBLIC_URL="https://reviews.example.org"
 #   CLAUDE_CONFIG_DIR=$HOME/review/etc/claude-rsync claude auth login --email <addr>
 # and name the address here. Leave unset to run every mode as the default account.
 #REVIEW_RSYNC_CLAUDE_ACCOUNT="someone@example.com"
+
+# Accounts whose AI comments count as ours, space separated, newest first. The
+# account you post as now, plus any it replaced - otherwise comments posted
+# before an account switch stop being recognised and get duplicated.
+#REVIEW_COMMENT_ACCOUNTS="AP-Review tridge"
+
+# Token for the account that posts comments. gh prefers this over its keyring,
+# so a runner can post as a bot without changing the box's interactive login.
+#GH_TOKEN="ghp_..."

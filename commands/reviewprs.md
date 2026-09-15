@@ -390,9 +390,9 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
       current head only hours earlier, and post a second comment saying nothing new. What actually matters
       is **what the developer was last told**, which is the head quoted in the newest AI comment on the PR:
       ```bash
-      ME=$(gh api user --jq .login)
+      OURS=$(review_comment_accounts)   # see "Which accounts count as ours" below
       LAST=$(gh api --paginate repos/<owner>/<repo>/issues/<n>/comments \
-        --jq "[.[] | select(.user.login==\"$ME\") | select(.body|test(\"AI-generated\"))] | last | .body")
+        --jq "[.[] | select(.user.login as \$l | $OURS | index(\$l)) | select(.body|test(\"AI-generated\"))] | last | .body")
       TOLD=$(sed -nE 's/.*head `([0-9a-f]{10})`.*/\1/p' <<<"$LAST" | head -1)
       ```
       **Extract it with `sed`, not `grep -oE 'head \`...'`.** A backslash-backtick inside a
@@ -1083,6 +1083,18 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
    - **Content:** mirror that PR's findings from the finalised report — verdict, then findings grouped by severity, each with its `file:line` reference and a one-line description, plus suggested fixes where useful. Use the post-Codex findings (refuted ones removed, line refs corrected). If you dropped a finding as a false positive during validation, note that briefly so the author isn't left chasing it. Where there *are* actionable findings, drop purely confirmatory notes from the comment body — they belong in the report as evidence of what was checked, but in a comment they bury the actionable items.
      On an **APPROVE**, open with that plainly ("no blockers") so the author is not left guessing whether the comment is a merge objection.
      For a **clean APPROVE with nothing actionable**, the comment is short and its job is to say what was actually checked, not to pad. Name the specific things verified — the paths traced, the callers audited, whether a cold review was run and what it looked for — so the author can judge how much the clearance is worth and challenge it if a risk was missed. A bare "looks good to me" is worse than nothing, because it claims review effort without evidencing any. Keep it to a few lines.
+   - **Which accounts count as ours.** Every test for "have I commented here before" matches a **set**
+     of logins, not just the one posting now: `OURS=$(review_comment_accounts)` (from
+     `review-env.sh`) prints a jq array built from `$REVIEW_COMMENT_ACCOUNTS`, newest first, and falls
+     back to `gh api user --jq .login` when that is unset. The reason is that the posting account
+     changes: ArduPilot's reviews moved from a maintainer's own account to the `AP-Review` bot on
+     2026-09-16. Matching only the current login would make every comment posted before the switch
+     invisible, so a follow-up run would read no told-head, conclude the PR had never been reviewed,
+     and post a **second** comment instead of updating the first — across every PR already tracked.
+     Note also that a comment can only be edited by its author, so the deprecate-and-repost path
+     cannot mark a pre-switch comment deprecated unless the posting account has write access to that
+     repo; where it cannot, post the new comment and say so rather than failing the PR.
+
    - **Mark every comment as AI-generated.** Begin the body with a marker line, e.g.: `**Automated review note — AI-generated (Claude), validated against the live diff.** Please sanity-check before acting.`
    - **Link the comment to the report it came from**, on its own line near the top, so the author can see
      the full context and what else was checked. **The URL differs per mode — use the one for the mode you
@@ -1143,16 +1155,16 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
 
      Determining it — count anything by anyone else newer than your comment, across all three sources, with `--paginate` on each (a review comment or a review counts just as much as an issue comment):
      ```bash
-     ME=$(gh api user --jq .login)
+     OURS=$(review_comment_accounts)
      MINE=$(gh api --paginate repos/<owner>/<repo>/issues/<n>/comments \
-       --jq "[.[] | select(.user.login==\"$ME\") | select(.body|test(\"AI-generated\"))] | last")
+       --jq "[.[] | select(.user.login as \$l | $OURS | index(\$l)) | select(.body|test(\"AI-generated\"))] | last")
      MY_ID=$(jq -r .id <<<"$MINE"); MY_AT=$(jq -r .created_at <<<"$MINE")
      NEWER=$( { gh api --paginate repos/<owner>/<repo>/issues/<n>/comments \
-                   --jq ".[] | select(.user.login!=\"$ME\") | .created_at"
+                   --jq ".[] | select(.user.login as \$l | $OURS | index(\$l) | not) | .created_at"
                  gh api --paginate repos/<owner>/<repo>/pulls/<n>/comments \
-                   --jq ".[] | select(.user.login!=\"$ME\") | .created_at"
+                   --jq ".[] | select(.user.login as \$l | $OURS | index(\$l) | not) | .created_at"
                  gh api --paginate repos/<owner>/<repo>/pulls/<n>/reviews \
-                   --jq ".[] | select(.user.login!=\"$ME\") | .submitted_at"; } \
+                   --jq ".[] | select(.user.login as \$l | $OURS | index(\$l) | not) | .submitted_at"; } \
                | while read -r d; do [ "$d" \> "$MY_AT" ] && echo x; done | wc -l)
      ```
      (That loop deliberately avoids awk's whole-record variable — dollar-zero. When this file is invoked
