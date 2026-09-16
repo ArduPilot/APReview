@@ -17,6 +17,7 @@ ArduPilot/ArduRemoteID
 ArduPilot/sphinx_rtd_theme
 ArduPilot/WebTools
 ArduPilot/AP_CameraGimbal
+ArduPilot/APReview
 mavlink/mavlink
 RsyncProject/rsync
 "
