@@ -1043,7 +1043,7 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
    response to the previous comment and is waiting to hear whether they landed. Editing silently means
    they are told nothing, which defeats the entire purpose of the mode. Observed on 2026-08-20 on `#34094`:
    the author pushed ~670 lines answering nearly every finding but posted no comment alongside it, so the
-   `NEWER == 0` branch said "edit in place" — i.e. respond to a developer actively waiting for feedback by
+   "nobody has spoken since" test chose an edit — i.e. respond to a developer actively waiting for feedback by
    silently rewriting a comment they had already read. The mechanics of deprecating the old comment and
    posting the new one are exactly as described below; only the choice is removed.
 
@@ -1074,9 +1074,10 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
 
      ```bash
      cat > "$SCRATCH/plan.json" <<'JSON'
-     {"hold": ["mavlink/mavlink"],
+     {"mode": "followup",
+      "hold": ["mavlink/mavlink"],
       "comments": [{"key": "34292", "repo": "ArduPilot/ardupilot", "number": 34292,
-                    "body_file": "bodies/34292.md"}]}
+                    "head": "0374a23d84", "body_file": "bodies/34292.md"}]}
      JSON
      "$HOME/review/bin/post-comments.py" "$SCRATCH/plan.json"   # --dry-run to see the decisions
      ```
@@ -1158,34 +1159,23 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
        ```
      - **Then post the new review as a fresh comment**, so it lands at the bottom of the thread and generates a notification.
 
-     Determining it is `post-comments.py`'s job: it counts anything by anyone outside the identity
-     set — issue comment, review comment, or review — newer than our own newest AI comment, and
-     chooses edit or repost accordingly. The rules are written out here because they are policy;
-     the implementation and its tests are in the repo.
-     (That loop deliberately avoids awk's whole-record variable — dollar-zero. When this file is invoked
-     as a slash command the runner substitutes positional parameters, so a literal dollar-zero written in
-     a snippet is rewritten to the command's argument: `awk 'DevCallTopic > t'`, which is still valid awk,
-     always false, and fails silently. Only dollar-zero is affected — the dollar-one in the `worker.sh`
-     heredoc above survives substitution and is needed there, so leave it alone.)
-     `NEWER > 0` ⇒ something came after it ⇒ **deprecate-and-repost**.
-     `NEWER == 0` ⇒ nobody has spoken since ⇒ apply the head test below before concluding "edit".
+     Deciding it is `post-comments.py`'s job. Give it the plan and it works out, per PR, whether to
+     post, edit in place, or deprecate-and-repost, by the rules in this section — which it
+     implements and `runner/tests/test_post_comments.py` pins. Two fields matter to that decision:
 
-     **A push counts too, and the comment count alone will not see it.** The three sources above are
-     comments and reviews; a force-push or new commits are none of those, so an author who answered your
-     review *in code* and said nothing leaves `NEWER == 0` — and an in-place edit generates no
-     notification, so the one person actively waiting to hear is told nothing. Compare the head you are
-     about to quote against the head your previous comment quoted:
-     ```bash
-     TOLD=$(jq -r .body <<<"$MINE" | sed -nE 's/.*head `([0-9a-f]{10})`.*/\1/p' | head -1)
-     NOW=<the head this run reviewed>          # the same hash the new comment will open with
-     if [ -n "$TOLD" ] && [ "$TOLD" != "$NOW" ]; then
-         DECISION=repost      # the PR moved since we last told them
-     elif [ "$NEWER" -gt 0 ]; then
-         DECISION=repost      # somebody else spoke after us
-     else
-         DECISION=edit        # same head, nobody spoke - an edit is seen and a second comment is noise
-     fi
-     ```
+     - `mode` — `label`, `followup` or `pr`. **FOLLOWUP never edits**, because that mode exists to
+       tell an author their code moved and an edit notifies nobody. **PR mode always leaves a
+       comment**, even at a head already reviewed, because a human asked for it by name.
+     - `head` per entry — the head this review is of. Without it the tool cannot see that the author
+       pushed, and would edit silently where it should repost.
+
+     **A push counts too, and comments alone will not see it.** Comments and reviews are not the
+     only way an author answers: a force-push or new commits are none of those, so someone who
+     replied *in code* and said nothing leaves the "has anyone spoken" test at zero — and an
+     in-place edit generates no notification, so the one person actively waiting to hear is told
+     nothing. That is why every plan entry carries `head`: `post-comments.py` compares it against
+     the head quoted in our previous comment (`head \`<sha>\``) and reposts when they differ.
+     Observed on `#33975` and `#34094`; `runner/tests/test_post_comments.py` pins it.
      This is the same reasoning FOLLOWUP mode already applies unconditionally, and it belongs here for
      the same reason: that mode reaches these PRs only when it happens to run first, and a LABEL sweep
      catches exactly the same authors mid-response. Observed on `#33975` on 2026-09-02 — the author

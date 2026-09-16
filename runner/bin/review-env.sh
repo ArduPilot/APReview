@@ -98,6 +98,35 @@ export REVIEW_BOX_NAME="${REVIEW_BOX_NAME:-$(hostname -s 2>/dev/null || echo run
 # run as. Kept out of git because it names hosts, paths and an account.
 # local.conf sets plain shell variables, and a variable that is set but not
 # exported is invisible to every child process - gh, python, the review tools.
+# That has bitten twice: GH_TOKEN, so runs kept posting as the keyring account,
+# and REVIEW_COMMENT_ACCOUNTS, so post-comments.py saw only the current account
+# and would have posted a duplicate on every PR the old one had reviewed.
+# `set -a` marks everything the file assigns for export and lets the shell do
+# the parsing: a regex over the file misses `export FOO=`, `FIRST=one FOO=...`,
+# an assignment inside an if, and anything else a shell would accept.
+if [ -f "$REVIEW_ROOT/etc/local.conf" ]; then
+    set -a
+    . "$REVIEW_ROOT/etc/local.conf"
+    set +a
+fi
+
+# --- publishing ---------------------------------------------------------------
+# Where finished reports are rsynced, and the public URL they end up at. Both are
+# site-specific: set them in etc/local.conf (see local.conf.example), which is not
+# in git. REVIEW_PUBLISH is an rsync destination - either an rsync-daemon URL
+# (rsync://user@host) with RSYNC_AUTH pointing at a password file, or an ssh
+# destination (host:path) with RSYNC_AUTH empty.
+export REVIEW_PUBLISH="${REVIEW_PUBLISH:-}"
+export RSYNC_AUTH="${RSYNC_AUTH:-}"
+export REVIEW_PUBLIC_URL="${REVIEW_PUBLIC_URL:-}"
+
+# Shown on the runs dashboard, so several runners can publish side by side.
+export REVIEW_BOX_NAME="${REVIEW_BOX_NAME:-$(hostname -s 2>/dev/null || echo runner)}"
+
+# Site configuration: publishing target, and the Claude account a given mode must
+# run as. Kept out of git because it names hosts, paths and an account.
+# local.conf sets plain shell variables, and a variable that is set but not
+# exported is invisible to every child process - gh, python, the review tools.
 # That has now bitten twice: GH_TOKEN, so runs kept posting as the keyring
 # account, and REVIEW_COMMENT_ACCOUNTS, so post-comments.py saw only the current
 # account and would have posted a duplicate on every PR the old one had
