@@ -24,6 +24,7 @@ set -u
 . "$HOME/review/bin/review-env.sh"
 export REVIEWPRS_LOCK_WAIT="${REVIEWPRS_LOCK_WAIT:-14400}"
 ARG="${1:-all}"
+shift 2>/dev/null || true      # anything else is passed through, e.g. --dry-run
 
 resolve_pr() {
     local a="$1" owner repo num
@@ -73,4 +74,4 @@ else
     MODE="$ARG"
 fi
 
-exec "$HOME/review/bin/run-reviewprs.sh" "$MODE"
+exec "$HOME/review/bin/run-reviewprs.sh" "$MODE" "$@"

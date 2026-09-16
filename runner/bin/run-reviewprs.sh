@@ -70,11 +70,12 @@ CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
 STAMP=$(date +%Y%m%d_%H%M%S)
 # The mode can be a PR reference - ArduPilot/ardupilot#34206 from review-now.sh -
-# which cannot go in a filename: the slash names a directory that does not exist,
-# so `exec >>"$LOG"` fails, and a redirection error on exec makes a
-# non-interactive shell exit. With MAILTO empty the run then dies before its
-# first line of output, in silence. Flatten it for the filename only; for every
-# other mode the name is unchanged.
+# which cannot go in a filename: the slash names a directory that does not exist.
+# `exec >>"$LOG"` then fails, and bash prints the error and CARRIES ON (it exits
+# only in posix mode), so the run happens but is invisible: no log, no latest-
+# symlink, no row on the dashboard, and under cron its output goes nowhere at
+# all. Observed on 2026-09-16 - a review of #33032 ran to completion unlogged.
+# Flatten it for the filename only; for every other mode the name is unchanged.
 TAG=$(printf %s "$MODE" | tr '/#' '--')
 LOG="$REVIEW_LOGS/reviewprs-${TAG}-${STAMP}.log"
 LATEST="$REVIEW_LOGS/latest-${TAG}.log"
