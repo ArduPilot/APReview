@@ -57,6 +57,8 @@ account for one mode. It is never committed.
 - `bin/refresh-repos.sh` — nightly refresh of the base clones, lock-guarded.
 - `bin/clone-ardupilot.sh`, `bin/clone-repos.sh` — the base clones, submodules included.
 - `bin/base-build.sh` — SITL + a ChibiOS board; proves the toolchain and warms ccache.
+- `bin/post-comments.py` — posts or updates the AI review comment on each PR in a
+  plan, deciding post / edit / deprecate-and-repost. Tested in `runner/tests/`.
 - `bin/claude-usage-probe.sh` — samples the real usage meter, tagged by account.
 - `bin/reap-orphans.sh` — kills processes a run left behind under `$REVIEW_DATA`.
 - `bin/make-runs-page.py`, `bin/publish-runs-page.sh` — the runs dashboard.
