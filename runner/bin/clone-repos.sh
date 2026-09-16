@@ -4,23 +4,10 @@
 . "$HOME/review/bin/review-env.sh"
 cd "$REVIEW_REPOS" || exit 1
 
-REPOS="
-ArduPilot/ardupilot_wiki
-ArduPilot/MAVProxy
-ArduPilot/pymavlink
-ArduPilot/MissionPlanner
-ArduPilot/SupportProxy
-ArduPilot/useralerts
-ArduPilot/CustomBuild
-ArduPilot/MethodicConfigurator
-ArduPilot/ArduRemoteID
-ArduPilot/sphinx_rtd_theme
-ArduPilot/WebTools
-ArduPilot/AP_CameraGimbal
-ArduPilot/APReview
-mavlink/mavlink
-RsyncProject/rsync
-"
+# The list lives in repos.json, so adding a repo is one edit and both the sweep
+# and the base clones follow it. The main repo is cloned separately because it
+# needs --recurse-submodules.
+REPOS=$("$(dirname "$0")/repos.py" --clone)
 
 # Submodules. A base clone without them is one the agents cannot use for a
 # submodule-touching PR: they fall back to fetching from the network, which is
@@ -55,10 +42,14 @@ init_submodules() {
 }
 
 for r in $REPOS; do
-    d=$(basename "$r")
-    # mavlink/mavlink and the ardupilot mavlink submodule share a basename;
-    # key the upstream one distinctly so they never collide on disk.
-    [ "$r" = "mavlink/mavlink" ] && d="upstream-mavlink"
+    # The directory is the repo's manifest key, so what is on disk matches what
+    # the reports call it - and mavlink/mavlink, which shares a basename with the
+    # ardupilot submodule, lands as upstream-mavlink without a special case here.
+    # The directory comes from the config: the basename, except where an entry
+    # says otherwise. mavlink/mavlink lands as upstream-mavlink so it cannot
+    # collide with the ardupilot mavlink submodule.
+    d=$("$(dirname "$0")/repos.py" --clone-dirs | awk -v r="$r" -F'\t' '$1==r {print $2}')
+    [ -n "$d" ] || d=$(basename "$r")
     if [ -d "$d/.git" ]; then
         echo "=== $r: updating $d"
         ( cd "$d" && git fetch --all --prune -q && \

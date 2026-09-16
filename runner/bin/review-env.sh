@@ -5,6 +5,12 @@ export REVIEW_DATA="$REVIEW_ROOT/data"
 export REVIEW_LOGS="$REVIEW_ROOT/logs"
 export REVIEW_REPOS="$REVIEW_ROOT/repositories"
 
+# Where the swept-repo configuration lives. bin is normally a symlink into an
+# APReview checkout, so derive it from this file rather than assuming a path.
+_apr=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/../.." && pwd)
+export REVIEW_REPO_CONFIG="${REVIEW_REPO_CONFIG:-$_apr/repos.json}"
+unset _apr
+
 # Isolated git config: no https->ssh rewrite, so HTTPS clones work without a key.
 export GIT_CONFIG_GLOBAL="$REVIEW_ROOT/etc/gitconfig"
 
