@@ -1,6 +1,6 @@
 # Review PRs by Label, Author, or Follow-up
 
-Review a set of GitHub PRs and generate an HTML report. Checks the main ArduPilot repo, the ArduPilot wiki repo, all ArduPilot-owned submodule repos, the standalone ArduPilot repos (`SupportProxy`, `pymavlink`, `useralerts`, `MissionPlanner`, `MAVProxy`, `CustomBuild`, `MethodicConfigurator`, `ArduRemoteID`, `sphinx_rtd_theme`, `WebTools` — the full list is in step 1), and the upstream `mavlink/mavlink` repo.
+Review a set of GitHub PRs and generate an HTML report. Checks the main ArduPilot repo, the ArduPilot wiki repo, all ArduPilot-owned submodule repos, the standalone ArduPilot repos (`SupportProxy`, `pymavlink`, `useralerts`, `MissionPlanner`, `MAVProxy`, `CustomBuild`, `MethodicConfigurator`, `ArduRemoteID`, `sphinx_rtd_theme`, `WebTools`, `AP_CameraGimbal` — the full list is in step 1), and the upstream `mavlink/mavlink` repo.
 
 Run this from the root of an ArduPilot checkout (it reads `.gitmodules` in the working directory). The report is written to the repository root and works in any ArduPilot checkout, not just one.
 
@@ -221,7 +221,8 @@ path and the comment policy all differ:
      → today, since it has no associated dev call) and each auto-posts comments (all three are
      comment-posting labels — step 8). Each sweeps **all repos** (main, wiki, the ArduPilot submodules and
      the standalone ArduPilot repos — SupportProxy, pymavlink, useralerts, MissionPlanner, MAVProxy, CustomBuild,
-     MethodicConfigurator, ArduRemoteID, WebTools — plus, for the report only, upstream `mavlink/mavlink`).
+     MethodicConfigurator, ArduRemoteID, WebTools, AP_CameraGimbal — plus, for the report only,
+     upstream `mavlink/mavlink`).
    - `followup` then reads those fresh reports; every PR the three label runs just re-reviewed is now at its
      told-head with a current comment, so `followup` correctly **skips** it. `followup` therefore acts
      only on PRs from *other* published label reports whose code moved since their last comment — often a
@@ -593,6 +594,7 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
      - `ArduPilot/ArduRemoteID`
      - `ArduPilot/sphinx_rtd_theme`
      - `ArduPilot/WebTools`
+     - `ArduPilot/AP_CameraGimbal`
 
      These are ArduPilot repos, so they are treated exactly like the main/wiki/submodule repos — the `mavlink/mavlink` upstream exceptions do **not** apply, and comment-posting in step 8 happens normally for `DevCallEU`/`DevCallTopic`/`AIReview`.
 
@@ -605,6 +607,13 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
      conventions**, which are not ArduPilot's: its templates are Jinja, its boolean theme options go
      through the `|tobool` filter, and its only consumer is `ardupilot_wiki` — a theme change is
      usually paired with a wiki PR, so check that one too before calling a forward reference dangling.
+
+     `ArduPilot/AP_CameraGimbal` (added 2026-09-16) is gimbal firmware in C, and the ordinary
+     ArduPilot house rules apply to it. Its default branch is `master`, it has GitHub Actions
+     workflows so `gh pr checks` has something real to read, and its one submodule is
+     `modules/mavlink` — the ArduPilot mavlink fork, already swept as `mavlink#<n>` through
+     ardupilot's own `.gitmodules`, so it adds no new repo to the sweep. Like the others here it is
+     a submodule of neither `ardupilot` nor the wiki, so without the explicit sweep nothing reaches it.
 
      `ArduPilot/WebTools` (added 2026-09-13) is the log-review tool collection published at
      `https://firmware.ardupilot.org/Tools/WebTools` — client-side JavaScript and HTML served as
