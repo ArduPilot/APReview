@@ -580,77 +580,34 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
    silently post the old hash as though it were current.
    Per-repo commands. In AUTHOR mode substitute `--author "<user>" --state open --limit 100` for
    `--label "$ARGUMENTS" --limit 50`, and apply the `updatedAt` cutoff above to each result:
-   - Main repo: `gh pr list --label "$ARGUMENTS" --json number,title,author,url,updatedAt,headRefOid --limit 50`
-   - Wiki repo: `gh pr list --repo ArduPilot/ardupilot_wiki --label "$ARGUMENTS" --json number,title,author,url,updatedAt,headRefOid --limit 50`
-   - Upstream MAVLink: `gh pr list --repo mavlink/mavlink --label "$ARGUMENTS" --json number,title,author,url,updatedAt,headRefOid --limit 50`
-   - SupportProxy: `gh pr list --repo ArduPilot/SupportProxy --label "$ARGUMENTS" --json number,title,author,url,updatedAt,headRefOid --limit 50` — an ArduPilot-owned standalone repo that is **not** a submodule, so the `.gitmodules` sweep below will not find it; key its PRs `SupportProxy#<number>`. It is an ArduPilot repo, so it is treated like the main/wiki/submodule repos (the `mavlink/mavlink` upstream exceptions do **not** apply): comment-posting in step 8 happens normally for DevCallEU/DevCallTopic (and for the `AIReview` label).
-   - Other ArduPilot-owned standalone repos — also **not** submodules, so the `.gitmodules` sweep below will not find them; **sweep each one explicitly** with the same command shape (`gh pr list --repo ArduPilot/<repo> --label "$ARGUMENTS" --json number,title,author,url,updatedAt,headRefOid --limit 50`) and key its PRs `<reponame>#<number>`:
-     - `ArduPilot/pymavlink`
-     - `ArduPilot/useralerts`
-     - `ArduPilot/MissionPlanner`
-     - `ArduPilot/MAVProxy`
-     - `ArduPilot/CustomBuild`
-     - `ArduPilot/MethodicConfigurator`
-     - `ArduPilot/ArduRemoteID`
-     - `ArduPilot/sphinx_rtd_theme`
-     - `ArduPilot/WebTools`
-     - `ArduPilot/AP_CameraGimbal`
-     - `ArduPilot/APReview`
+   - **The repos come from `repos.json`, not from this file.** Read it — `repos.py --sweep` lists
+     the ones swept by name, `repos.py --keys` gives their manifest keys, `repos.py --notes <repo>`
+     gives what a reviewer needs to know about one, and `repos.py --json` is the whole thing:
 
-     These are ArduPilot repos, so they are treated exactly like the main/wiki/submodule repos — the `mavlink/mavlink` upstream exceptions do **not** apply, and comment-posting in step 8 happens normally for `DevCallEU`/`DevCallTopic`/`AIReview`.
+     ```bash
+     R="$HOME/review/bin/repos.py"        # or repos.py from any APReview checkout
+     for repo in $($R --sweep); do
+         gh pr list --repo "$repo" --label "$ARGUMENTS" \
+            --json number,title,author,url,updatedAt,headRefOid --limit 50
+     done
+     ```
 
-     `ArduPilot/sphinx_rtd_theme` needs the explicit sweep for a reason worth remembering: it is the
-     wiki's Sphinx theme, and it is a submodule of **neither** `ArduPilot/ardupilot` nor
-     `ArduPilot/ardupilot_wiki`, so no `.gitmodules` pass reaches it. Added 2026-09-05 after `#24` sat
-     `AIReview`-labelled and was never picked up by the sweep — it had to be reviewed by hand twice.
-     It is an ArduPilot-owned fork of the third-party `readthedocs/sphinx_rtd_theme`, so review it as
-     an ArduPilot repo (post comments normally) but judge changes against **the fork's own
-     conventions**, which are not ArduPilot's: its templates are Jinja, its boolean theme options go
-     through the `|tobool` filter, and its only consumer is `ardupilot_wiki` — a theme change is
-     usually paired with a wiki PR, so check that one too before calling a forward reference dangling.
+     For the main repo `--repo` may be omitted; its PRs are keyed by bare number, every other repo
+     by `<key>#<number>` from `--keys`. **Read each repo's `notes` before reviewing a PR in it** —
+     they carry the things that change a verdict: whose conventions apply, whether the repo has CI
+     to read, what its submodules mean, and for `mavlink/mavlink` that comments are held rather than
+     posted (`post_comments: false`). Do not carry a repo list in your head or in this file: adding
+     a repo is an edit to `repos.json` and a base clone, nothing more.
 
-     **`ArduPilot/APReview` is this command's own repository** (added 2026-09-17), so reviewing a PR
-     there means reviewing your own instructions. Three things follow.
+     In AUTHOR mode substitute `--author "<user>" --state open --limit 100` for
+     `--label "$ARGUMENTS" --limit 50`, and apply the `updatedAt` cutoff above to each result.
 
-     *You are running the deployed version, not the PR's.* Read the diff as a proposal; never assume
-     the behaviour it describes is the behaviour you have. Where a change claims to fix something,
-     say whether the claim is checkable from the diff, and check it where you can: the repo carries
-     its own tests (`runner/tests/`), and running them is the cheapest real evidence there is.
+     The disambiguation rule in `key_collisions` matters: `mavlink/mavlink` and `ArduPilot/mavlink`
+     share a basename and the fork is swept as a submodule, so the upstream one is keyed
+     `upstream-mavlink#<n>` and the fork `mavlink#<n>`. Without it two PRs collide on one manifest
+     key and the incremental skip silently reuses one PR's review for the other — invisible, because
+     the report still looks complete.
 
-     *Never install a PR's code.* Do not copy its scripts into `~/review/bin`, point
-     `~/.claude/commands` at its command file, or run its runner scripts. Those run with this box's
-     GitHub token and Claude credentials, on a machine that reviews other people's pull requests. A
-     PR is text to be read and, at most, exercised in a scratch directory — `python3` on a test file
-     is fine, `run-reviewprs.sh` from the PR is not. Deployment is a human step, after the review.
-
-     *Prefer evidence a reader can repeat.* A finding here should name the file and line in the PR
-     and say what breaks, in the same form as any other review. "This would silently keep posting as
-     the wrong account" beats "this looks wrong", and the repo's history is full of bugs of exactly
-     that shape — a value set but not exported, a flag parsed but not forwarded, JSON piped into a
-     script that read its own heredoc instead.
-
-     `ArduPilot/AP_CameraGimbal` (added 2026-09-16) is gimbal firmware in C, and the ordinary
-     ArduPilot house rules apply to it. Its default branch is `master`, it has GitHub Actions
-     workflows so `gh pr checks` has something real to read, and its one submodule is
-     `modules/mavlink` — the ArduPilot mavlink fork, already swept as `mavlink#<n>` through
-     ardupilot's own `.gitmodules`, so it adds no new repo to the sweep. Like the others here it is
-     a submodule of neither `ardupilot` nor the wiki, so without the explicit sweep nothing reaches it.
-
-     `ArduPilot/WebTools` (added 2026-09-13) is the log-review tool collection published at
-     `https://firmware.ardupilot.org/Tools/WebTools` — client-side JavaScript and HTML served as
-     static files (`python3 -m http.server` is the whole dev setup), so there is no build step. Three
-     things differ from the other repos: its default branch is **`main`**, not `master`; it has **no
-     GitHub Actions workflows**, so the `gh pr checks` calls in steps 2 and 3 have nothing to read and
-     should say so rather than report a failure; and its `.gitmodules` has ten entries, nine of them
-     vendored third-party libraries (plotly.js, fft.js, luxon, matrix, tabulator, tippyjs,
-     floating-ui, pyAircraftIden, JsDataflashParser) plus **`modules/ardupilot`, which is
-     `ArduPilot/ardupilot` itself** — already swept as the main repo, so it adds no new repo to
-     the sweep, but do not describe WebTools as third-party-only. A bump of one of the nine is a
-     dependency update, judged on what changed upstream. The base clone carries its submodules, with
-     `modules/ardupilot` taken from the ardupilot base rather than downloaded again, so an agent
-     checkout gets them by reference — see the clone recipe above. Review it
-     against browser and JS conventions; the ArduPilot C++ house rules (parameter name lengths,
-     zeroed `new`, per-subsystem commits) do not apply. Two disambiguations: `ArduPilot/pymavlink` is a distinct repo from the nested `pymavlink` submodule (there is no key collision — the submodule sweep only reaches ardupilot's *top-level* submodules, and pymavlink is nested under `mavlink`), and `ArduPilot/mavlink` (the fork) is already swept via `.gitmodules` and keyed `mavlink#`, so do **not** add it here. Keep this list current: if ArduPilot adds another standalone repo that people put dev-call/AIReview labels on, add it here.
    - Parse `.gitmodules` to find all submodule URLs hosted under `ArduPilot/` or `ardupilot/` on GitHub
    - For each ArduPilot-owned submodule repo, run: `gh pr list --repo <owner/repo> --label "$ARGUMENTS" --json number,title,author,url,updatedAt,headRefOid --limit 50`
    - Combine all results, tracking which repo each PR belongs to. Give each PR a stable **key**: the PR number for the main repo, or `<reponame>#<number>` for wiki/submodule PRs (e.g. `mavlink#360`, `wiki#7730`). Note that wiki PRs are documentation-focused (ReST under `*/source/docs/`); review for technical accuracy vs the current ArduPilot codebase, broken `:ref:` cross-references, ReST syntax, and consistency with existing wiki conventions.
