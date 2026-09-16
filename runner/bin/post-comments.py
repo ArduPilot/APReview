@@ -12,24 +12,35 @@ identity rules cannot silently fail to reach the next run.
 The plan is written by the review run:
 
   {
+    "mode":     "label",                     # label | followup | pr
     "accounts": ["AP-Review", "tridge"],     # optional, newest first; default
                                              # $REVIEW_COMMENT_ACCOUNTS
     "hold":     ["mavlink/mavlink"],         # never post here, only report
     "comments": [
       {"key": "34292", "repo": "ArduPilot/ardupilot", "number": 34292,
+       "head": "0374a23d84",                 # the head this review is of
        "body_file": "bodies/34292.md"}
     ]
   }
 
 Decisions, one per PR, taken by decide() below so they can be tested without a
-network: post a new comment, edit ours in place when it is still the last word,
-or deprecate ours and repost so the author gets a notification. A body that is
-byte-identical to what is already there is left alone, so a re-run of a
-half-finished run does not add noise.
+network. Editing a comment in place sends the author no notification, so an edit
+is only ever right when nothing has changed for them: same head, nobody else
+has spoken since, and not a mode that promises a fresh comment.
+
+  post       we have never commented here
+  edit       ours is the last word AND the head has not moved
+  repost     deprecate ours and post afresh, so the author is notified
+  unchanged  our newest comment already says exactly this
+
+followup mode never edits - it exists to tell an author their code moved - and
+pr mode always leaves a comment, even at a head we have already reviewed,
+because a human asked for that review by name.
 """
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 
@@ -39,22 +50,23 @@ DEPRECATION = ("> **Deprecated — see below for the updated review.**\n\n"
                "<details><summary>Previous review (%s)</summary>\n\n%s\n\n</details>\n")
 
 
+class GhError(Exception):
+    """A GitHub call failed. Never silently an empty thread: a failed comments
+    fetch looked exactly like a PR we had never commented on, which posts a
+    duplicate and leaves the old comment standing."""
+
+
 def gh_json(*args):
-    """gh api ... --paginate, parsed. [] when the call fails."""
+    """gh api ... --paginate, parsed. Raises GhError rather than returning []."""
     out = subprocess.run(["gh", "api", "--paginate", *args],
                          capture_output=True, text=True)
     if out.returncode != 0:
-        return []
+        raise GhError("%s: %s" % (args[0],
+                                  (out.stderr.strip().splitlines() or ["failed"])[0]))
     try:
         data = json.loads(out.stdout or "[]")
-    except json.JSONDecodeError:
-        # --paginate concatenates arrays as separate documents on some versions
-        data = []
-        for chunk in out.stdout.replace("][", "]\x00[").split("\x00"):
-            try:
-                data.extend(json.loads(chunk))
-            except json.JSONDecodeError:
-                pass
+    except json.JSONDecodeError as e:
+        raise GhError("%s: unparseable response (%s)" % (args[0], e))
     return data if isinstance(data, list) else [data]
 
 
@@ -76,14 +88,22 @@ def thread_of(repo, number):
     return items
 
 
-def decide(thread, body, accounts):
+TOLD_HEAD = re.compile(r"head `([0-9a-f]{7,40})`")
+
+
+def told_head(body):
+    """The head our previous comment told the author it had reviewed."""
+    m = TOLD_HEAD.search(body or "")
+    return m.group(1) if m else None
+
+
+def decide(thread, body, accounts, head=None, mode="label"):
     """What to do with `body` given the PR's thread. Pure; see the tests.
 
-    Returns (action, comment_id) where action is one of:
-      post       - we have never commented here
-      unchanged  - our newest comment already says exactly this
-      edit       - ours is still the last word, so update it in place
-      repost     - somebody has spoken since; deprecate ours and post afresh
+    head  the head this review is of, so a moved head can be noticed
+    mode  label | followup | pr - see the module docstring
+
+    Returns (action, comment_id).
     """
     ours = [c for c in thread
             if c["kind"] == "comment" and c["login"] in accounts
@@ -91,11 +111,31 @@ def decide(thread, body, accounts):
     if not ours:
         return "post", None
     mine = max(ours, key=lambda c: c["at"] or "")
-    if mine["body"].strip() == body.strip():
+    same_text = mine["body"].strip() == body.strip()
+
+    # A human asked for this review by name, so it gets a comment even if the
+    # code has not moved and the text is identical.
+    if mode == "pr":
+        return "repost", mine["id"]
+    if same_text:
         return "unchanged", mine["id"]
+    # Follow-up exists to tell an author their code moved. An edit notifies
+    # nobody, so this mode never edits.
+    if mode == "followup":
+        return "repost", mine["id"]
+
     newer = [c for c in thread
              if c["login"] not in accounts and (c["at"] or "") > (mine["at"] or "")]
-    return ("repost" if newer else "edit"), mine["id"]
+    if newer:
+        return "repost", mine["id"]
+
+    # The head moved since we last told them. Editing would update the page and
+    # notify nobody - the one person waiting to hear would never know.
+    told = told_head(mine["body"])
+    if head and told and not (head.startswith(told) or told.startswith(head)):
+        return "repost", mine["id"]
+
+    return "edit", mine["id"]
 
 
 def deprecate_body(original, at):
@@ -109,6 +149,9 @@ def main():
     args = ap.parse_args()
 
     plan = json.load(open(args.plan))
+    mode = plan.get("mode", "label")
+    if mode not in ("label", "followup", "pr"):
+        sys.exit("post-comments: unknown mode %r" % mode)
     accounts = plan.get("accounts") or (
         os.environ.get("REVIEW_COMMENT_ACCOUNTS", "").split())
     if not accounts:
@@ -123,53 +166,87 @@ def main():
     tally = {}
     failed = 0
 
+    def count(name):
+        tally[name] = tally.get(name, 0) + 1
+
     for entry in plan.get("comments", []):
         repo, num = entry["repo"], int(entry["number"])
+        what = "%s#%d" % (repo, num)
         path = entry["body_file"]
         if not os.path.isabs(path):
             path = os.path.join(base, path)
-        body = open(path, encoding="utf-8").read()
-        what = "%s#%d" % (repo, num)
+
+        # One unreadable body must not abandon the rest of the batch: the PRs
+        # after it in the plan are the ones nobody would notice were skipped.
+        try:
+            body = open(path, encoding="utf-8").read()
+        except OSError as e:
+            print("  FAILED  %s: %s" % (what, e))
+            count("failed"); failed += 1
+            continue
 
         # Every comment we post says it is machine-written. A body that does not
         # is a bug in the run, not something to publish and apologise for later.
         if MARKER not in body:
             print("  REFUSED %s: body carries no %r marker" % (what, MARKER))
-            failed += 1
+            count("refused"); failed += 1
             continue
         if repo in hold:
             print("  held    %s (upstream repo, needs a human)" % what)
-            tally["held"] = tally.get("held", 0) + 1
+            count("held")
             continue
 
-        action, cid = decide(thread_of(repo, num), body, accounts)
+        try:
+            thread = thread_of(repo, num)
+        except GhError as e:
+            # Posting now would duplicate a comment we simply could not see.
+            print("  FAILED  %s: cannot read the thread (%s)" % (what, e))
+            count("failed"); failed += 1
+            continue
+
+        action, cid = decide(thread, body, accounts,
+                             head=entry.get("head"), mode=mode)
         if args.dry_run:
             print("  would %-9s %s%s" % (action, what,
                                          "" if cid is None else " (comment %s)" % cid))
-            tally[action] = tally.get(action, 0) + 1
+            count(action)
             continue
 
-        ok = True
         if action == "unchanged":
-            pass
-        elif action == "edit":
-            ok = patch(repo, cid, body)
-        else:
-            if action == "repost":
-                old = [c for c in thread_of(repo, num) if c["id"] == cid]
-                if old and not old[0]["body"].lstrip().startswith(DEPRECATED_PREFIX):
-                    # Only the author may edit a comment. After an account
-                    # switch the old one belongs to somebody else, so this fails
-                    # by design - post the new review and say so.
-                    if not patch(repo, cid, deprecate_body(old[0]["body"], old[0]["at"])):
-                        print("  note    %s: could not deprecate comment %s "
-                              "(not ours to edit)" % (what, cid))
-            ok = post(repo, num, body)
-        print("  %-9s %s" % (action if ok else "FAILED", what))
-        tally[action if ok else "failed"] = tally.get(action if ok else "failed", 0) + 1
-        failed += 0 if ok else 1
+            print("  unchanged %s" % what)
+            count("unchanged")
+            continue
 
-    print("post-comments: " + "  ".join("%s=%d" % kv for kv in sorted(tally.items()))
+        if action == "edit":
+            if patch(repo, cid, body):
+                print("  edited  %s" % what)
+                count("edit")
+                continue
+            # Only the author may edit a comment. After an account switch the
+            # previous one is not ours to touch, so fall back to a fresh comment
+            # rather than leaving the author with nothing at all.
+            print("  note    %s: cannot edit comment %s, posting afresh" % (what, cid))
+            action = "repost"
+
+        # Post first, deprecate second. The other order leaves a PR showing
+        # "Deprecated - see below for the updated review" with nothing below it
+        # when the post fails.
+        if not post(repo, num, body):
+            print("  FAILED  %s: could not post" % what)
+            count("failed"); failed += 1
+            continue
+        posted = "posted" if action == "post" else "reposted"
+        if cid is not None:
+            old = [c for c in thread if c["kind"] == "comment" and c["id"] == cid]
+            if old and not old[0]["body"].lstrip().startswith(DEPRECATED_PREFIX):
+                if not patch(repo, cid, deprecate_body(old[0]["body"], old[0]["at"])):
+                    print("  note    %s: new review posted; could not deprecate "
+                          "comment %s (not ours to edit)" % (what, cid))
+        print("  %-8s %s" % (posted, what))
+        count(posted)
+
+    print("post-comments: " + ("  ".join("%s=%d" % kv for kv in sorted(tally.items()))
+                               or "nothing to do")
           + ("  (dry run)" if args.dry_run else ""))
     return 1 if failed else 0
 

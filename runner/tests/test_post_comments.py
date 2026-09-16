@@ -29,9 +29,28 @@ class Decide(unittest.TestCase):
         self.assertEqual(pc.decide([c(HUMAN, "2026-09-01T00:00:00Z", "hi")],
                                    NEW_BODY, ACCOUNTS), ("post", None))
 
-    def test_ours_is_still_the_last_word_so_edit_in_place(self):
+    def test_same_head_and_nobody_since_so_edit_in_place(self):
+        # an edit notifies nobody, so it is only right when nothing has changed
+        # for the author: same head, and no one has spoken since
         thread = [c(HUMAN, "2026-09-01T00:00:00Z", "hi"),
                   c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+        self.assertEqual(pc.decide(thread, NEW_BODY, ACCOUNTS, head="abcdef1234"),
+                         ("edit", 7))
+
+    def test_the_head_moved_so_repost_even_though_nobody_spoke(self):
+        # the case this tool shipped without: the author force-pushes to address
+        # the review, says nothing, and an edit sends them no notification
+        thread = [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+        self.assertEqual(pc.decide(thread, NEW_BODY, ACCOUNTS, head="999999aaaa"),
+                         ("repost", 7))
+
+    def test_a_short_head_matching_the_told_prefix_is_the_same_head(self):
+        thread = [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+        self.assertEqual(pc.decide(thread, NEW_BODY, ACCOUNTS,
+                                   head="abcdef1234567890"), ("edit", 7))
+
+    def test_without_a_head_the_rules_fall_back_to_who_spoke_last(self):
+        thread = [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
         self.assertEqual(pc.decide(thread, NEW_BODY, ACCOUNTS), ("edit", 7))
 
     def test_somebody_replied_since_so_repost(self):
@@ -81,6 +100,124 @@ class Decide(unittest.TestCase):
         thread = [c(OLD, "2026-09-01T00:00:00Z", AI, cid=5),
                   c(BOT, "2026-09-04T00:00:00Z", AI, cid=8)]
         self.assertEqual(pc.decide(thread, NEW_BODY, ACCOUNTS), ("edit", 8))
+
+
+class Modes(unittest.TestCase):
+    """followup must notify; pr must always leave a comment."""
+
+    def test_followup_never_edits(self):
+        thread = [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+        self.assertEqual(pc.decide(thread, NEW_BODY, ACCOUNTS,
+                                   head="abcdef1234", mode="followup"),
+                         ("repost", 7))
+
+    def test_pr_mode_comments_even_at_an_unchanged_head(self):
+        thread = [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+        self.assertEqual(pc.decide(thread, AI, ACCOUNTS,
+                                   head="abcdef1234", mode="pr"), ("repost", 7))
+
+    def test_label_mode_still_leaves_an_identical_body_alone(self):
+        thread = [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+        self.assertEqual(pc.decide(thread, AI, ACCOUNTS, head="abcdef1234"),
+                         ("unchanged", 7))
+
+
+class ApiFailure(unittest.TestCase):
+    """A failed call must never look like a PR we have not commented on."""
+
+    def test_gh_json_raises_rather_than_returning_empty(self):
+        import subprocess as sp
+        real = pc.subprocess.run
+        pc.subprocess.run = lambda *a, **k: sp.CompletedProcess(
+            a[0], 1, "", "gh: API rate limit exceeded")
+        try:
+            with self.assertRaises(pc.GhError):
+                pc.gh_json("repos/x/y/issues/1/comments")
+        finally:
+            pc.subprocess.run = real
+
+
+class TheWiring(unittest.TestCase):
+    """main()'s ordering and fallbacks - where reading the code is not enough."""
+
+    def setUp(self):
+        self.calls = []
+        self.tmp = __import__("tempfile").TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.saved = (pc.thread_of, pc.patch, pc.post)
+        self.addCleanup(self.restore)
+
+    def restore(self):
+        pc.thread_of, pc.patch, pc.post = self.saved
+
+    def run_plan(self, thread, patch_ok=True, post_ok=True, mode="label", head=None):
+        import json, os, sys
+        d = self.tmp.name
+        open(os.path.join(d, "b.md"), "w").write(NEW_BODY)
+        plan = {"mode": mode, "accounts": ACCOUNTS,
+                "comments": [{"key": "1", "repo": "o/r", "number": 1,
+                              "body_file": "b.md", **({"head": head} if head else {})}]}
+        p = os.path.join(d, "plan.json")
+        json.dump(plan, open(p, "w"))
+        pc.thread_of = lambda *a: thread
+        pc.patch = lambda repo, cid, body: (self.calls.append(("patch", cid)), patch_ok)[1]
+        pc.post = lambda repo, num, body: (self.calls.append(("post", num)), post_ok)[1]
+        argv = sys.argv
+        sys.argv = ["post-comments.py", p]
+        try:
+            return pc.main()
+        finally:
+            sys.argv = argv
+
+    def test_the_new_comment_is_posted_before_the_old_is_deprecated(self):
+        # the other order leaves "Deprecated - see below" with nothing below it
+        thread = [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7),
+                  c(HUMAN, "2026-09-03T00:00:00Z", "ping")]
+        self.run_plan(thread)
+        self.assertEqual([k for k, _ in self.calls], ["post", "patch"])
+
+    def test_a_failed_post_leaves_the_old_comment_alone(self):
+        thread = [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7),
+                  c(HUMAN, "2026-09-03T00:00:00Z", "ping")]
+        rc = self.run_plan(thread, post_ok=False)
+        self.assertEqual([k for k, _ in self.calls], ["post"])
+        self.assertEqual(rc, 1)
+
+    def test_an_edit_we_may_not_make_falls_back_to_posting(self):
+        # the newest AI comment belongs to the account we replaced: the PATCH is
+        # rejected, and without a fallback the author gets nothing at all
+        thread = [c(OLD, "2026-09-02T00:00:00Z", AI, cid=7)]
+        rc = self.run_plan(thread, patch_ok=False, head="abcdef1234")
+        kinds = [k for k, _ in self.calls]
+        self.assertEqual(kinds[0], "patch")      # tried to edit
+        self.assertIn("post", kinds)             # then posted instead
+        self.assertEqual(rc, 0)
+
+    def test_a_thread_we_cannot_read_posts_nothing(self):
+        # a failed fetch used to read as "never commented here", which posts a
+        # duplicate and leaves the previous review standing
+        import json, os, sys
+        d = self.tmp.name
+        open(os.path.join(d, "b.md"), "w").write(NEW_BODY)
+        p = os.path.join(d, "plan2.json")
+        json.dump({"accounts": ACCOUNTS,
+                   "comments": [{"key": "1", "repo": "o/r", "number": 1,
+                                 "body_file": "b.md"}]}, open(p, "w"))
+
+        def boom(*a):
+            raise pc.GhError("comments: 502 Bad Gateway")
+
+        pc.thread_of = boom
+        pc.patch = lambda *a: self.calls.append(("patch", a)) or True
+        pc.post = lambda *a: self.calls.append(("post", a)) or True
+        argv = sys.argv
+        sys.argv = ["post-comments.py", p]
+        try:
+            rc = pc.main()
+        finally:
+            sys.argv = argv
+        self.assertEqual(self.calls, [], "wrote to GitHub despite a failed read")
+        self.assertEqual(rc, 1)
 
 
 class Deprecation(unittest.TestCase):
