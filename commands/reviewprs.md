@@ -1092,6 +1092,24 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
    - **Content:** mirror that PR's findings from the finalised report — verdict, then findings grouped by severity, each with its `file:line` reference and a one-line description, plus suggested fixes where useful. Use the post-Codex findings (refuted ones removed, line refs corrected). If you dropped a finding as a false positive during validation, note that briefly so the author isn't left chasing it. Where there *are* actionable findings, drop purely confirmatory notes from the comment body — they belong in the report as evidence of what was checked, but in a comment they bury the actionable items.
      On an **APPROVE**, open with that plainly ("no blockers") so the author is not left guessing whether the comment is a merge objection.
      For a **clean APPROVE with nothing actionable**, the comment is short and its job is to say what was actually checked, not to pad. Name the specific things verified — the paths traced, the callers audited, whether a cold review was run and what it looked for — so the author can judge how much the clearance is worth and challenge it if a risk was missed. A bare "looks good to me" is worse than nothing, because it claims review effort without evidencing any. Keep it to a few lines.
+   - **Post with the tool, never by hand.** Write a plan and run it:
+
+     ```bash
+     cat > "$SCRATCH/plan.json" <<'JSON'
+     {"hold": ["mavlink/mavlink"],
+      "comments": [{"key": "34292", "repo": "ArduPilot/ardupilot", "number": 34292,
+                    "body_file": "bodies/34292.md"}]}
+     JSON
+     "$HOME/review/bin/post-comments.py" "$SCRATCH/plan.json"   # --dry-run to see the decisions
+     ```
+
+     It decides per PR — post, edit in place, or deprecate-and-repost — by the rules below, which
+     it implements and which `runner/tests/test_post_comments.py` covers. It refuses a body with no
+     AI-generated marker, holds the repos in `hold`, leaves a byte-identical body alone so a re-run
+     adds no noise, and reports `posted/edited/repost/held/failed` counts. Do **not** write a
+     posting script into the scratch directory: that is how the rules drifted per run, and how one
+     of them ended up with the posting account hardcoded in a file nobody reviewed.
+
    - **Which accounts count as ours.** Every test for "have I commented here before" matches a **set**
      of logins, not just the one posting now: `OURS=$(review_comment_accounts)` (from
      `review-env.sh`) prints a jq array built from `$REVIEW_COMMENT_ACCOUNTS`, newest first, and falls
@@ -1162,20 +1180,10 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
        ```
      - **Then post the new review as a fresh comment**, so it lands at the bottom of the thread and generates a notification.
 
-     Determining it — count anything by anyone else newer than your comment, across all three sources, with `--paginate` on each (a review comment or a review counts just as much as an issue comment):
-     ```bash
-     OURS=$(review_comment_accounts)
-     MINE=$(gh api --paginate repos/<owner>/<repo>/issues/<n>/comments \
-       --jq "[.[] | select(.user.login as \$l | $OURS | index(\$l)) | select(.body|test(\"AI-generated\"))] | last")
-     MY_ID=$(jq -r .id <<<"$MINE"); MY_AT=$(jq -r .created_at <<<"$MINE")
-     NEWER=$( { gh api --paginate repos/<owner>/<repo>/issues/<n>/comments \
-                   --jq ".[] | select(.user.login as \$l | $OURS | index(\$l) | not) | .created_at"
-                 gh api --paginate repos/<owner>/<repo>/pulls/<n>/comments \
-                   --jq ".[] | select(.user.login as \$l | $OURS | index(\$l) | not) | .created_at"
-                 gh api --paginate repos/<owner>/<repo>/pulls/<n>/reviews \
-                   --jq ".[] | select(.user.login as \$l | $OURS | index(\$l) | not) | .submitted_at"; } \
-               | while read -r d; do [ "$d" \> "$MY_AT" ] && echo x; done | wc -l)
-     ```
+     Determining it is `post-comments.py`'s job: it counts anything by anyone outside the identity
+     set — issue comment, review comment, or review — newer than our own newest AI comment, and
+     chooses edit or repost accordingly. The rules are written out here because they are policy;
+     the implementation and its tests are in the repo.
      (That loop deliberately avoids awk's whole-record variable — dollar-zero. When this file is invoked
      as a slash command the runner substitutes positional parameters, so a literal dollar-zero written in
      a snippet is rewritten to the command's argument: `awk 'DevCallTopic > t'`, which is still valid awk,
