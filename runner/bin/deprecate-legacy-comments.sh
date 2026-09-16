@@ -78,11 +78,11 @@ for scope in $SCOPES; do
 done | sed 's|https://api.github.com/repos/||' | sort -u > "$CANDS"
 echo "candidates: $(wc -l < "$CANDS")"
 
-done_n=0; skip_n=0; fail_n=0
-while read -r repo num; do
-    [ -n "${repo:-}" ] || continue
-    body=$(gh api --paginate "repos/$repo/issues/$num/comments" 2>/dev/null | python3 - \
-        "$LEGACY_ACCOUNT" "$NEW_ACCOUNT" <<'PY'
+# The comment-picking logic, kept as a string rather than a heredoc: `python3 -`
+# with a heredoc takes the SCRIPT from stdin, so the piped JSON is discarded and
+# json.load sees nothing. That is how this job ran clean against 91 candidates
+# and deprecated none of them.
+PICK=$(cat <<'PY'
 import json, sys
 legacy, new = sys.argv[1], sys.argv[2]
 try:
@@ -107,7 +107,13 @@ new_body = ("> **Deprecated — see below for the updated review.**\n\n"
             % (last_mine["created_at"][:10], last_mine["body"]))
 print(json.dumps({"id": last_mine["id"], "body": new_body}))
 PY
-    )
+)
+
+done_n=0; skip_n=0; fail_n=0
+while read -r repo num; do
+    [ -n "${repo:-}" ] || continue
+    body=$(gh api --paginate "repos/$repo/issues/$num/comments" 2>/dev/null \
+           | python3 -c "$PICK" "$LEGACY_ACCOUNT" "$NEW_ACCOUNT")
     if [ -z "$body" ]; then skip_n=$((skip_n+1)); continue; fi
     cid=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["id"])' <<<"$body")
     if [ "$DRY" -eq 1 ]; then
