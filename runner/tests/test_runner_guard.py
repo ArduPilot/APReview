@@ -71,9 +71,15 @@ if [ "$1 $2" = "auth status" ]; then
 import json,sys
 try: print(json.load(open('$d/.claude.json'))['oauthAccount']['emailAddress'])
 except Exception: print('')" )
-    if [ ! -s "$d/.credentials.json" ] || [ "$(cat "$d/.credentials.json")" = "{}" ]; then
-        printf '{"loggedIn": false}\\n'; exit 0
-    fi
+    # authenticated only with a token, the way the real CLI decides - not merely
+    # a file that exists, and not any non-empty text
+    tok=$(python3 -c "
+import json,sys
+try: d=json.load(open('$d/.credentials.json'))
+except Exception: raise SystemExit
+o=d.get('claudeAiOauth') or d
+print(o.get('accessToken') or '')" 2>/dev/null)
+    if [ -z "$tok" ]; then printf '{\"loggedIn\": false}\\n'; exit 0; fi
     printf '{"loggedIn": true, "email": "%s"}\\n' "$e"
 fi''')
         stub(os.path.join(self.stubs, "gh"), 'exit 0')
@@ -163,6 +169,66 @@ fi''')
         self.assertEqual(out.returncode, 1)
         self.assertIn("status=wrong-claude-account", out.stdout)
         self.assertIn("but the CLI reports", out.stdout)
+
+    def test_credentials_without_a_token_stop_the_run(self):
+        # a file with plausible shape and no token: the real CLI reports
+        # loggedIn false for this, and so must the fixture
+        json.dump({"claudeAiOauth": {"scopes": ["user:inference"]}},
+                  open(os.path.join(self.auth, "claude-ardupilot",
+                                    ".credentials.json"), "w"))
+        self.assertEqual(self.run_mode("followup").returncode, 1)
+
+    def test_unparseable_credentials_stop_the_run(self):
+        open(os.path.join(self.auth, "claude-ardupilot", ".credentials.json"),
+             "w").write("not-json")
+        self.assertEqual(self.run_mode("followup").returncode, 1)
+
+    def test_a_matching_codex_record_is_accepted(self):
+        # without a success case, "reject every record" passes the suite
+        open(os.path.join(self.auth, "codex-personal", "ACCOUNT"), "w").write(
+            "acct-1234\n")
+        out = self.run_mode("followup")
+        # acct-1234 is not a uuid, so the record itself is refused: use the id
+        # shape codex actually reports
+        json.dump({"tokens": {"account_id": "1e60e907-99df-4679-915f-30b3032ba24a"}},
+                  open(os.path.join(self.auth, "codex-personal", "auth.json"), "w"))
+        open(os.path.join(self.auth, "codex-personal", "ACCOUNT"), "w").write(
+            "1e60e907-99df-4679-915f-30b3032ba24a\n")
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout)
+        self.assertIn("1e60e907", out.stdout)
+
+    def test_malformed_cli_output_is_not_authentication(self):
+        stub(os.path.join(self.stubs, "claude"),
+             '[ "$1 $2" = "auth status" ] && echo "not json at all"')
+        self.assertEqual(self.run_mode("followup").returncode, 1)
+
+    def test_an_unknown_identity_with_a_record_stops_the_run(self):
+        # signed in, address not reported, but the directory records one: the
+        # constraint cannot be checked, so it must not be waved through
+        stub(os.path.join(self.stubs, "claude"),
+             '[ "$1 $2" = "auth status" ] && printf \'{"loggedIn": true}\\n\'')
+        d = os.path.join(self.auth, "claude-ardupilot")
+        os.remove(os.path.join(d, ".claude.json"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1)
+        # without this the run still stops, on the comparison below - but tells
+        # the operator the account is wrong rather than unknown
+        self.assertIn("could not", out.stdout)
+
+    def test_an_auth_root_we_do_not_own_stops_the_run(self):
+        # ownership, distinct from permissions: /usr is root-owned and not
+        # other-writable, so only the ownership half of the check can reject it
+        shutil.rmtree(self.auth)
+        os.symlink("/usr", self.auth)
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("not yours", out.stdout + out.stderr)
+
+    def test_an_other_writable_auth_root_stops_the_run(self):
+        os.chmod(self.auth, 0o777)
+        self.addCleanup(os.chmod, self.auth, 0o700)
+        self.assertEqual(self.run_mode("followup").returncode, 1)
 
     def test_empty_claude_credentials_stop_the_run(self):
         # a file that exists and authenticates nobody: real claude reports
