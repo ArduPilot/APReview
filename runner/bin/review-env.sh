@@ -12,17 +12,82 @@ export REVIEW_REPOS="$REVIEW_ROOT/repositories"
 # whatever the box happens to be signed in as.
 export REVIEW_AUTH="$REVIEW_ROOT/auth"
 
-# review_auth <claude|codex> <role> - the account directory for that role, or
-# the default role's, or nothing if neither exists (then the tool's own default
-# applies, which is the box's own ~/.claude or ~/.codex).
-review_auth() {
-    local tool="$1" role="${2:-default}" d
-    for d in "$REVIEW_AUTH/$tool-$role" "$REVIEW_AUTH/$tool-default"; do
-        [ -d "$d" ] && { readlink -f "$d"; return 0; }
-    done
-    return 1
+# read_account_file <path> - the address or id a directory records, validated.
+#
+# Never prints the file's contents unchecked: an ACCOUNT symlinked at a
+# credentials file would otherwise have its token echoed into a run log. One
+# short line, no whitespace, and a plausible address or id, or nothing.
+read_account_file() {
+    local f="$1" v
+    [ -f "$f" ] && [ ! -L "$f" ] || return 1
+    [ "$(wc -c < "$f")" -le 200 ] || return 1
+    v=$(head -1 "$f" | tr -d '\r')
+    # An address or a uuid, nothing else. A token in this file is a mistake, and
+    # echoing it into a run log would turn that mistake into a disclosure.
+    case "$v" in
+        *@*.*) case "$v" in *[!A-Za-z0-9@._+-]*) return 1 ;; esac ;;
+        [0-9a-fA-F]*-[0-9a-fA-F]*-*)
+            case "$v" in *[!0-9a-fA-F-]*) return 1 ;; esac ;;
+        *) return 1 ;;
+    esac
+    printf '%s\n' "$v"
 }
 
+# review_auth <claude|codex> <role> - the account directory for that role.
+#
+#   0  printed a directory
+#   1  no link for this role and none for default: the caller leaves the tool's
+#      own default in place
+#   2  the role is configured but unusable - a dangling link, a target that is
+#      not a directory, or one outside the auth root
+#
+# A role other than `default` never falls back. Falling back is how "the rsync
+# target never spends the project's subscription" would quietly stop being true:
+# the guarantee used to be a hardcoded address, and a symlink that is missing or
+# broken must fail loudly rather than silently becoming default.
+review_auth() {
+    local tool="$1" role="${2:-default}" link target root
+    root=$(readlink -f "$REVIEW_AUTH" 2>/dev/null) || root="$REVIEW_AUTH"
+    link="$REVIEW_AUTH/$tool-$role"
+    if [ ! -e "$link" ] && [ -L "$link" ]; then
+        echo "review_auth: $tool-$role is a dangling symlink" >&2
+        return 2
+    fi
+    if [ ! -e "$link" ]; then
+        [ "$role" = "default" ] || {
+            echo "review_auth: no account configured for $tool-$role" >&2
+            return 2
+        }
+        return 1
+    fi
+    target=$(readlink -f "$link") || return 2
+    [ -d "$target" ] || {
+        echo "review_auth: $tool-$role does not resolve to a directory" >&2
+        return 2
+    }
+    # Containment: an account directory lives under the auth root, or is the
+    # tool's own default directory, which auth/<tool>-<name> may symlink to.
+    case "$target/" in
+        "$root"/*) ;;
+        "$(readlink -f "$HOME/.$tool" 2>/dev/null)"/) ;;
+        *) echo "review_auth: $tool-$role resolves outside $REVIEW_AUTH" >&2
+           return 2 ;;
+    esac
+    # Credentials must not be reachable by other users. Enforced for the
+    # directories we create under auth/; the tool's own ~/.claude or ~/.codex is
+    # made by the tool - often group- and world-readable - and is not ours to
+    # refuse, so that is reported and allowed. Group access is ignored either
+    # way: this box uses private per-user groups, so enforcing it would fail on
+    # every directory made with the default umask while protecting nobody.
+    if [ -n "$(find "$target" -maxdepth 0 -perm /o+rwx 2>/dev/null)" ]; then
+        case "$target/" in
+            "$root"/*) echo "review_auth: $target is accessible by other users" >&2
+                       return 2 ;;
+            *) echo "review_auth: note - $target is accessible by other users" >&2 ;;
+        esac
+    fi
+    printf '%s\n' "$target"
+}
 
 # Isolated git config: no https->ssh rewrite, so HTTPS clones work without a key.
 export GIT_CONFIG_GLOBAL="$REVIEW_ROOT/etc/gitconfig"

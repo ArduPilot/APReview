@@ -128,8 +128,22 @@ across and the next run picks it up; `use claude default ardupilot` moves it bac
 Nothing is edited and no run is interrupted.
 
 A directory may record the address it is meant to hold, in a file called
-`ACCOUNT`. A run checks it and refuses to start if the directory has been signed
-in as somebody else — the one failure that otherwise looks like success.
+`ACCOUNT` — an address or an id, nothing else, so a token put there by mistake is
+refused rather than echoed into a run log. A run refuses to start if:
+
+- the role has no link, and it is not `default` (a missing `claude-rsync` must
+  not quietly become the project's subscription);
+- the link dangles, resolves outside `auth/`, or points somewhere other users
+  can read;
+- the directory holds no credentials;
+- its `ACCOUNT` disagrees with what it is signed in as;
+- the directory's own record and the CLI disagree about the address — two local
+  records agreeing proves nothing about which subscription pays;
+- `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is set in the environment,
+  because either would override the directory the role selected.
+
+Both tools are checked, not just Claude: a missing `auth.json` used to surface
+only when the validation pool failed, well into a run.
 
 Two things worth knowing. An account directory keeps its address in
 `<dir>/.claude.json`, but only if it was created by `claude auth login` under
