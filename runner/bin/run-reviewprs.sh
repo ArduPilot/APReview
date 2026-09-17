@@ -90,6 +90,8 @@ select_account() {           # tool VAR -> exports VAR, or unsets it
         export "$var=$d"
     fi
 }
+# Belt and braces: select_account unsets on the path where the role resolves to
+# the tool's own directory, and this clears anything inherited before it runs.
 unset CLAUDE_CONFIG_DIR CODEX_HOME 2>/dev/null || true
 select_account claude CLAUDE_CONFIG_DIR
 select_account codex  CODEX_HOME
@@ -232,11 +234,20 @@ fi
 ACCOUNT="$CLAUDE_CLI_ACCOUNT"
 [ "$ACCOUNT" = "-" ] && ACCOUNT="$CLAUDE_REC_ACCOUNT"
 [ "$ACCOUNT" = "-" ] && ACCOUNT=""
-if [ -f "$CLAUDE_DIR/ACCOUNT" ] && [ -n "$ACCOUNT" ]; then
+# Existence and validity are separate questions. `-f` is false for a dangling
+# symlink and for a directory, so testing it alone let a constraint disappear
+# because reading it failed - the reassuring half of a broken setup.
+if [ -e "$CLAUDE_DIR/ACCOUNT" ] || [ -L "$CLAUDE_DIR/ACCOUNT" ]; then
     WANT=$(read_account_file "$CLAUDE_DIR/ACCOUNT") || {
         echo "FATAL: $CLAUDE_DIR/ACCOUNT is not a plain account record"
         echo "finish=$(date -Is) status=wrong-claude-account"
         exit 1; }
+    if [ -z "$ACCOUNT" ]; then
+        echo "FATAL: $CLAUDE_DIR records $WANT but the signed-in address could not"
+        echo "       be determined, so the record cannot be checked"
+        echo "finish=$(date -Is) status=wrong-claude-account"
+        exit 1
+    fi
     if [ "$ACCOUNT" != "$WANT" ]; then
         echo "FATAL: $CLAUDE_DIR records $WANT but is signed in as $ACCOUNT"
         echo "       either sign it back in, or update its ACCOUNT file"
@@ -265,7 +276,7 @@ if [ -z "$CODEX_ACCOUNT" ]; then
     echo "finish=$(date -Is) status=wrong-codex-account"
     exit 1
 fi
-if [ -f "$CODEX_DIR/ACCOUNT" ]; then
+if [ -e "$CODEX_DIR/ACCOUNT" ] || [ -L "$CODEX_DIR/ACCOUNT" ]; then
     WANT=$(read_account_file "$CODEX_DIR/ACCOUNT") || {
         echo "FATAL: $CODEX_DIR/ACCOUNT is not a plain account record"
         echo "finish=$(date -Is) status=wrong-codex-account"

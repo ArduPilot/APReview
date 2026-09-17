@@ -45,29 +45,33 @@ account_of() {   # tool dir -> the account signed in there, or empty
         claude) python3 - "$dir" <<'PYC' 2>/dev/null
 import json, os, subprocess, sys
 d = sys.argv[1]
-# <dir>/.claude.json carries the address for a directory created by
-# `claude auth login` under CLAUDE_CONFIG_DIR. The tool's own default dir keeps
-# it elsewhere, so fall back to asking with the variable unset.
-try:
-    acct = json.load(open(os.path.join(d, ".claude.json"))).get("oauthAccount") or {}
-    if acct.get("emailAddress"):
-        print(acct["emailAddress"]); raise SystemExit
-except SystemExit:
-    raise
-except Exception:
-    pass
+# Ask the CLI whether this directory authenticates anyone. A .claude.json left
+# behind by a past login names an account the directory can no longer use, and
+# reporting it as "signed in as" is the reassuring half of a broken setup.
 env = dict(os.environ)
 if os.path.realpath(d) == os.path.realpath(os.path.expanduser("~/.claude")):
     env.pop("CLAUDE_CONFIG_DIR", None)
 else:
     env["CLAUDE_CONFIG_DIR"] = d
+logged, email = False, ""
 try:
     out = subprocess.run(["claude", "auth", "status", "--json"],
                          capture_output=True, text=True, env=env)
     got = json.loads(out.stdout)
-    print(got.get("email") or ("signed in" if got.get("loggedIn") else ""))
+    logged, email = bool(got.get("loggedIn")), got.get("email") or ""
 except Exception:
     pass
+if not logged:
+    raise SystemExit
+if not email:
+    # signed in, but this directory only knows its own address when a login
+    # created it under CLAUDE_CONFIG_DIR
+    try:
+        acct = json.load(open(os.path.join(d, ".claude.json"))).get("oauthAccount") or {}
+        email = acct.get("emailAddress") or ""
+    except Exception:
+        pass
+print(email or "signed in")
 PYC
                 ;;
         codex)  python3 - "$dir/auth.json" <<'PY' 2>/dev/null
@@ -98,10 +102,7 @@ status)
             note=""
             # Credentials, not metadata: a directory can carry an address it was
             # once signed in as and hold no credentials at all.
-            case "$tool" in
-                claude) [ -s "$dir/.credentials.json" ] || note="  NO CREDENTIALS" ;;
-                codex)  [ -s "$dir/auth.json" ] || note="  NO CREDENTIALS" ;;
-            esac
+            [ -n "$got" ] || note="  NOT SIGNED IN"
             if [ -z "$note" ] && [ -n "$want" ] && [ -n "$got" ]; then
                 # An email and a uuid are both identities but not the same one;
                 # comparing them reported MISMATCH on a correct setup.
@@ -129,6 +130,16 @@ use)
     dir="$AUTH/$tool-$acct"
     link="$AUTH/$tool-$role"
     [ -d "$dir" ] || { echo "no such account directory: $dir"; exit 1; }
+    # `use claude default default` would point the role at itself: exit 0, and a
+    # role nothing can resolve. The account must be a real account directory,
+    # not another role link.
+    if [ "$acct" = "$role" ] || [ -L "$dir" ] && [ "$(readlink -f "$dir")" = "$(readlink -f "$link")" ]; then
+        echo "$tool-$acct is the role itself - that would leave $tool-$role unresolvable"
+        exit 1
+    fi
+    case "$acct" in
+        default|rsync) echo "$tool-$acct is a role name, not an account"; exit 1 ;;
+    esac
     # `ln -sfn` into a path that is a real directory creates the link INSIDE it
     # and reports success, leaving the role pointing where it always did.
     if [ -e "$link" ] && [ ! -L "$link" ]; then
@@ -157,8 +168,10 @@ login)
                 echo "  echo <address> > $dir/ACCOUNT" ;;
         codex)  echo "Run this, then answer in a browser:"
                 echo "  CODEX_HOME=$dir codex login"
-                echo "and record the account:"
-                echo "  echo <address> > $dir/ACCOUNT" ;;
+                echo "then record the account id it reports - not an address, which"
+                echo "is what the runner compares against:"
+                echo "  review-auth.sh status            # shows the id"
+                echo "  echo <account-id> > $dir/ACCOUNT" ;;
     esac
     ;;
 *)  sed -n '3,12p' "$0" | sed 's/^# \?//'; exit 2 ;;

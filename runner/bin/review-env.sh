@@ -48,6 +48,13 @@ read_account_file() {
 review_auth() {
     local tool="$1" role="${2:-default}" link target root
     root=$(readlink -f "$REVIEW_AUTH" 2>/dev/null) || root="$REVIEW_AUTH"
+    # The root holds the role links. Private leaves protect nothing if anyone
+    # can repoint the symlink that chooses between them.
+    if [ -d "$root" ] && [ -n "$(find "$root" -maxdepth 0 \
+                                      \( -perm /o+w -o ! -user "$(id -u)" \) 2>/dev/null)" ]; then
+        echo "review_auth: $root is writable by other users or not yours" >&2
+        return 2
+    fi
     link="$REVIEW_AUTH/$tool-$role"
     if [ ! -e "$link" ] && [ -L "$link" ]; then
         echo "review_auth: $tool-$role is a dangling symlink" >&2

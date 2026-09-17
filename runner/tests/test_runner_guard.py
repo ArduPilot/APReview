@@ -42,7 +42,8 @@ class Guard(unittest.TestCase):
             d = os.path.join(self.auth, name)
             os.makedirs(d, mode=0o700)
             json.dump(SETTINGS, open(os.path.join(d, "settings.json"), "w"))
-            open(os.path.join(d, ".credentials.json"), "w").write("{}")
+            json.dump({"claudeAiOauth": {"accessToken": "stub-token"}},
+                      open(os.path.join(d, ".credentials.json"), "w"))
             json.dump({"oauthAccount": {"emailAddress": email}},
                       open(os.path.join(d, ".claude.json"), "w"))
             open(os.path.join(d, "ACCOUNT"), "w").write(email + "\n")
@@ -70,8 +71,10 @@ if [ "$1 $2" = "auth status" ]; then
 import json,sys
 try: print(json.load(open('$d/.claude.json'))['oauthAccount']['emailAddress'])
 except Exception: print('')" )
-    [ -s "$d/.credentials.json" ] || { echo '{\\"loggedIn\\": false}'; exit 0; }
-    echo "{\\"loggedIn\\": true, \\"email\\": \\"$e\\"}"
+    if [ ! -s "$d/.credentials.json" ] || [ "$(cat "$d/.credentials.json")" = "{}" ]; then
+        printf '{"loggedIn": false}\\n'; exit 0
+    fi
+    printf '{"loggedIn": true, "email": "%s"}\\n' "$e"
 fi''')
         stub(os.path.join(self.stubs, "gh"), 'exit 0')
         stub(os.path.join(self.stubs, "codex"), 'exit 0')
@@ -83,10 +86,13 @@ fi''')
         os.symlink(target, p)
 
     def run_mode(self, mode, **env):
-        e = dict(os.environ, HOME=self.home,
-                 PATH=self.stubs + os.pathsep + os.environ["PATH"])
-        e.pop("CLAUDE_CONFIG_DIR", None)
-        e.pop("CODEX_HOME", None)
+        # Built from nothing rather than inherited: BASH_ENV in an interactive
+        # shell rewrote PATH and ran the real claude instead of the stub, so
+        # these tests passed in CI and failed on a developer's machine.
+        e = {"HOME": self.home,
+             "PATH": self.stubs + ":/usr/bin:/bin",
+             "SHELL": "/bin/bash",
+             "LANG": "C.UTF-8"}
         e.update(env)
         return subprocess.run([os.path.join(BIN, "run-reviewprs.sh"), mode, "--dry-run"],
                               capture_output=True, text=True, env=e)
@@ -109,12 +115,21 @@ fi''')
         self.assertIn("someone@example.com", out.stdout)
 
     def test_an_inherited_config_dir_does_not_decide_the_account(self):
-        # an inherited value used to survive whenever the role resolved to the
-        # tool's own directory, and then chose the account
         other = os.path.join(self.auth, "claude-personal")
         out = self.run_mode("followup", CLAUDE_CONFIG_DIR=other)
         self.assertIn("admin@example.org", out.stdout)
         self.assertNotIn("someone@example.com", out.stdout)
+
+    def test_an_inherited_config_dir_cannot_fill_an_unset_role(self):
+        # the hole was here: with no link for the role, selection leaves the
+        # tool's own default in place - and an inherited value then decided the
+        # account, which the previous test could not see because the role
+        # resolved to a directory that overwrote it anyway
+        os.remove(os.path.join(self.auth, "claude-default"))
+        other = os.path.join(self.auth, "claude-personal")
+        out = self.run_mode("followup", CLAUDE_CONFIG_DIR=other)
+        self.assertNotIn("someone@example.com", out.stdout)
+        self.assertEqual(out.returncode, 1)     # the fake home has no ~/.claude
 
     def test_switching_the_role_switches_the_account(self):
         self.link("claude-default", "claude-personal")
@@ -149,6 +164,15 @@ fi''')
         self.assertIn("status=wrong-claude-account", out.stdout)
         self.assertIn("but the CLI reports", out.stdout)
 
+    def test_empty_claude_credentials_stop_the_run(self):
+        # a file that exists and authenticates nobody: real claude reports
+        # loggedIn false for this, so presence alone must not satisfy the guard
+        open(os.path.join(self.auth, "claude-ardupilot", ".credentials.json"),
+             "w").write("{}")
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1)
+        self.assertIn("not signed in", out.stdout)
+
     def test_missing_claude_credentials_stop_the_run(self):
         os.remove(os.path.join(self.auth, "claude-ardupilot", ".credentials.json"))
         out = self.run_mode("followup")
@@ -162,10 +186,63 @@ fi''')
         self.assertIn("status=wrong-codex-account", out.stdout)
 
     def test_a_codex_account_file_that_disagrees_stops_the_run(self):
-        open(os.path.join(self.auth, "codex-personal", "ACCOUNT"), "w").write("acct-9999\n")
+        # a uuid, because that is what codex reports and what read_account_file
+        # accepts - an "acct-9999" here is rejected as a malformed record and
+        # never reaches the comparison
+        open(os.path.join(self.auth, "codex-personal", "ACCOUNT"), "w").write(
+            "99999999-9999-4999-9999-999999999999\n")
         out = self.run_mode("followup")
         self.assertEqual(out.returncode, 1)
         self.assertIn("status=wrong-codex-account", out.stdout)
+
+    def test_an_api_key_in_the_environment_stops_the_run(self):
+        out = self.run_mode("followup", ANTHROPIC_API_KEY="sk-ant-api03-x")
+        self.assertEqual(out.returncode, 1)
+
+    def test_a_dangling_account_record_stops_the_run(self):
+        # an identity constraint must not disappear because reading it failed
+        d = os.path.join(self.auth, "claude-ardupilot")
+        os.remove(os.path.join(d, "ACCOUNT"))
+        os.symlink(os.path.join(d, "gone"), os.path.join(d, "ACCOUNT"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1)
+
+    def test_an_account_record_that_is_a_directory_stops_the_run(self):
+        d = os.path.join(self.auth, "codex-personal")
+        os.makedirs(os.path.join(d, "ACCOUNT"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1)
+
+    def test_an_over_long_account_record_stops_the_run(self):
+        d = os.path.join(self.auth, "claude-ardupilot")
+        open(os.path.join(d, "ACCOUNT"), "w").write("a@b.co" + "x" * 500 + "\n")
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1)
+
+    def test_each_role_gets_its_own_codex_account(self):
+        # codex was pinned to one account regardless of role
+        other = os.path.join(self.auth, "codex-ardupilot")
+        os.makedirs(other, mode=0o700)
+        json.dump({"tokens": {"account_id": "acct-ardupilot"}},
+                  open(os.path.join(other, "auth.json"), "w"))
+        self.link("codex-default", "codex-ardupilot")
+        self.assertIn("acct-ardupilot", self.run_mode("followup").stdout)
+        self.assertIn("acct-1234", self.run_mode("rsync").stdout)
+
+    def test_a_writable_auth_root_stops_the_run(self):
+        os.chmod(self.auth, 0o777)
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1)
+
+    def test_the_tools_own_directory_as_a_symlink_is_still_pinned(self):
+        # if ~/.claude is itself a symlink it can be repointed under a run, so
+        # the variable must be set to the resolved path rather than left unset
+        own = os.path.join(self.home, ".claude")
+        os.symlink(os.path.join(self.auth, "claude-ardupilot"), own)
+        self.link("claude-default", "claude-ardupilot")
+        out = self.run_mode("followup")
+        self.assertIn("config " + os.path.join(self.auth, "claude-ardupilot"),
+                      out.stdout)
 
     def test_a_world_readable_account_directory_stops_the_run(self):
         os.chmod(os.path.join(self.auth, "claude-ardupilot"), 0o755)

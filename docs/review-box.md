@@ -140,7 +140,16 @@ refused rather than echoed into a run log. A run refuses to start if:
 - the directory's own record and the CLI disagree about the address — two local
   records agreeing proves nothing about which subscription pays;
 - `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is set in the environment,
-  because either would override the directory the role selected.
+  because either would override the directory the role selected;
+- `auth/` itself is writable by other users, or not yours — private account
+  directories protect nothing if anyone can repoint the links that choose
+  between them;
+- an `ACCOUNT` exists but cannot be read, or the signed-in address cannot be
+  determined to check it against. A constraint must not disappear because
+  reading it failed.
+
+Record the account **id** for Codex and the **address** for Claude — that is what
+each tool reports, and the runner compares like with like.
 
 Both tools are checked, not just Claude: a missing `auth.json` used to surface
 only when the validation pool failed, well into a run.
