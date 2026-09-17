@@ -176,9 +176,14 @@ lost the part that would have failed.
 
 Codex is asked the same question a different way. `auth.json` names the account
 that signed in; `config.toml` decides where the request goes and which key pays
-for it, so a `model_provider` other than `openai` - or an `openai` redefined with
-its own `base_url` or `env_key` - sends somebody else's key somewhere else while
-`auth.json` goes on naming the subscription. Both are checked.
+for it. Enumerating the settings that redirect it is a losing game -
+`chatgpt_base_url` sent the account's own OAuth token to another host with
+`model_provider` still `openai` - so the check is the other way round: any URL in
+`config.toml` whose host is not OpenAI's, any `env_key`/`api_key`/header
+override, any `model_provider` that is not `openai`, anywhere in the file, and
+the run refuses naming the setting. A `config.toml` that cannot be parsed is
+refused too; an absent one is fine. If a legitimate entry ever trips this - an
+MCP server over http, say - the refusal names the key it objected to.
 
 Record the account **id** for Codex and the **address** for Claude — that is what
 each tool reports, and the runner compares like with like.
@@ -186,8 +191,9 @@ each tool reports, and the runner compares like with like.
 Both tools are checked, not just Claude: a missing `auth.json` used to surface
 only when the validation pool failed, well into a run.
 
-`status` clears the same variables before it asks, and makes exactly the
-judgements the runner makes, so a role that reads as
+`status` clears the same variables before it asks, and then makes exactly the
+judgements the runner makes - including a variable it could not clear, a partial
+answer from the CLI, and a redirected Codex config - so a role that reads as
 healthy there is one a run will accept. That includes the fallback below: a
 default role with no link is reported as the tool's own account, with the same
 checks applied, rather than as "not set".

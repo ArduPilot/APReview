@@ -257,6 +257,49 @@ fi''')
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("other-provider", out.stdout)
 
+    def codex_config(self, body):
+        d = os.path.join(self.auth, "codex-personal")
+        open(os.path.join(d, "config.toml"), "w").write(body)
+
+    def test_a_redirected_chatgpt_endpoint_stops_the_run(self):
+        # model_provider stays "openai" and the account's own OAuth token is
+        # sent to the configured host
+        self.codex_config('chatgpt_base_url = "http://127.0.0.1:1/backend-api"\n')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("other-provider", out.stdout)
+
+    def test_a_provider_key_variable_stops_the_run(self):
+        self.codex_config('[model_providers.openai]\nenv_key = "PROBE_KEY"\n')
+        self.assertEqual(self.run_mode("followup").returncode, 1)
+
+    def test_a_provider_that_waives_openai_auth_stops_the_run(self):
+        self.codex_config('[model_providers.openai]\n'
+                          'requires_openai_auth = false\n')
+        self.assertEqual(self.run_mode("followup").returncode, 1)
+
+    def test_a_provider_named_in_a_profile_stops_the_run(self):
+        self.codex_config('[profiles.p]\nmodel_provider = "probe"\n')
+        self.assertEqual(self.run_mode("followup").returncode, 1)
+
+    def test_a_config_that_cannot_be_parsed_stops_the_run(self):
+        # an absent config is not a redirected one; one we cannot read is not
+        # one we can vouch for
+        self.codex_config('this is not toml [[[\n')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("unreadable-config", out.stdout)
+
+    def test_an_account_directory_whose_path_has_a_space(self):
+        # six fields split on whitespace read part of the path as the count
+        d = os.path.join(self.auth, "claude with space")
+        shutil.copytree(os.path.join(self.auth, "claude-ardupilot"), d)
+        os.remove(os.path.join(self.auth, "claude-default"))
+        os.symlink("claude with space", os.path.join(self.auth, "claude-default"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("admin@example.org", out.stdout)
+
     def test_a_redefined_openai_provider_stops_the_run(self):
         d = os.path.join(self.auth, "codex-personal")
         open(os.path.join(d, "config.toml"), "w").write(
@@ -271,6 +314,16 @@ fi''')
             '[projects."/home/x"]\ntrust_level = "trusted"\n')
         out = self.run_mode("followup")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_an_unreadable_account_record_says_which_problem_it_is(self):
+        # it stops either way - on the record, or on the comparison below it -
+        # but only one of those tells the operator the file is the problem
+        rec = os.path.join(self.auth, "claude-ardupilot", "ACCOUNT")
+        os.remove(rec)
+        os.mkdir(rec)
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("not a plain account record", out.stdout)
 
     def test_a_codex_api_key_stops_the_run(self):
         # an account id left in auth.json from an earlier subscription login
