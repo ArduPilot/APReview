@@ -65,17 +65,36 @@ ROLE=default
 case "$MODE" in
     rsync|RsyncProject/rsync\#*) ROLE=rsync ;;
 esac
-# Setting CLAUDE_CONFIG_DIR to the tool's own default directory is not a no-op:
-# `claude auth status` then reports loggedIn but no email, because the address
-# lives in a record the CLI only consults when the variable is unset. Leave it
-# alone in that case and the account is reported normally.
-if d=$(review_auth claude "$ROLE") && [ "$d" != "$(readlink -f "$HOME/.claude")" ]; then
-    export CLAUDE_CONFIG_DIR="$d"
-fi
-if d=$(review_auth codex "$ROLE") && [ "$d" != "$(readlink -f "$HOME/.codex")" ]; then
-    export CODEX_HOME="$d"
-fi
+# Every path sets or unsets both variables. Leaving an inherited value in place
+# was a hole: a CLAUDE_CONFIG_DIR already in the environment survived whenever the
+# role resolved to the tool's own directory, and then decided the account.
+select_account() {           # tool VAR -> exports VAR, or unsets it
+    local tool="$1" var="$2" d rc
+    d=$(review_auth "$tool" "$ROLE"); rc=$?
+    case "$rc" in
+        2) echo "FATAL: cannot use the $tool account for role $ROLE"
+           echo "       review-auth.sh status   shows what each role resolves to"
+           echo "finish=$(date -Is) status=wrong-claude-account"
+           exit 1 ;;
+        1) unset "$var"; return 0 ;;                 # the tool's own default
+    esac
+    # Setting the variable to the tool's own directory is not a no-op: `claude
+    # auth status` then reports loggedIn with no address, because that record
+    # only exists in directories created by `claude auth login` under it. Leave
+    # it unset in that case - but only when the path is genuinely that directory
+    # and not a symlink that could be repointed underneath us.
+    local own="$HOME/.$tool"
+    if [ "$d" = "$(readlink -f "$own" 2>/dev/null)" ] && [ ! -L "$own" ]; then
+        unset "$var"
+    else
+        export "$var=$d"
+    fi
+}
+unset CLAUDE_CONFIG_DIR CODEX_HOME 2>/dev/null || true
+select_account claude CLAUDE_CONFIG_DIR
+select_account codex  CODEX_HOME
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
 
 STAMP=$(date +%Y%m%d_%H%M%S)
 # The mode can be a PR reference - ArduPilot/ardupilot#34206 from review-now.sh -
@@ -166,47 +185,58 @@ cd "$REVIEW_ROOT/work" || { echo "FATAL: no $REVIEW_ROOT/work"; exit 1; }
 
 clear_stale_oauth_lock "$CLAUDE_DIR"
 
-# Which account is this, and is it the one that directory is meant to hold? A run
-# on the wrong account is the failure that matters: it works, and quietly spends
-# the wrong subscription. Which role uses which account is the operator's choice,
-# expressed by the auth/ symlinks - so the check here is not "must be this
-# address" but "this directory is signed in, as the account it records".
-# Signed in at all? That answer is reliable either way. The address is not: when
-# CLAUDE_CONFIG_DIR is set it comes from <dir>/.claude.json, which only a
-# directory created by `claude auth login` under that variable carries. So take
-# whichever source has it, and treat "signed in, address unknown" as fine.
-LOGGED_IN=$(claude auth status --json 2>/dev/null | python3 -c '
-import json,sys
+# An environment token overrides the config directory entirely, so the account we
+# selected would not be the account that pays. Refuse rather than guess.
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    echo "FATAL: CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set; it would"
+    echo "       override the account directory chosen for role $ROLE"
+    echo "finish=$(date -Is) status=wrong-claude-account"
+    exit 1
+fi
+
+# Which account is this? Two sources: the directory's own record, and the CLI.
+# Where both answer they must agree - matching one local record against another
+# does not establish which subscription pays, and a disagreement is exactly the
+# case worth stopping for.
+read -r CLAUDE_LOGGED CLAUDE_CLI_ACCOUNT <<EOS
+$(claude auth status --json 2>/dev/null | python3 -c '
+import json, sys
 try:
-    print("yes" if json.load(sys.stdin).get("loggedIn") else "")
+    d = json.load(sys.stdin)
 except Exception:
-    pass
-' 2>/dev/null)
-ACCOUNT=$(python3 - "$CLAUDE_DIR" <<'PYA' 2>/dev/null
-import json, os, subprocess, sys
-d = sys.argv[1]
+    print("no -"); raise SystemExit
+print(("yes" if d.get("loggedIn") else "no"), (d.get("email") or "-"))
+' 2>/dev/null || echo "no -")
+EOS
+CLAUDE_REC_ACCOUNT=$(python3 - "$CLAUDE_DIR" <<'PYA' 2>/dev/null
+import json, os, sys
 try:
-    acct = json.load(open(os.path.join(d, ".claude.json"))).get("oauthAccount") or {}
-    if acct.get("emailAddress"):
-        print(acct["emailAddress"]); raise SystemExit
+    acct = json.load(open(os.path.join(sys.argv[1], ".claude.json"))).get("oauthAccount") or {}
+    print(acct.get("emailAddress") or "-")
 except Exception:
-    pass
-try:
-    out = subprocess.run(["claude", "auth", "status", "--json"],
-                         capture_output=True, text=True)
-    print(json.loads(out.stdout).get("email") or "")
-except Exception:
-    pass
+    print("-")
 PYA
 )
-if [ -z "$LOGGED_IN" ]; then
-    echo "FATAL: $CLAUDE_DIR is not signed in (role=$ROLE)"
+if [ "$CLAUDE_LOGGED" != "yes" ]; then
+    echo "FATAL: $CLAUDE_DIR is not signed in (role $ROLE)"
     echo "       review-auth.sh login claude <account>   says how"
     echo "finish=$(date -Is) status=wrong-claude-account"
     exit 1
 fi
+if [ "$CLAUDE_CLI_ACCOUNT" != "-" ] && [ "$CLAUDE_REC_ACCOUNT" != "-" ] \
+   && [ "$CLAUDE_CLI_ACCOUNT" != "$CLAUDE_REC_ACCOUNT" ]; then
+    echo "FATAL: $CLAUDE_DIR records $CLAUDE_REC_ACCOUNT but the CLI reports $CLAUDE_CLI_ACCOUNT"
+    echo "finish=$(date -Is) status=wrong-claude-account"
+    exit 1
+fi
+ACCOUNT="$CLAUDE_CLI_ACCOUNT"
+[ "$ACCOUNT" = "-" ] && ACCOUNT="$CLAUDE_REC_ACCOUNT"
+[ "$ACCOUNT" = "-" ] && ACCOUNT=""
 if [ -f "$CLAUDE_DIR/ACCOUNT" ] && [ -n "$ACCOUNT" ]; then
-    WANT=$(cat "$CLAUDE_DIR/ACCOUNT")
+    WANT=$(read_account_file "$CLAUDE_DIR/ACCOUNT") || {
+        echo "FATAL: $CLAUDE_DIR/ACCOUNT is not a plain account record"
+        echo "finish=$(date -Is) status=wrong-claude-account"
+        exit 1; }
     if [ "$ACCOUNT" != "$WANT" ]; then
         echo "FATAL: $CLAUDE_DIR records $WANT but is signed in as $ACCOUNT"
         echo "       either sign it back in, or update its ACCOUNT file"
@@ -215,9 +245,38 @@ if [ -f "$CLAUDE_DIR/ACCOUNT" ] && [ -n "$ACCOUNT" ]; then
     fi
 fi
 echo "claude account: ${ACCOUNT:-signed in, address not reported}  (role $ROLE, config $CLAUDE_DIR)"
-if [ -n "${CODEX_HOME:-}" ]; then
-    echo "codex home:     $CODEX_HOME"
+
+# Codex had no check at all: a missing or malformed auth.json only surfaced when
+# the validation pool failed, well into the run.
+CODEX_ACCOUNT=$(python3 - "$CODEX_DIR/auth.json" <<'PYB' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    raise SystemExit
+tok = d.get("tokens") or {}
+print(tok.get("account_id") or d.get("account_id")
+      or ("api-key" if d.get("OPENAI_API_KEY") else ""))
+PYB
+)
+if [ -z "$CODEX_ACCOUNT" ]; then
+    echo "FATAL: $CODEX_DIR has no usable codex credentials (role $ROLE)"
+    echo "       review-auth.sh login codex <account>   says how"
+    echo "finish=$(date -Is) status=wrong-codex-account"
+    exit 1
 fi
+if [ -f "$CODEX_DIR/ACCOUNT" ]; then
+    WANT=$(read_account_file "$CODEX_DIR/ACCOUNT") || {
+        echo "FATAL: $CODEX_DIR/ACCOUNT is not a plain account record"
+        echo "finish=$(date -Is) status=wrong-codex-account"
+        exit 1; }
+    if [ "$CODEX_ACCOUNT" != "$WANT" ]; then
+        echo "FATAL: $CODEX_DIR records $WANT but is signed in as $CODEX_ACCOUNT"
+        echo "finish=$(date -Is) status=wrong-codex-account"
+        exit 1
+    fi
+fi
+echo "codex account:  $CODEX_ACCOUNT  (role $ROLE, home $CODEX_DIR)"
 
 # Pre-flight: refuse to run if the permission rules are not in force. This box
 # runs unattended, so a settings.json that has lost its deny list must stop the

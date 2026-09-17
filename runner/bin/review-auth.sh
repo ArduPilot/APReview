@@ -29,7 +29,11 @@
 # ACCOUNT. run-reviewprs.sh checks it, so a directory that gets signed in as the
 # wrong account is caught before a run spends the wrong subscription.
 set -u
-. "$HOME/review/bin/review-env.sh" 2>/dev/null || { echo "no review environment"; exit 1; }
+# Source the sibling, not a deployed path: this has to work from any checkout,
+# not only from ~/review/bin.
+_self=$(readlink -f "${BASH_SOURCE[0]:-$0}")
+. "$(dirname "$_self")/review-env.sh" 2>/dev/null || { echo "no review environment"; exit 1; }
+unset _self
 
 AUTH="$REVIEW_AUTH"
 ROLES="default rsync"
@@ -88,11 +92,24 @@ status)
             link="$AUTH/$tool-$role"
             [ -e "$link" ] || { printf '%-16s %-26s %s\n' "$tool-$role" "-" "(not set)"; continue; }
             target=$(basename "$(readlink -f "$link")")
-            want=""; [ -f "$link/ACCOUNT" ] && want=$(cat "$link/ACCOUNT")
-            got=$(account_of "$tool" "$(readlink -f "$link")")
+            dir=$(readlink -f "$link")
+            want=$(read_account_file "$link/ACCOUNT" 2>/dev/null) || want=""
+            got=$(account_of "$tool" "$dir")
             note=""
-            [ -n "$want" ] && [ -n "$got" ] && [ "$want" != "$got" ] && note="  MISMATCH: expected $want"
-            [ -z "$got" ] && note="  NOT SIGNED IN"
+            # Credentials, not metadata: a directory can carry an address it was
+            # once signed in as and hold no credentials at all.
+            case "$tool" in
+                claude) [ -s "$dir/.credentials.json" ] || note="  NO CREDENTIALS" ;;
+                codex)  [ -s "$dir/auth.json" ] || note="  NO CREDENTIALS" ;;
+            esac
+            if [ -z "$note" ] && [ -n "$want" ] && [ -n "$got" ]; then
+                # An email and a uuid are both identities but not the same one;
+                # comparing them reported MISMATCH on a correct setup.
+                case "$want:$got" in
+                    *@*:*@*|*-*-*:*-*-*) [ "$want" != "$got" ] && note="  MISMATCH: expected $want" ;;
+                    *) note="  (recorded $want, reported differently)" ;;
+                esac
+            fi
             printf '%-16s %-26s %s%s\n' "$tool-$role" "$target" "${got:-none}" "$note"
         done
     done
@@ -110,16 +127,29 @@ use)
     [ $# -eq 4 ] || { echo "usage: review-auth.sh use <claude|codex> <role> <account>"; exit 2; }
     tool="$2"; role="$3"; acct="$4"
     dir="$AUTH/$tool-$acct"
+    link="$AUTH/$tool-$role"
     [ -d "$dir" ] || { echo "no such account directory: $dir"; exit 1; }
+    # `ln -sfn` into a path that is a real directory creates the link INSIDE it
+    # and reports success, leaving the role pointing where it always did.
+    if [ -e "$link" ] && [ ! -L "$link" ]; then
+        echo "$link is a directory, not a role symlink - refusing to write inside it"
+        exit 1
+    fi
     got=$(account_of "$tool" "$dir")
     [ -n "$got" ] || echo "warning: $dir is not signed in - runs using it will refuse to start"
-    ln -sfn "$tool-$acct" "$AUTH/$tool-$role"
+    # Atomic: a run starting mid-switch sees the old link or the new one, never
+    # the gap that unlink-then-symlink leaves.
+    tmp="$AUTH/.$tool-$role.$$"
+    ln -sfn "$tool-$acct" "$tmp" || { echo "could not create the new link"; exit 1; }
+    mv -T "$tmp" "$link" || { rm -f "$tmp"; echo "could not replace $link"; exit 1; }
+    [ "$(readlink "$link")" = "$tool-$acct" ] || { echo "switch did not take effect"; exit 1; }
     echo "$tool-$role -> $tool-$acct${got:+  ($got)}"
     ;;
 login)
     [ $# -eq 3 ] || { echo "usage: review-auth.sh login <claude|codex> <account>"; exit 2; }
     tool="$2"; acct="$3"; dir="$AUTH/$tool-$acct"
-    mkdir -p "$dir"
+    # Credentials go in here: not readable by anyone else, and neither is the root.
+    mkdir -p "$dir" && chmod 700 "$dir" "$AUTH"
     case "$tool" in
         claude) echo "Run this, then answer in a browser:"
                 echo "  CLAUDE_CONFIG_DIR=$dir claude auth login"
