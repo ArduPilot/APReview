@@ -67,6 +67,14 @@ except Exception:
     pass
 if not logged:
     raise SystemExit
+# The same three questions the runner asks: a subscription login, the first-party
+# provider, and the directory we selected - not one an inherited variable chose.
+if (got.get("authMethod") or "claude.ai") != "claude.ai" or \
+        (got.get("apiProvider") or "firstParty") != "firstParty":
+    print("not-a-subscription"); raise SystemExit
+cd = got.get("configDirectory")
+if cd and os.path.realpath(cd) != os.path.realpath(d):
+    print("wrong-directory"); raise SystemExit
 if not email:
     # signed in, but this directory only knows its own address when a login
     # created it under CLAUDE_CONFIG_DIR
@@ -98,6 +106,10 @@ PY
     esac
 }
 
+# The runner clears these before it reads any identity; reading them here with a
+# different environment would report an account no run will use.
+clear_inherited_credentials
+
 case "${1:-status}" in
 status)
     printf '%-16s %-26s %s\n' ROLE ACCOUNT-DIR "SIGNED IN AS"
@@ -107,10 +119,13 @@ status)
             # Ask the resolver rather than reimplementing it: an auth root the
             # runner will not touch, a target outside it, a dangling link - all
             # of those used to read here as a healthy role.
-            dir=$(review_auth "$tool" "$role" 2>&1); rc=$?
+            # stdout is the path, stderr the diagnosis: merging them made a
+            # permitted warning part of the directory name, and the row then
+            # read NOT SIGNED IN for an account the runner accepts.
+            why=$(review_auth "$tool" "$role" 2>&1 >/dev/null)
+            dir=$(review_auth "$tool" "$role" 2>/dev/null); rc=$?
             if [ "$rc" -eq 2 ]; then
-                # an unusable root reports twice; keep the row on one line
-                why=$(printf '%s' "$dir" | sed 's/^review_auth: //' | tr '\n' ';' \
+                why=$(printf '%s' "$why" | sed 's/^review_auth: //' | tr '\n' ';' \
                       | sed 's/;$//; s/;/; /g')
                 printf '%-16s %-26s %s\n' "$tool-$role" "-" "$why  RUNS WILL REFUSE"
                 continue
@@ -143,6 +158,10 @@ status)
                 note="  NOT SIGNED IN"
             elif [ "$got" = api-key ]; then
                 note="  API KEY, not a subscription - runs will refuse"
+            elif [ "$got" = not-a-subscription ]; then
+                note="  a token or cloud provider, not the subscription - runs will refuse"
+            elif [ "$got" = wrong-directory ]; then
+                note="  the CLI read another directory - runs will refuse"
             elif [ "$tool" = claude ] && [ -z "$note" ]; then
                 # The runner compares the CLI's answer with the directory's own
                 # and refuses when they disagree; make the same comparison.
@@ -166,6 +185,10 @@ PYD
                         *@*:*@*|*-*-*:*-*-*)
                             [ "$want" != "$got" ] \
                                 && note="  MISMATCH: expected $want - runs will refuse" ;;
+                        *:"signed in")
+                            # the runner refuses this: a record it cannot check
+                            # is not a record that holds
+                            note="  IDENTITY UNKNOWN, cannot check $want - runs will refuse" ;;
                         *) note="  (recorded $want, reported differently)" ;;
                     esac
                 fi

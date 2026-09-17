@@ -83,7 +83,12 @@ except Exception: raise SystemExit
 o=d.get('claudeAiOauth') or d
 print(o.get('accessToken') or '')" 2>/dev/null)
     if [ -z "$tok" ]; then printf '{\"loggedIn\": false}\\n'; exit 0; fi
-    printf '{"loggedIn": true, "email": "%s"}\\n' "$e"
+    # the real CLI reports how it authenticated, which provider, and the
+    # directory it read - STUB_* lets a test make any of those wrong
+    printf '{"loggedIn": true, "email": "%s", "authMethod": "%s",
+             "apiProvider": "%s", "configDirectory": "%s"}\\n' \
+        "$e" "${STUB_METHOD:-claude.ai}" "${STUB_PROVIDER:-firstParty}" \
+        "${STUB_CONFIG_DIR:-$d}"
 fi''')
         stub(os.path.join(self.stubs, "gh"), 'exit 0')
         stub(os.path.join(self.stubs, "codex"), 'exit 0')
@@ -150,6 +155,70 @@ fi''')
     def test_an_unrelated_variable_does_not_stop_the_run(self):
         out = self.run_mode("followup", EDITOR="vi")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_a_token_login_stops_the_run(self):
+        # an inherited token authenticates while the directory goes on
+        # reporting the address it was last signed in as
+        out = self.run_mode("followup", STUB_METHOD="oauth_token")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("not a subscription", out.stdout)
+
+    def test_a_cloud_provider_stops_the_run(self):
+        out = self.run_mode("followup", STUB_PROVIDER="bedrock")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("bedrock", out.stdout)
+
+    def test_credentials_read_from_another_directory_stop_the_run(self):
+        out = self.run_mode("followup",
+                            STUB_CONFIG_DIR=os.path.join(self.auth, "claude-personal"))
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("claude-personal", out.stdout)
+
+    def test_a_cli_that_reports_none_of_those_is_still_accepted(self):
+        # an older CLI omits them; absent must not mean refused
+        out = self.run_mode("followup", STUB_METHOD="-", STUB_PROVIDER="-",
+                            STUB_CONFIG_DIR="-")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_a_token_variable_with_a_suffix_does_not_reach_the_cli(self):
+        # the keyword is not always last: CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
+        out = self.run_mode("followup",
+                            CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR="9")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR", self.cli_env())
+
+    def test_a_provider_selector_does_not_reach_the_cli(self):
+        out = self.run_mode("followup", CLAUDE_CODE_USE_BEDROCK="1")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", self.cli_env())
+
+    def test_an_openai_key_does_not_reach_the_cli(self):
+        out = self.run_mode("followup", OPENAI_API_KEY="sk-x")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("OPENAI_API_KEY", out.stdout)
+
+    def test_a_codex_credential_variable_is_cleared(self):
+        # CODEX_HOME alone is also unset a line later, so it proves nothing
+        # about the sweep covering the codex namespace
+        out = self.run_mode("followup", CODEX_API_KEY="sk-x")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("CODEX_API_KEY", out.stdout)
+
+    def test_an_inherited_codex_home_does_not_decide_the_account(self):
+        other = os.path.join(self.home, "elsewhere")
+        os.makedirs(other)
+        out = self.run_mode("followup", CODEX_HOME=other)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("acct-1234", out.stdout)
+
+    def test_an_api_key_with_no_auth_mode_stops_the_run(self):
+        # older files carry no auth_mode; the key still wins inside the CLI
+        d = os.path.join(self.auth, "codex-personal")
+        json.dump({"OPENAI_API_KEY": "sk-x", "tokens": {"account_id": "acct-1234"}},
+                  open(os.path.join(d, "auth.json"), "w"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("API key", out.stdout)
 
     def test_a_codex_api_key_stops_the_run(self):
         # an account id left in auth.json from an earlier subscription login
