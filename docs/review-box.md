@@ -161,13 +161,24 @@ still reports its own address; matching only the end of the name missed
 a manual run from a terminal inside Claude Code carries `CLAUDE_CODE_*` variables
 that are not credentials.
 
+A variable declared `readonly` survives `unset`, and bash reports that only on
+stderr - so the sweep checks each name is really gone afterwards and the run
+refuses if one is not, rather than printing it as cleared.
+
 No sweep can be proved complete, so the run also asks the CLI what it actually
 did. `claude auth status --json` reports `authMethod`, `apiProvider` and
 `configDirectory`: the run refuses anything but a `claude.ai` login on the
 `firstParty` provider reading the directory the role selected. A token, a cloud
 provider or another config directory all show up there whatever the environment
-looked like. A CLI that reports none of the three is accepted, so an older one
-still runs.
+looked like. All three or none: a CLI too old to report any of them still runs,
+but one reporting some and not others is not a version, it is an answer that has
+lost the part that would have failed.
+
+Codex is asked the same question a different way. `auth.json` names the account
+that signed in; `config.toml` decides where the request goes and which key pays
+for it, so a `model_provider` other than `openai` - or an `openai` redefined with
+its own `base_url` or `env_key` - sends somebody else's key somewhere else while
+`auth.json` goes on naming the subscription. Both are checked.
 
 Record the account **id** for Codex and the **address** for Claude — that is what
 each tool reports, and the runner compares like with like.

@@ -60,7 +60,14 @@ clear_inherited_credentials() {
     local v
     CLEARED_VARS=$(env | sed -n 's/^\(\(ANTHROPIC\|OPENAI\)_[A-Z0-9_]*\|\(CLAUDE\|CODEX\)_[A-Z0-9_]*\(TOKEN\|KEY\|AUTH\|SECRET\|CREDENTIAL\|CONFIG_DIR\|STORAGE\|BASE_URL\|HOME\|USE_[A-Z0-9_]\{1,\}\)[A-Z0-9_]*\)=.*/\1/p' \
             | sort -u | tr '\n' ' ')
-    for v in $CLEARED_VARS; do unset "$v" 2>/dev/null || true; done
+    CLEARED_FAILED=""
+    for v in $CLEARED_VARS; do
+        unset "$v" 2>/dev/null || true
+        # readonly survives unset, and bash reports the failure only on stderr:
+        # "cleared" would otherwise be printed for a variable still in force
+        [ -z "${!v+x}" ] || CLEARED_FAILED="$CLEARED_FAILED $v"
+    done
+    [ -z "$CLEARED_FAILED" ]
 }
 
 # The root holds the role links. Private leaves protect nothing if anyone can

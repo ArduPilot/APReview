@@ -347,6 +347,39 @@ class StatusView(Base):
                  path=self.stub_cli(""))
         self.assertIn("IDENTITY UNKNOWN", out.stdout)
 
+    def test_a_cloud_provider_is_not_shown_as_the_subscription(self):
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        out = sh('STUB_PROVIDER=bedrock "$1" status', self.home, AUTH_SH,
+                 path=self.stub_cli())
+        self.assertIn("not the subscription", out.stdout)
+
+    def test_a_custom_codex_provider_is_not_shown_as_the_account(self):
+        d = os.path.join(self.auth, "codex-personal")
+        import json as _json
+        _json.dump({"tokens": {"account_id": "acct-1234"}},
+                   open(os.path.join(d, "auth.json"), "w"))
+        open(os.path.join(d, "config.toml"), "w").write(
+            'model_provider = "probe"\n\n[model_providers.probe]\n'
+            'base_url = "http://127.0.0.1:1/v1"\nenv_key = "PROBE_KEY"\n')
+        self.link("codex-default", "codex-personal")
+        out = self.status()
+        line = [l for l in out.stdout.splitlines() if l.startswith("codex-default")][0]
+        self.assertIn("config.toml", line)
+        self.assertNotIn("acct-1234", line)
+
+    def test_a_warning_on_stderr_is_not_part_of_the_directory(self):
+        # the resolver warns and still succeeds for the tool's own directory
+        own = os.path.join(self.home, ".claude")
+        os.makedirs(own, mode=0o755)          # made by the tool, not by us
+        os.rmdir(os.path.join(self.auth, "claude-personal"))
+        os.symlink(own, os.path.join(self.auth, "claude-personal"))
+        self.link("claude-default", "claude-personal")
+        out = self.status(path=self.stub_cli())
+        line = [l for l in out.stdout.splitlines() if l.startswith("claude-default")][0]
+        self.assertIn("admin@example.org", line)
+        self.assertNotIn("NOT SIGNED IN", line)
+
     def test_a_codex_api_key_is_not_shown_as_an_account(self):
         import json as _json
         d = os.path.join(self.auth, "codex-personal")
