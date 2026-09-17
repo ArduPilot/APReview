@@ -94,7 +94,12 @@ select_account() {           # tool VAR -> exports VAR, or unsets it
         export "$var=$d"
     fi
 }
-clear_inherited_credentials
+if ! clear_inherited_credentials; then
+    echo "FATAL: these could not be removed from the environment and would"
+    echo "       decide the account instead of the role:$CLEARED_FAILED"
+    echo "finish=$(date -Is) status=wrong-claude-account"
+    exit 1
+fi
 [ -z "$CLEARED_VARS" ] || echo "cleared from the environment: $CLEARED_VARS"
 # Belt and braces: select_account unsets on the path where the role resolves to
 # the tool's own directory, and the sweep above clears anything inherited.
@@ -200,17 +205,20 @@ clear_stale_oauth_lock "$CLAUDE_DIR"
 # It also says which credential it used and where it read it from, which settles
 # what no amount of environment sweeping can: an inherited token, a cloud
 # provider, or a different config directory all show up here.
-read -r CLAUDE_LOGGED CLAUDE_CLI_ACCOUNT CLAUDE_METHOD CLAUDE_PROVIDER CLAUDE_CLI_DIR <<EOS
+read -r CLAUDE_LOGGED CLAUDE_CLI_ACCOUNT CLAUDE_METHOD CLAUDE_PROVIDER \
+        CLAUDE_CLI_DIR CLAUDE_META <<EOS
 $(claude auth status --json 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     print("no - - - -"); raise SystemExit
+keys = ("authMethod", "apiProvider", "configDirectory")
 print(("yes" if d.get("loggedIn") else "no"), (d.get("email") or "-"),
       (d.get("authMethod") or "-"), (d.get("apiProvider") or "-"),
-      (d.get("configDirectory") or "-"))
-' 2>/dev/null || echo "no - - - -")
+      (d.get("configDirectory") or "-"),
+      sum(1 for k in keys if d.get(k)))
+' 2>/dev/null || echo "no - - - - 0")
 EOS
 CLAUDE_REC_ACCOUNT=$(python3 - "$CLAUDE_DIR" <<'PYA' 2>/dev/null
 import json, os, sys
@@ -230,6 +238,15 @@ fi
 # claude.ai is a subscription login. oauth_token, apiKey and third_party are not:
 # they bill a token or a cloud account, and the directory goes on reporting the
 # address it was last signed in as either way.
+# All three or none: a CLI too old to report any of them still runs, but one
+# that reports some and not others is not a version - it is an answer that has
+# lost the part that would have failed.
+if [ "$CLAUDE_META" != 0 ] && [ "$CLAUDE_META" != 3 ]; then
+    echo "FATAL: claude reported only part of its authentication state"
+    echo "       ($CLAUDE_META of authMethod, apiProvider, configDirectory)"
+    echo "finish=$(date -Is) status=wrong-claude-account"
+    exit 1
+fi
 case "$CLAUDE_METHOD" in
     claude.ai|-) ;;
     *) echo "FATAL: claude authenticated with $CLAUDE_METHOD, not a subscription"
@@ -302,6 +319,38 @@ else:
     print(tok.get("account_id") or d.get("account_id") or "")
 PYB
 )
+# auth.json says which account signed in; config.toml says where the request
+# goes and which key pays for it. A custom provider sends another key to another
+# endpoint while auth.json goes on naming the subscription.
+CODEX_PROVIDER=$(python3 - "$CODEX_DIR" <<'PYC' 2>/dev/null
+import os, sys
+try:
+    import tomllib
+except Exception:
+    raise SystemExit                       # too old to parse it
+path = os.path.join(sys.argv[1], "config.toml")
+try:
+    with open(path, "rb") as f:
+        cfg = tomllib.load(f)
+except FileNotFoundError:
+    raise SystemExit
+except Exception:
+    print("unreadable-config"); raise SystemExit
+prof = cfg.get("profile")
+prof_cfg = ((cfg.get("profiles") or {}).get(prof) or {}) if prof else {}
+name = prof_cfg.get("model_provider") or cfg.get("model_provider") or "openai"
+own = (cfg.get("model_providers") or {}).get("openai") or {}
+if name != "openai" or own.get("base_url") or own.get("env_key") \
+        or own.get("requires_openai_auth") is False:
+    print("other-provider")
+PYC
+)
+if [ -n "$CODEX_PROVIDER" ]; then
+    echo "FATAL: $CODEX_DIR/config.toml selects $CODEX_PROVIDER, so role $ROLE"
+    echo "       would not bill the account auth.json names"
+    echo "finish=$(date -Is) status=wrong-codex-account"
+    exit 1
+fi
 if [ "$CODEX_ACCOUNT" = api-key ]; then
     echo "FATAL: $CODEX_DIR authenticates with an API key, not a subscription"
     echo "       account, so role $ROLE would bill whoever owns that key"

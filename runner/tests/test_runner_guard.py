@@ -67,7 +67,7 @@ class Guard(unittest.TestCase):
 d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 # what the CLI would actually read its credentials from, for the tests that
 # care whether an inherited override survived to this point
-env | grep -oE '^(ANTHROPIC|CLAUDE)_[A-Z0-9_]+' > "$HOME/cli-env"
+env | grep -oE '^(ANTHROPIC|CLAUDE|OPENAI|CODEX)_[A-Z0-9_]+' > "$HOME/cli-env"
 if [ "$1 $2" = "auth status" ]; then
     e="${STUB_CLI_EMAIL:-}"
     [ -n "$e" ] || e=$(python3 -c "
@@ -85,6 +85,14 @@ print(o.get('accessToken') or '')" 2>/dev/null)
     if [ -z "$tok" ]; then printf '{\"loggedIn\": false}\\n'; exit 0; fi
     # the real CLI reports how it authenticated, which provider, and the
     # directory it read - STUB_* lets a test make any of those wrong
+    if [ -n "${STUB_NO_META:-}" ]; then
+        # an older CLI: the fields are absent, not empty
+        printf '{"loggedIn": true, "email": "%s"}\\n' "$e"; exit 0
+    fi
+    if [ -n "${STUB_PART_META:-}" ]; then
+        printf '{"loggedIn": true, "email": "%s", "authMethod": "%s"}\\n' \
+            "$e" "${STUB_METHOD:-claude.ai}"; exit 0
+    fi
     printf '{"loggedIn": true, "email": "%s", "authMethod": "%s",
              "apiProvider": "%s", "configDirectory": "%s"}\\n' \
         "$e" "${STUB_METHOD:-claude.ai}" "${STUB_PROVIDER:-firstParty}" \
@@ -175,10 +183,25 @@ fi''')
         self.assertIn("claude-personal", out.stdout)
 
     def test_a_cli_that_reports_none_of_those_is_still_accepted(self):
-        # an older CLI omits them; absent must not mean refused
-        out = self.run_mode("followup", STUB_METHOD="-", STUB_PROVIDER="-",
-                            STUB_CONFIG_DIR="-")
+        # an older CLI omits them - genuinely absent, not the string "-"
+        out = self.run_mode("followup", STUB_NO_META="1")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_a_cli_that_reports_only_some_of_them_stops_the_run(self):
+        # not a version: an answer that has lost the part that would have failed
+        out = self.run_mode("followup", STUB_PART_META="1")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("part of its authentication state", out.stdout)
+
+    def test_a_credential_variable_that_cannot_be_unset_stops_the_run(self):
+        # readonly survives unset, and bash reports it only on stderr
+        conf = os.path.join(self.home, "review", "etc", "local.conf")
+        with open(conf, "a") as f:
+            f.write('\nreadonly ANTHROPIC_AUTH_TOKEN=x\n')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("could not be removed", out.stdout)
+        self.assertIn("ANTHROPIC_AUTH_TOKEN", out.stdout)
 
     def test_a_token_variable_with_a_suffix_does_not_reach_the_cli(self):
         # the keyword is not always last: CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR
@@ -193,8 +216,10 @@ fi''')
         self.assertNotIn("CLAUDE_CODE_USE_BEDROCK", self.cli_env())
 
     def test_an_openai_key_does_not_reach_the_cli(self):
+        # printing the name is not the same as the variable being gone
         out = self.run_mode("followup", OPENAI_API_KEY="sk-x")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("OPENAI_API_KEY", self.cli_env())
         self.assertIn("OPENAI_API_KEY", out.stdout)
 
     def test_a_codex_credential_variable_is_cleared(self):
@@ -202,6 +227,7 @@ fi''')
         # about the sweep covering the codex namespace
         out = self.run_mode("followup", CODEX_API_KEY="sk-x")
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("CODEX_API_KEY", self.cli_env())
         self.assertIn("CODEX_API_KEY", out.stdout)
 
     def test_an_inherited_codex_home_does_not_decide_the_account(self):
@@ -219,6 +245,32 @@ fi''')
         out = self.run_mode("followup")
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("API key", out.stdout)
+
+    def test_a_custom_codex_provider_stops_the_run(self):
+        # auth.json still names the subscription; config.toml sends the request
+        # somewhere else with somebody else's key
+        d = os.path.join(self.auth, "codex-personal")
+        open(os.path.join(d, "config.toml"), "w").write(
+            'model_provider = "probe"\n\n[model_providers.probe]\n'
+            'base_url = "http://127.0.0.1:1/v1"\nenv_key = "PROBE_KEY"\n')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("other-provider", out.stdout)
+
+    def test_a_redefined_openai_provider_stops_the_run(self):
+        d = os.path.join(self.auth, "codex-personal")
+        open(os.path.join(d, "config.toml"), "w").write(
+            '[model_providers.openai]\nbase_url = "http://127.0.0.1:1/v1"\n')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+
+    def test_an_ordinary_codex_config_does_not_stop_the_run(self):
+        d = os.path.join(self.auth, "codex-personal")
+        open(os.path.join(d, "config.toml"), "w").write(
+            'model = "gpt-5"\nmodel_reasoning_effort = "high"\n'
+            '[projects."/home/x"]\ntrust_level = "trusted"\n')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
 
     def test_a_codex_api_key_stops_the_run(self):
         # an account id left in auth.json from an earlier subscription login

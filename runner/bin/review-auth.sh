@@ -86,7 +86,33 @@ if not email:
 print(email or "signed in")
 PYC
                 ;;
-        codex)  python3 - "$dir/auth.json" <<'PY' 2>/dev/null
+        codex)  # config.toml can send the request to another provider entirely,
+                # whatever account auth.json names
+                other=$(python3 - "$dir" <<'PYP' 2>/dev/null
+import os, sys
+try:
+    import tomllib
+except Exception:
+    raise SystemExit                       # too old to parse it
+path = os.path.join(sys.argv[1], "config.toml")
+try:
+    with open(path, "rb") as f:
+        cfg = tomllib.load(f)
+except FileNotFoundError:
+    raise SystemExit
+except Exception:
+    print("unreadable-config"); raise SystemExit
+prof = cfg.get("profile")
+prof_cfg = ((cfg.get("profiles") or {}).get(prof) or {}) if prof else {}
+name = prof_cfg.get("model_provider") or cfg.get("model_provider") or "openai"
+own = (cfg.get("model_providers") or {}).get("openai") or {}
+if name != "openai" or own.get("base_url") or own.get("env_key") \
+        or own.get("requires_openai_auth") is False:
+    print("other-provider")
+PYP
+)
+                [ -z "$other" ] || { echo "$other"; return 0; }
+                python3 - "$dir/auth.json" <<'PY' 2>/dev/null
 import json, sys
 try:
     d = json.load(open(sys.argv[1]))
@@ -158,6 +184,8 @@ status)
                 note="  NOT SIGNED IN"
             elif [ "$got" = api-key ]; then
                 note="  API KEY, not a subscription - runs will refuse"
+            elif [ "$got" = other-provider ] || [ "$got" = unreadable-config ]; then
+                note="  config.toml sends this elsewhere - runs will refuse"
             elif [ "$got" = not-a-subscription ]; then
                 note="  a token or cloud provider, not the subscription - runs will refuse"
             elif [ "$got" = wrong-directory ]; then
