@@ -149,6 +149,23 @@ class AccountRecords(Base):
         self.assertNotEqual(rc, 0)
         self.assertNotIn("SECRET", out)
 
+    def test_a_symlink_is_refused_even_when_it_points_at_a_valid_record(self):
+        # the format check alone would accept this; following symlinks out of the
+        # account directory is what is being refused
+        target = os.path.join(self.home, "elsewhere.txt")
+        open(target, "w").write("someone@example.com\n")
+        out, rc = self.read("e", "", as_symlink_to=target)
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(out, "")
+
+    def test_a_long_record_is_refused_on_length_not_on_content(self):
+        # every character here is legal in an address, so only the size limit
+        # rejects it - the earlier test passed because the runner compared it
+        # and found a mismatch, which proves nothing about this rule
+        out, rc = self.read("f", "a@b." + "c" * 400 + "\n")
+        self.assertNotEqual(rc, 0)
+        self.assertEqual(out, "")
+
 
 class Switching(Base):
     """review-auth.sh use - the command reached for when quota runs out."""
@@ -176,6 +193,46 @@ class Switching(Base):
     def test_an_unknown_account_is_refused(self):
         out = self.use("claude", "default", "nosuch")
         self.assertNotEqual(out.returncode, 0)
+
+    def test_a_role_pointed_at_itself_is_refused(self):
+        self.link("claude-default", "claude-ardupilot")
+        out = self.use("claude", "default", "default")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
+                         "claude-ardupilot")
+
+    def test_a_reader_never_sees_the_role_missing_during_a_switch(self):
+        # unlink-then-symlink leaves a window in which a starting run resolves
+        # nothing; the replacement must be atomic
+        import threading
+        self.link("claude-default", "claude-ardupilot")
+        seen = []
+        stop = threading.Event()
+
+        def watch():
+            p = os.path.join(self.auth, "claude-default")
+            while not stop.is_set():
+                seen.append(os.path.islink(p))
+
+        t = threading.Thread(target=watch)
+        t.start()
+        try:
+            for i in range(20):
+                acct = "personal" if i % 2 else "ardupilot"
+                self.use("claude", "default", acct)
+        finally:
+            stop.set()
+            t.join()
+        self.assertTrue(seen, "watcher never ran")
+        self.assertNotIn(False, seen, "the role vanished mid-switch")
+
+    def test_login_creates_a_private_directory(self):
+        out = sh('"$1" login claude newacct', self.home, AUTH_SH)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        d = os.path.join(self.auth, "claude-newacct")
+        self.assertTrue(os.path.isdir(d))
+        self.assertEqual(stat.S_IMODE(os.stat(d).st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(os.stat(self.auth).st_mode), 0o700)
 
     def test_it_leaves_no_temporary_link_behind(self):
         self.link("claude-default", "claude-ardupilot")
