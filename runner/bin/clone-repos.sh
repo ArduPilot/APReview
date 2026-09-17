@@ -7,7 +7,9 @@ cd "$REVIEW_REPOS" || exit 1
 # The list lives in repos.json, so adding a repo is one edit and both the sweep
 # and the base clones follow it. The main repo is cloned separately because it
 # needs --recurse-submodules.
-REPOS=$("$(dirname "$0")/repos.py" --clone)
+REPOS=$("$(dirname "$0")/repos.py" --clone) || {
+    echo "FATAL: cannot read the repo list from repos.json"; exit 1; }
+[ -n "$REPOS" ] || { echo "FATAL: the repo list is empty"; exit 1; }
 
 # Submodules. A base clone without them is one the agents cannot use for a
 # submodule-touching PR: they fall back to fetching from the network, which is
@@ -42,14 +44,13 @@ init_submodules() {
 }
 
 for r in $REPOS; do
-    # The directory is the repo's manifest key, so what is on disk matches what
-    # the reports call it - and mavlink/mavlink, which shares a basename with the
-    # ardupilot submodule, lands as upstream-mavlink without a special case here.
     # The directory comes from the config: the basename, except where an entry
     # says otherwise. mavlink/mavlink lands as upstream-mavlink so it cannot
     # collide with the ardupilot mavlink submodule.
     d=$("$(dirname "$0")/repos.py" --clone-dirs | awk -v r="$r" -F'\t' '$1==r {print $2}')
-    [ -n "$d" ] || d=$(basename "$r")
+    # No silent fallback to basename: that is how mavlink/mavlink would land in
+    # mavlink/ and collide with the ardupilot submodule of the same name.
+    [ -n "$d" ] || { echo "  ERROR: no clone directory for $r"; continue; }
     if [ -d "$d/.git" ]; then
         echo "=== $r: updating $d"
         ( cd "$d" && git fetch --all --prune -q && \

@@ -28,15 +28,20 @@ this has happened, so the redirection is not optional.
 ## Install
 
 ```sh
-git clone https://github.com/ArduPilot/APReview.git
+git clone https://github.com/ArduPilot/APReview.git ~/APReview
 mkdir -p ~/review/etc
-cp -r APReview/runner/bin ~/review/bin
-cp APReview/runner/etc/crontab.reviewprs ~/review/etc/
-cp APReview/runner/etc/local.conf.example ~/review/etc/local.conf   # then edit
-cp APReview/commands/reviewprs.md ~/.claude/commands/
+
+# bin is a symlink into the checkout, not a copy: `git pull` is then the whole
+# deploy step, and the scripts find repos.json beside themselves. A copied bin
+# has no checkout to resolve back to, and clone-repos.sh will say so and stop.
+ln -s ~/APReview/runner/bin ~/review/bin
+ln -sf ~/APReview/commands/reviewprs.md ~/.claude/commands/reviewprs.md
+
+cp ~/APReview/runner/etc/crontab.reviewprs ~/review/etc/
+cp ~/APReview/runner/etc/local.conf.example ~/review/etc/local.conf   # then edit
 
 ~/review/bin/clone-ardupilot.sh      # base clone with submodules
-~/review/bin/clone-repos.sh          # the other repos, submodules included
+~/review/bin/clone-repos.sh          # everything in repos.json, submodules included
 ~/review/bin/base-build.sh           # proves the toolchain, warms ccache
 crontab ~/review/etc/crontab.reviewprs
 ```

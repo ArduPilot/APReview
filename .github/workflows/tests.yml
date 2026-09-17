@@ -1,0 +1,34 @@
+name: tests
+
+# Merging this repo is deploying it: the runner's ~/review/bin is a symlink into
+# a checkout, so whatever lands on main is what reviews the next pull request.
+# Nothing else gates that, so this does.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shell scripts parse
+        run: |
+          for f in runner/bin/*.sh; do bash -n "$f" || exit 1; done
+
+      - name: python compiles
+        run: python3 -m compileall -q runner/bin runner/tests
+
+      - name: repos.json is valid
+        run: python3 -c "import json; json.load(open('repos.json'))"
+
+      - name: unit tests
+        run: |
+          fail=0
+          for t in runner/tests/test_*.py; do
+              echo "--- $t"
+              python3 "$t" -v || fail=1
+          done
+          exit $fail
