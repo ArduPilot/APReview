@@ -69,6 +69,9 @@ if not logged:
     raise SystemExit
 # The same three questions the runner asks: a subscription login, the first-party
 # provider, and the directory we selected - not one an inherited variable chose.
+keys = ("authMethod", "apiProvider", "configDirectory")
+if sum(1 for k in keys if got.get(k)) not in (0, 3):
+    print("partial-answer"); raise SystemExit
 if (got.get("authMethod") or "claude.ai") != "claude.ai" or \
         (got.get("apiProvider") or "firstParty") != "firstParty":
     print("not-a-subscription"); raise SystemExit
@@ -89,26 +92,46 @@ PYC
         codex)  # config.toml can send the request to another provider entirely,
                 # whatever account auth.json names
                 other=$(python3 - "$dir" <<'PYP' 2>/dev/null
-import os, sys
+import os, re, sys
+# config.toml decides where the request goes and which credential pays for it,
+# so enumerating the settings that redirect it is a losing game - chatgpt_base_url
+# sent the account's own OAuth token to another host with model_provider still
+# "openai". Refuse anything that names an endpoint or a key, wherever it appears.
+path = os.path.join(sys.argv[1], "config.toml")
+if not os.path.exists(path):
+    raise SystemExit                       # no config is not a redirected one
 try:
     import tomllib
-except Exception:
-    raise SystemExit                       # too old to parse it
-path = os.path.join(sys.argv[1], "config.toml")
-try:
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
-except FileNotFoundError:
-    raise SystemExit
 except Exception:
-    print("unreadable-config"); raise SystemExit
-prof = cfg.get("profile")
-prof_cfg = ((cfg.get("profiles") or {}).get(prof) or {}) if prof else {}
-name = prof_cfg.get("model_provider") or cfg.get("model_provider") or "openai"
-own = (cfg.get("model_providers") or {}).get("openai") or {}
-if name != "openai" or own.get("base_url") or own.get("env_key") \
-        or own.get("requires_openai_auth") is False:
-    print("other-provider")
+    # a file we cannot read is not a file we can vouch for
+    print("unreadable-config")
+    raise SystemExit
+OK_HOSTS = ("api.openai.com", "chatgpt.com", "auth.openai.com")
+bad = []
+def walk(node, where):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            key = k.lower()
+            if key in ("env_key", "api_key", "env_http_headers", "http_headers"):
+                bad.append("%s%s" % (where, k))
+            elif key == "requires_openai_auth" and v is False:
+                bad.append("%s%s" % (where, k))
+            elif key == "model_provider" and v != "openai":
+                bad.append("%s%s" % (where, k))
+            else:
+                walk(v, "%s%s." % (where, k))
+    elif isinstance(node, list):
+        for v in node:
+            walk(v, where)
+    elif isinstance(node, str):
+        m = re.match(r"https?://([^/:]+)", node.strip())
+        if m and m.group(1) not in OK_HOSTS:
+            bad.append(where.rstrip(".") or "url")
+walk(cfg, "")
+if bad:
+    print("other-provider: " + ", ".join(sorted(set(bad))[:4]))
 PYP
 )
                 [ -z "$other" ] || { echo "$other"; return 0; }
@@ -134,7 +157,10 @@ PY
 
 # The runner clears these before it reads any identity; reading them here with a
 # different environment would report an account no run will use.
-clear_inherited_credentials
+if ! clear_inherited_credentials; then
+    echo "these could not be removed from the environment and would decide the"
+    echo "account instead of the role - runs will refuse:$CLEARED_FAILED"
+fi
 
 case "${1:-status}" in
 status)
@@ -184,8 +210,11 @@ status)
                 note="  NOT SIGNED IN"
             elif [ "$got" = api-key ]; then
                 note="  API KEY, not a subscription - runs will refuse"
-            elif [ "$got" = other-provider ] || [ "$got" = unreadable-config ]; then
+            elif [ -z "${got##other-provider*}" ] || [ "$got" = unreadable-config ]; then
                 note="  config.toml sends this elsewhere - runs will refuse"
+                got=${got%%:*}
+            elif [ "$got" = partial-answer ]; then
+                note="  the CLI answered only in part - runs will refuse"
             elif [ "$got" = not-a-subscription ]; then
                 note="  a token or cloud provider, not the subscription - runs will refuse"
             elif [ "$got" = wrong-directory ]; then

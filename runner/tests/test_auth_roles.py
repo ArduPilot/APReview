@@ -50,7 +50,11 @@ class Base(unittest.TestCase):
         f = os.path.join(d, "claude")
         with open(f, "w") as fh:
             fh.write('#!/bin/sh\n'
-                     "env | grep -oE '^(ANTHROPIC|CLAUDE)_[A-Z0-9_]+' > \"$HOME/cli-env\"\n"
+                     "env | grep -oE '^(ANTHROPIC|CLAUDE|OPENAI|CODEX)_[A-Z0-9_]+'"
+                     ' > "$HOME/cli-env"\n'
+                     'if [ -n "${STUB_PART_META:-}" ]; then\n'
+                     '  printf \'{"loggedIn": true, "email": "x@y.z",'
+                     ' "authMethod": "claude.ai"}\\n\'; exit 0\nfi\n'
                      'printf \'{"loggedIn": true, "email": "%s", "authMethod": "%s",'
                      ' "apiProvider": "%s", "configDirectory": "%s"}\\n\' '
                      '"${STUB_EMAIL:-' + email + '}" "${STUB_METHOD:-claude.ai}" '
@@ -368,6 +372,41 @@ class StatusView(Base):
         self.assertIn("config.toml", line)
         self.assertNotIn("acct-1234", line)
 
+    def test_a_partial_answer_from_the_cli_is_flagged(self):
+        # the runner refuses it; a healthy row here would be the reassuring
+        # half of a broken setup
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        out = sh('STUB_PART_META=1 "$1" status', self.home, AUTH_SH,
+                 path=self.stub_cli())
+        self.assertIn("only in part", out.stdout)
+
+    def test_a_credential_variable_that_cannot_be_unset_is_reported(self):
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        # readonly is a shell attribute, so it has to come from the file the
+        # scripts source, the way it would on the box
+        etc = os.path.join(self.home, "review", "etc")
+        os.makedirs(etc, exist_ok=True)
+        open(os.path.join(etc, "local.conf"), "w") \
+            .write("readonly ANTHROPIC_AUTH_TOKEN=x\n")
+        out = self.status(path=self.stub_cli())
+        self.assertIn("ANTHROPIC_AUTH_TOKEN", out.stdout)
+        self.assertIn("runs will refuse", out.stdout)
+
+    def test_a_redirected_chatgpt_endpoint_is_flagged(self):
+        d = os.path.join(self.auth, "codex-personal")
+        import json as _json
+        _json.dump({"tokens": {"account_id": "acct-1234"}},
+                   open(os.path.join(d, "auth.json"), "w"))
+        open(os.path.join(d, "config.toml"), "w").write(
+            'chatgpt_base_url = "http://127.0.0.1:1/backend-api"\n')
+        self.link("codex-default", "codex-personal")
+        out = self.status()
+        line = [l for l in out.stdout.splitlines() if l.startswith("codex-default")][0]
+        self.assertIn("config.toml", line)
+        self.assertNotIn("acct-1234", line)
+
     def test_a_warning_on_stderr_is_not_part_of_the_directory(self):
         # the resolver warns and still succeeds for the tool's own directory
         own = os.path.join(self.home, ".claude")
@@ -454,6 +493,17 @@ class Switching(Base):
         self.assertIn("reverted", out.stdout)
         self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
                          "claude-ardupilot")
+
+    def test_switching_to_the_account_already_in_place_is_still_checked(self):
+        # "it already points there, nothing to do" skips the check that the
+        # role resolves at all, so a broken role reports success
+        d = os.path.join(self.auth, "claude-personal")
+        os.chmod(d, 0o755)                # other-readable: the resolver refuses
+        self.addCleanup(os.chmod, d, 0o700)
+        self.link("claude-default", "claude-personal")
+        out = self.use("claude", "default", "personal")
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("does not resolve", out.stdout)
 
     def test_a_revert_to_an_option_shaped_target_is_not_claimed_falsely(self):
         # ln reads a leading - as an option: without --, the revert silently

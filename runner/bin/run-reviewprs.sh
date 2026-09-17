@@ -205,20 +205,23 @@ clear_stale_oauth_lock "$CLAUDE_DIR"
 # It also says which credential it used and where it read it from, which settles
 # what no amount of environment sweeping can: an inherited token, a cloud
 # provider, or a different config directory all show up here.
-read -r CLAUDE_LOGGED CLAUDE_CLI_ACCOUNT CLAUDE_METHOD CLAUDE_PROVIDER \
-        CLAUDE_CLI_DIR CLAUDE_META <<EOS
+# One field per line, not six words: an account directory whose path contains a
+# space made the guard read part of the path as the field count.
+{ read -r CLAUDE_LOGGED; read -r CLAUDE_CLI_ACCOUNT; read -r CLAUDE_METHOD
+  read -r CLAUDE_PROVIDER; read -r CLAUDE_CLI_DIR; read -r CLAUDE_META; } <<EOS
 $(claude auth status --json 2>/dev/null | python3 -c '
 import json, sys
+keys = ("authMethod", "apiProvider", "configDirectory")
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print("no - - - -"); raise SystemExit
-keys = ("authMethod", "apiProvider", "configDirectory")
-print(("yes" if d.get("loggedIn") else "no"), (d.get("email") or "-"),
-      (d.get("authMethod") or "-"), (d.get("apiProvider") or "-"),
-      (d.get("configDirectory") or "-"),
-      sum(1 for k in keys if d.get(k)))
-' 2>/dev/null || echo "no - - - - 0")
+    print("no\n-\n-\n-\n-\n0"); raise SystemExit
+out = [("yes" if d.get("loggedIn") else "no"), (d.get("email") or "-"),
+       (d.get("authMethod") or "-"), (d.get("apiProvider") or "-"),
+       (d.get("configDirectory") or "-"), str(sum(1 for k in keys if d.get(k)))]
+# a value with a newline in it would shift every field after it
+print("\n".join(v if "\n" not in v else "-" for v in out))
+' 2>/dev/null || printf 'no\n-\n-\n-\n-\n0\n')
 EOS
 CLAUDE_REC_ACCOUNT=$(python3 - "$CLAUDE_DIR" <<'PYA' 2>/dev/null
 import json, os, sys
@@ -323,26 +326,46 @@ PYB
 # goes and which key pays for it. A custom provider sends another key to another
 # endpoint while auth.json goes on naming the subscription.
 CODEX_PROVIDER=$(python3 - "$CODEX_DIR" <<'PYC' 2>/dev/null
-import os, sys
+import os, re, sys
+# config.toml decides where the request goes and which credential pays for it,
+# so enumerating the settings that redirect it is a losing game - chatgpt_base_url
+# sent the account's own OAuth token to another host with model_provider still
+# "openai". Refuse anything that names an endpoint or a key, wherever it appears.
+path = os.path.join(sys.argv[1], "config.toml")
+if not os.path.exists(path):
+    raise SystemExit                       # no config is not a redirected one
 try:
     import tomllib
-except Exception:
-    raise SystemExit                       # too old to parse it
-path = os.path.join(sys.argv[1], "config.toml")
-try:
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
-except FileNotFoundError:
-    raise SystemExit
 except Exception:
-    print("unreadable-config"); raise SystemExit
-prof = cfg.get("profile")
-prof_cfg = ((cfg.get("profiles") or {}).get(prof) or {}) if prof else {}
-name = prof_cfg.get("model_provider") or cfg.get("model_provider") or "openai"
-own = (cfg.get("model_providers") or {}).get("openai") or {}
-if name != "openai" or own.get("base_url") or own.get("env_key") \
-        or own.get("requires_openai_auth") is False:
-    print("other-provider")
+    # a file we cannot read is not a file we can vouch for
+    print("unreadable-config")
+    raise SystemExit
+OK_HOSTS = ("api.openai.com", "chatgpt.com", "auth.openai.com")
+bad = []
+def walk(node, where):
+    if isinstance(node, dict):
+        for k, v in node.items():
+            key = k.lower()
+            if key in ("env_key", "api_key", "env_http_headers", "http_headers"):
+                bad.append("%s%s" % (where, k))
+            elif key == "requires_openai_auth" and v is False:
+                bad.append("%s%s" % (where, k))
+            elif key == "model_provider" and v != "openai":
+                bad.append("%s%s" % (where, k))
+            else:
+                walk(v, "%s%s." % (where, k))
+    elif isinstance(node, list):
+        for v in node:
+            walk(v, where)
+    elif isinstance(node, str):
+        m = re.match(r"https?://([^/:]+)", node.strip())
+        if m and m.group(1) not in OK_HOSTS:
+            bad.append(where.rstrip(".") or "url")
+walk(cfg, "")
+if bad:
+    print("other-provider: " + ", ".join(sorted(set(bad))[:4]))
 PYC
 )
 if [ -n "$CODEX_PROVIDER" ]; then
