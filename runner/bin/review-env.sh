@@ -5,11 +5,6 @@ export REVIEW_DATA="$REVIEW_ROOT/data"
 export REVIEW_LOGS="$REVIEW_ROOT/logs"
 export REVIEW_REPOS="$REVIEW_ROOT/repositories"
 
-# Where the swept-repo configuration lives. bin is normally a symlink into an
-# APReview checkout, so derive it from this file rather than assuming a path.
-_apr=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")/../.." && pwd)
-export REVIEW_REPO_CONFIG="${REVIEW_REPO_CONFIG:-$_apr/repos.json}"
-unset _apr
 
 # Isolated git config: no https->ssh rewrite, so HTTPS clones work without a key.
 export GIT_CONFIG_GLOBAL="$REVIEW_ROOT/etc/gitconfig"
@@ -96,20 +91,6 @@ export REVIEW_BOX_NAME="${REVIEW_BOX_NAME:-$(hostname -s 2>/dev/null || echo run
 
 # Site configuration: publishing target, and the Claude account a given mode must
 # run as. Kept out of git because it names hosts, paths and an account.
-# local.conf sets plain shell variables, and a variable that is set but not
-# exported is invisible to every child process - gh, python, the review tools.
-# That has bitten twice: GH_TOKEN, so runs kept posting as the keyring account,
-# and REVIEW_COMMENT_ACCOUNTS, so post-comments.py saw only the current account
-# and would have posted a duplicate on every PR the old one had reviewed.
-# `set -a` marks everything the file assigns for export and lets the shell do
-# the parsing: a regex over the file misses `export FOO=`, `FIRST=one FOO=...`,
-# an assignment inside an if, and anything else a shell would accept.
-if [ -f "$REVIEW_ROOT/etc/local.conf" ]; then
-    set -a
-    . "$REVIEW_ROOT/etc/local.conf"
-    set +a
-fi
-
 # --- publishing ---------------------------------------------------------------
 # Where finished reports are rsynced, and the public URL they end up at. Both are
 # site-specific: set them in etc/local.conf (see local.conf.example), which is not
@@ -123,22 +104,22 @@ export REVIEW_PUBLIC_URL="${REVIEW_PUBLIC_URL:-}"
 # Shown on the runs dashboard, so several runners can publish side by side.
 export REVIEW_BOX_NAME="${REVIEW_BOX_NAME:-$(hostname -s 2>/dev/null || echo runner)}"
 
-# Site configuration: publishing target, and the Claude account a given mode must
-# run as. Kept out of git because it names hosts, paths and an account.
-# local.conf sets plain shell variables, and a variable that is set but not
-# exported is invisible to every child process - gh, python, the review tools.
-# That has now bitten twice: GH_TOKEN, so runs kept posting as the keyring
-# account, and REVIEW_COMMENT_ACCOUNTS, so post-comments.py saw only the current
-# account and would have posted a duplicate on every PR the old one had
-# reviewed. Export whatever the file assigns, by name, rather than maintaining a
-# list here that the next variable will be missing from.
+# --- site configuration --------------------------------------------------------
+# local.conf holds the publishing target, the runner's name and the Claude
+# account a given mode runs as. It sets plain shell variables, and a variable
+# that is set but not exported is invisible to every child process - gh, python,
+# the review tools. That has bitten twice: GH_TOKEN, so runs kept posting as the
+# keyring account, and REVIEW_COMMENT_ACCOUNTS, so post-comments.py saw only the
+# current account and would have posted a duplicate on every PR the old one had
+# reviewed. `set -a` marks everything the file assigns for export and lets the
+# shell do the parsing: a regex over the file misses `export FOO=`,
+# `FIRST=one FOO=...`, an assignment inside an if, and anything else a shell
+# would accept. Sourced exactly once - doing it twice re-runs any assignment
+# that appends or counts.
 if [ -f "$REVIEW_ROOT/etc/local.conf" ]; then
+    set -a
     . "$REVIEW_ROOT/etc/local.conf"
-    for _v in $(sed -n 's/^[[:space:]]*\(export[[:space:]]\{1,\}\)\{0,1\}\([A-Za-z_][A-Za-z0-9_]*\)=.*/\2/p' \
-                "$REVIEW_ROOT/etc/local.conf"); do
-        export "$_v"
-    done
-    unset _v
+    set +a
 fi
 
 # Globally-installed npm modules (jsdom, used by the wiki JS test harnesses) are

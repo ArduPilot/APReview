@@ -7,15 +7,16 @@
   "",
   "key            manifest key prefix; PRs are keyed <key>#<number>, or the bare",
   "               number when key is empty (the main repo).",
+  "discovery      main | explicit | rsync-mode. explicit means it is swept by",
+  "               name because no .gitmodules pass reaches it; submodules of",
+  "               ardupilot are found dynamically.",
+  "clone_dir      base clone directory, when it differs from the repo basename.",
+  "               The manifest key is NOT used: the wiki's key is wiki while its",
+  "               clone has always been ardupilot_wiki.",
   "post_comments  false means review and report it, but hold the comment for a",
   "               human rather than posting to someone else's project.",
-  "house_rules    ardupilot | fork | upstream | none - whose conventions a finding",
-  "               should be judged against.",
-  "discovery      explicit means it is swept by name because no .gitmodules pass",
-  "clone_dir      base clone directory when it differs from the repo basename;",
-  "               the manifest key is NOT used, because the wiki's key is wiki",
-  "               while its clone has always been ardupilot_wiki.",
-  "               reaches it. Submodules of ardupilot are found dynamically."
+  "house_rules    ardupilot | fork | upstream | none - whose conventions a",
+  "               finding should be judged against."
  ],
  "submodule_sweep": {
   "source": "ardupilot/.gitmodules",

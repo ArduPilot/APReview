@@ -88,7 +88,10 @@ def thread_of(repo, number):
     return items
 
 
-TOLD_HEAD = re.compile(r"head `([0-9a-f]{7,40})`")
+# Tolerates markdown between the word and the hash ("the same **head** `abc1234`"):
+# this regex is the only thing standing between an author who pushed and a
+# silent edit, so it should not be defeated by emphasis.
+TOLD_HEAD = re.compile(r"head[^`\n]{0,20}`([0-9a-f]{7,40})`", re.I)
 
 
 def told_head(body):
@@ -118,6 +121,14 @@ def decide(thread, body, accounts, head=None, mode="label"):
     if mode == "pr":
         return "repost", mine["id"]
     if same_text:
+        # Our newest comment is already right, but an older one of ours may have
+        # been left live by a deprecation that failed. Say so, so a rerun
+        # finishes the job instead of reporting nothing to do.
+        stale = [c for c in ours
+                 if c["id"] != mine["id"]
+                 and not c["body"].lstrip().startswith(DEPRECATED_PREFIX)]
+        if stale:
+            return "deprecate-stale", mine["id"]
         return "unchanged", mine["id"]
     # Follow-up exists to tell an author their code moved. An edit notifies
     # nobody, so this mode never edits.
@@ -161,7 +172,10 @@ def main():
     if not accounts:
         sys.exit("post-comments: no posting account known "
                  "(set REVIEW_COMMENT_ACCOUNTS or plan.accounts)")
-    hold = set(plan.get("hold") or [])
+    # Which repos hold their comments is recorded once, in repos.json. A plan may
+    # add to that, but it should not have to restate it: two sources for one fact
+    # is what this tool exists to stop.
+    hold = set(plan.get("hold") or []) | held_repos()
     base = os.path.dirname(os.path.abspath(args.plan))
     tally = {}
     failed = 0
@@ -191,6 +205,14 @@ def main():
             print("  REFUSED %s: body carries no %r marker" % (what, MARKER))
             count("refused"); failed += 1
             continue
+        # The run always knows the head it reviewed, so a plan entry without one
+        # is a bug in the run - and a silent one: decide() would fall back to
+        # "has anyone spoken since", which is the behaviour the head test exists
+        # to replace, and --dry-run would print "would edit" without a murmur.
+        if not entry.get("head"):
+            print("  REFUSED %s: plan entry has no head" % what)
+            count("refused"); failed += 1
+            continue
         if repo in hold:
             print("  held    %s (upstream repo, needs a human)" % what)
             count("held")
@@ -207,7 +229,9 @@ def main():
         action, cid = decide(thread, body, accounts,
                              head=entry.get("head"), mode=mode)
         if args.dry_run:
-            print("  would %-9s %s%s" % (action, what,
+            # same words a real run prints, so the two can be compared
+            print("  would %-9s %s%s" % (
+                {"post": "post", "repost": "repost"}.get(action, action), what,
                                          "" if cid is None else " (comment %s)" % cid))
             count(action)
             continue
@@ -215,6 +239,20 @@ def main():
         if action == "unchanged":
             print("  unchanged %s" % what)
             count("unchanged")
+            continue
+
+        if action == "deprecate-stale":
+            # nothing new to post; collapse whatever an earlier run left live
+            ok = True
+            for c in thread:
+                if (c["kind"] == "comment" and c["login"] in accounts
+                        and MARKER in c["body"] and c["id"] != cid
+                        and not c["body"].lstrip().startswith(DEPRECATED_PREFIX)):
+                    if not patch(repo, c["id"], deprecate_body(c["body"], c["at"])):
+                        ok = False
+            print("  %s %s" % ("tidied  " if ok else "FAILED  ", what))
+            count("tidied" if ok else "failed")
+            failed += 0 if ok else 1
             continue
 
         if action == "edit":
@@ -240,8 +278,21 @@ def main():
             old = [c for c in thread if c["kind"] == "comment" and c["id"] == cid]
             if old and not old[0]["body"].lstrip().startswith(DEPRECATED_PREFIX):
                 if not patch(repo, cid, deprecate_body(old[0]["body"], old[0]["at"])):
-                    print("  note    %s: new review posted; could not deprecate "
-                          "comment %s (not ours to edit)" % (what, cid))
+                    # The PR now shows two live AI reviews, which may disagree.
+                    # Whose comment it is decides whether that is a fault: one
+                    # written by the account we replaced is not ours to edit and
+                    # the handover job collapses it, but ours failing to PATCH
+                    # is a real failure the run should report.
+                    theirs = old[0]["login"] != accounts[0]
+                    print("  %s %s: new review posted, comment %s left "
+                          "undeprecated%s"
+                          % ("note   " if theirs else "PARTIAL", what, cid,
+                             " (written by %s, not ours to edit)" % old[0]["login"]
+                             if theirs else ""))
+                    count("undeprecated")
+                    if not theirs:
+                        failed += 1
+                    continue
         print("  %-8s %s" % (posted, what))
         count(posted)
 
@@ -249,6 +300,20 @@ def main():
                                or "nothing to do")
           + ("  (dry run)" if args.dry_run else ""))
     return 1 if failed else 0
+
+
+def held_repos():
+    """Repos whose comments are held for a human, from repos.json."""
+    here = os.path.realpath(__file__)
+    cfg = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(here))),
+                       "repos.json")
+    try:
+        with open(os.environ.get("REVIEW_REPO_CONFIG", cfg)) as f:
+            return {r["repo"] for r in json.load(f).get("repos", [])
+                    if not r.get("post_comments", True)}
+    except Exception:
+        # No config found: the plan's own hold list is then the only word on it.
+        return set()
 
 
 def patch(repo, cid, body):

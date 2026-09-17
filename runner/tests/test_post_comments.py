@@ -49,7 +49,9 @@ class Decide(unittest.TestCase):
         self.assertEqual(pc.decide(thread, NEW_BODY, ACCOUNTS,
                                    head="abcdef1234567890"), ("edit", 7))
 
-    def test_without_a_head_the_rules_fall_back_to_who_spoke_last(self):
+    def test_decide_without_a_head_falls_back_to_who_spoke_last(self):
+        # decide() stays permissive so it can be reasoned about in isolation;
+        # main() is what refuses a plan entry that omits the head
         thread = [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
         self.assertEqual(pc.decide(thread, NEW_BODY, ACCOUNTS), ("edit", 7))
 
@@ -150,7 +152,8 @@ class TheWiring(unittest.TestCase):
     def restore(self):
         pc.thread_of, pc.patch, pc.post = self.saved
 
-    def run_plan(self, thread, patch_ok=True, post_ok=True, mode="label", head=None):
+    def run_plan(self, thread, patch_ok=True, post_ok=True, mode="label",
+                 head="abcdef1234"):
         import json, os, sys
         d = self.tmp.name
         open(os.path.join(d, "b.md"), "w").write(NEW_BODY)
@@ -202,7 +205,7 @@ class TheWiring(unittest.TestCase):
         p = os.path.join(d, "plan2.json")
         json.dump({"accounts": ACCOUNTS,
                    "comments": [{"key": "1", "repo": "o/r", "number": 1,
-                                 "body_file": "b.md"}]}, open(p, "w"))
+                                 "head": "abcdef1234", "body_file": "b.md"}]}, open(p, "w"))
 
         def boom(*a):
             raise pc.GhError("comments: 502 Bad Gateway")
@@ -218,6 +221,78 @@ class TheWiring(unittest.TestCase):
             sys.argv = argv
         self.assertEqual(self.calls, [], "wrote to GitHub despite a failed read")
         self.assertEqual(rc, 1)
+
+
+class PlanWiring(unittest.TestCase):
+    """main() must actually pass the plan's head and mode to decide().
+
+    The fixes are pinned inside decide(); this pins the wiring that feeds it.
+    Discarding both fields used to leave the whole suite green.
+    """
+
+    def setUp(self):
+        self.seen = {}
+        self.tmp = __import__("tempfile").TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.saved = (pc.thread_of, pc.decide, pc.patch, pc.post)
+        self.addCleanup(lambda: setattr_all(pc, self.saved))
+
+    def run_plan(self, entry, mode=None):
+        import json, os, sys
+        d = self.tmp.name
+        open(os.path.join(d, "b.md"), "w").write(NEW_BODY)
+        plan = {"accounts": ACCOUNTS, "comments": [dict(entry, body_file="b.md")]}
+        if mode:
+            plan["mode"] = mode
+        p = os.path.join(d, "plan.json")
+        json.dump(plan, open(p, "w"))
+        pc.thread_of = lambda *a: [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+
+        def spy(thread, body, accounts, head=None, mode="label"):
+            self.seen = {"head": head, "mode": mode}
+            return "unchanged", 7
+
+        pc.decide = spy
+        pc.patch = pc.post = lambda *a, **k: True
+        argv = sys.argv
+        sys.argv = ["post-comments.py", p, "--dry-run"]
+        try:
+            pc.main()
+        finally:
+            sys.argv = argv
+        return self.seen
+
+    def test_the_head_from_the_plan_reaches_decide(self):
+        seen = self.run_plan({"key": "1", "repo": "o/r", "number": 1,
+                              "head": "0374a23d84"})
+        self.assertEqual(seen["head"], "0374a23d84")
+
+    def test_the_mode_from_the_plan_reaches_decide(self):
+        seen = self.run_plan({"key": "1", "repo": "o/r", "number": 1,
+                              "head": "abcdef1234"}, mode="followup")
+        self.assertEqual(seen["mode"], "followup")
+
+    def test_an_entry_with_no_head_is_refused_rather_than_silently_edited(self):
+        # a forgotten "head" key used to fall back to the pre-fix behaviour
+        import json, os, sys
+        d = self.tmp.name
+        open(os.path.join(d, "b.md"), "w").write(NEW_BODY)
+        p = os.path.join(d, "nohead.json")
+        json.dump({"accounts": ACCOUNTS,
+                   "comments": [{"key": "1", "repo": "o/r", "number": 1,
+                                 "body_file": "b.md"}]}, open(p, "w"))
+        pc.thread_of = lambda *a: [c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+        argv = sys.argv
+        sys.argv = ["post-comments.py", p, "--dry-run"]
+        try:
+            rc = pc.main()
+        finally:
+            sys.argv = argv
+        self.assertEqual(rc, 1)
+
+
+def setattr_all(mod, saved):
+    mod.thread_of, mod.decide, mod.patch, mod.post = saved
 
 
 class Deprecation(unittest.TestCase):

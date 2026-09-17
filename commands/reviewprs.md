@@ -1,6 +1,6 @@
 # Review PRs by Label, Author, or Follow-up
 
-Review a set of GitHub PRs and generate an HTML report. Checks the main ArduPilot repo, the ArduPilot wiki repo, all ArduPilot-owned submodule repos, the standalone ArduPilot repos (`SupportProxy`, `pymavlink`, `useralerts`, `MissionPlanner`, `MAVProxy`, `CustomBuild`, `MethodicConfigurator`, `ArduRemoteID`, `sphinx_rtd_theme`, `WebTools`, `AP_CameraGimbal`, `APReview` — the full list is in step 1), and the upstream `mavlink/mavlink` repo.
+Review a set of GitHub PRs and generate an HTML report. Checks every repo in `repos.json` — the main ArduPilot repo, the wiki, all ArduPilot-owned submodule repos, the standalone ArduPilot repos and the upstream `mavlink/mavlink` — so adding a repo is an edit to that file, not to this one.
 
 Run this from the root of an ArduPilot checkout (it reads `.gitmodules` in the working directory). The report is written to the repository root and works in any ArduPilot checkout, not just one.
 
@@ -219,10 +219,8 @@ path and the comment policy all differ:
    - The three label runs each publish their per-label latest **and** a dated archive
      (`DevCallTopic` → upcoming Tuesday, `DevCallEU` → upcoming Wednesday, both Canberra time; `AIReview`
      → today, since it has no associated dev call) and each auto-posts comments (all three are
-     comment-posting labels — step 8). Each sweeps **all repos** (main, wiki, the ArduPilot submodules and
-     the standalone ArduPilot repos — SupportProxy, pymavlink, useralerts, MissionPlanner, MAVProxy, CustomBuild,
-     MethodicConfigurator, ArduRemoteID, WebTools, AP_CameraGimbal, APReview — plus, for the report only,
-     upstream `mavlink/mavlink`).
+     comment-posting labels — step 8). Each sweeps **all repos** — everything `repos.py --sweep` lists, plus the ArduPilot-owned
+     submodules found in `.gitmodules`.
    - `followup` then reads those fresh reports; every PR the three label runs just re-reviewed is now at its
      told-head with a current comment, so `followup` correctly **skips** it. `followup` therefore acts
      only on PRs from *other* published label reports whose code moved since their last comment — often a
@@ -1147,24 +1145,18 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
      Timing does not enter into it. A same-day re-run where somebody has commented in between still gets a new comment, and a week-old comment that is still the last thing on the PR still gets edited in place. What matters is only whether an in-place edit would be buried.
 
      When the test says repost, instead of a silent in-place edit:
-     - **PATCH the old comment** to mark it deprecated. Prepend a marker line and collapse the original body so the record survives without adding noise:
-       ```markdown
-       > **Deprecated — see below for the updated review.**
-
-       <details><summary>Previous review (2026-08-05)</summary>
-
-       ...original body...
-
-       </details>
-       ```
-     - **Then post the new review as a fresh comment**, so it lands at the bottom of the thread and generates a notification.
+     - **Post the new review first, then deprecate the old one.** `post-comments.py` does it in that
+       order deliberately: deprecating first leaves a PR showing "Deprecated — see below for the
+       updated review" with nothing below it when the post fails. The deprecation collapses the old
+       body under a `<details>` block so the record survives without adding noise.
 
      Deciding it is `post-comments.py`'s job. Give it the plan and it works out, per PR, whether to
      post, edit in place, or deprecate-and-repost, by the rules in this section — which it
      implements and `runner/tests/test_post_comments.py` pins. Two fields matter to that decision:
 
      - `mode` — `label`, `followup` or `pr`. **FOLLOWUP never edits**, because that mode exists to
-       tell an author their code moved and an edit notifies nobody. **PR mode always leaves a
+       tell an author their code moved and an edit notifies nobody. A body byte-identical to the
+       one already there is still left alone in every mode - there is nothing to tell them. **PR mode always leaves a
        comment**, even at a head already reviewed, because a human asked for it by name.
      - `head` per entry — the head this review is of. Without it the tool cannot see that the author
        pushed, and would edit silently where it should repost.
@@ -1173,20 +1165,20 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
      only way an author answers: a force-push or new commits are none of those, so someone who
      replied *in code* and said nothing leaves the "has anyone spoken" test at zero — and an
      in-place edit generates no notification, so the one person actively waiting to hear is told
-     nothing. That is why every plan entry carries `head`: `post-comments.py` compares it against
-     the head quoted in our previous comment (`head \`<sha>\``) and reposts when they differ.
-     Observed on `#33975` and `#34094`; `runner/tests/test_post_comments.py` pins it.
-     This is the same reasoning FOLLOWUP mode already applies unconditionally, and it belongs here for
-     the same reason: that mode reaches these PRs only when it happens to run first, and a LABEL sweep
-     catches exactly the same authors mid-response. Observed on `#33975` on 2026-09-02 — the author
-     force-pushed 37 minutes after the comment, no one else posted, so the comment-only test said "edit"
-     and the re-review landed silently on a developer who had just pushed. `#34094` on 2026-08-20 was the
-     same shape with ~670 lines of response behind it.
+     nothing. That is why **every plan entry carries `head`**, and why `post-comments.py` refuses an
+     entry without one: it compares that head against the one quoted in our previous comment
+     (`head \`<sha>\``) and reposts when they differ.
 
-     Note the head test only fires when there *is* a previous head to compare with. A PR newly labelled
-     into this run, already carrying a comment from another label's sweep at the same head, has
-     `TOLD == NOW` and correctly gets an edit — which is the case the original test was right about and
-     which this does not disturb.
+     Observed twice. `#33975`, 2026-09-02: the author force-pushed 37 minutes after the comment,
+     nobody else posted, and the comment-only test said "edit" — so the re-review landed silently on
+     a developer who had just pushed. `#34094`, 2026-08-20: the same shape, with ~670 lines of
+     response behind it. FOLLOWUP mode already applied this reasoning unconditionally; a LABEL sweep
+     catches exactly the same authors mid-response, which is why the rule is not mode-specific.
+
+     The test only fires when there is a previous head to compare with. A PR newly labelled into this
+     run that already carries a comment from another label's sweep at the same head gets an edit,
+     which is correct — nothing has changed for its author. `runner/tests/test_post_comments.py`
+     pins both directions.
 
      Note this is a per-PR decision made at posting time, so compute it per PR rather than picking one
      mode for the whole run — in a typical batch some PRs will be quiet and get edits while others have

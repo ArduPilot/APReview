@@ -8,6 +8,8 @@ a repo that nothing sweeps is a repo nobody reviews.
 import importlib.util
 import json
 import os
+import subprocess
+import sys
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -84,29 +86,52 @@ class CloneDirs(unittest.TestCase):
         self.assertEqual(self.dirs()["mavlink/mavlink"], "upstream-mavlink")
 
 
-class Helper(unittest.TestCase):
-    def setUp(self):
-        os.environ["REVIEW_REPO_CONFIG"] = os.path.join(ROOT, "repos.json")
+class Cli(unittest.TestCase):
+    """Run repos.py as the scripts do. The previous version of these tests
+    rebuilt the filters in Python and compared the result against itself, so
+    replacing the --sweep body with `pass` left the whole suite green."""
 
-    def test_sweep_list_covers_every_explicitly_swept_repo(self):
-        swept = {r["repo"] for r in REPOS if r["discovery"] in ("main", "explicit")}
-        cfg = repos_mod.load()
-        listed = {r["repo"] for r in cfg["repos"]
-                  if r["discovery"] in ("main", "explicit")}
-        self.assertEqual(swept, listed)
+    def run_it(self, *args):
+        env = dict(os.environ, REVIEW_REPO_CONFIG=os.path.join(ROOT, "repos.json"))
+        out = subprocess.run([sys.executable,
+                              os.path.join(ROOT, "runner", "bin", "repos.py"), *args],
+                             capture_output=True, text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        return [l for l in out.stdout.splitlines() if l.strip()]
 
-    def test_clone_list_excludes_the_main_repo(self):
-        # it is cloned separately, with submodules
-        cfg = repos_mod.load()
-        clones = [r["repo"] for r in cfg["repos"] if r["discovery"] != "main"]
+    def test_sweep_prints_every_explicitly_swept_repo(self):
+        expected = {r["repo"] for r in REPOS if r["discovery"] in ("main", "explicit")}
+        self.assertEqual(set(self.run_it("--sweep")), expected)
+        self.assertTrue(expected, "a sweep of nothing publishes a confidently empty report")
+
+    def test_sweep_excludes_the_rsync_target(self):
+        # it is reviewed by its own mode, on its own account
+        self.assertNotIn("RsyncProject/rsync", self.run_it("--sweep"))
+
+    def test_clone_covers_everything_but_the_main_repo(self):
+        clones = self.run_it("--clone")
         self.assertNotIn("ArduPilot/ardupilot", clones)
-        self.assertIn("ArduPilot/APReview", clones)
+        self.assertIn("RsyncProject/rsync", clones)
+        self.assertEqual(len(clones), len(REPOS) - 1)
 
-    def test_notes_lookup_accepts_repo_key_or_bare_name(self):
-        cfg = repos_mod.load()
-        by_name = {r["repo"].split("/")[-1]: r for r in cfg["repos"]}
-        self.assertIn("WebTools", by_name)
-        self.assertTrue(by_name["WebTools"]["notes"])
+    def test_clone_dirs_pairs_every_repo_with_a_directory(self):
+        pairs = [l.split("\t") for l in self.run_it("--clone-dirs")]
+        self.assertTrue(all(len(p) == 2 and p[1] for p in pairs))
+        d = dict(pairs)
+        self.assertEqual(d["ArduPilot/ardupilot_wiki"], "ardupilot_wiki")
+        self.assertEqual(d["mavlink/mavlink"], "upstream-mavlink")
+
+    def test_notes_prints_the_repos_own_guidance(self):
+        out = "\n".join(self.run_it("--notes", "WebTools"))
+        self.assertIn("no GitHub Actions workflows", out)
+
+    def test_an_unknown_repo_is_an_error_not_silence(self):
+        env = dict(os.environ, REVIEW_REPO_CONFIG=os.path.join(ROOT, "repos.json"))
+        out = subprocess.run([sys.executable,
+                              os.path.join(ROOT, "runner", "bin", "repos.py"),
+                              "--notes", "NoSuchRepo"],
+                             capture_output=True, text=True, env=env)
+        self.assertNotEqual(out.returncode, 0)
 
 
 if __name__ == "__main__":

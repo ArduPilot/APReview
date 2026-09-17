@@ -18,12 +18,20 @@ import sys
 
 
 def config_path():
+    """repos.json from the checkout this script belongs to.
+
+    realpath, not abspath: the runner's ~/review/bin is a symlink into the
+    checkout, and abspath would stop at the symlink and look for repos.json in
+    ~/review. REVIEW_REPO_CONFIG overrides, for tests - it deliberately is not
+    exported by review-env.sh, because a deployed value would shadow the config
+    of whatever checkout a developer was actually editing.
+    """
     env = os.environ.get("REVIEW_REPO_CONFIG")
     if env:
         return env
-    # runner/bin/repos.py -> the checkout root
+    here = os.path.realpath(__file__)                 # .../runner/bin/repos.py
     return os.path.join(os.path.dirname(os.path.dirname(
-        os.path.dirname(os.path.abspath(__file__)))), "repos.json")
+        os.path.dirname(here))), "repos.json")
 
 
 def load():
