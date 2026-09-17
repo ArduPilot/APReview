@@ -45,16 +45,25 @@ read_account_file() {
 # target never spends the project's subscription" would quietly stop being true:
 # the guarantee used to be a hardcoded address, and a symlink that is missing or
 # broken must fail loudly rather than silently becoming default.
+# The root holds the role links. Private leaves protect nothing if anyone can
+# repoint the symlink that chooses between them. Separate from review_auth so
+# that writing into the root can check it without resolving a role - a role that
+# is broken is the usual reason to write there.
+auth_root_ok() {
+    local root
+    root=$(readlink -f "$REVIEW_AUTH" 2>/dev/null) || root="$REVIEW_AUTH"
+    if [ -d "$root" ] && [ -n "$(find "$root" -maxdepth 0 \
+                                      \( -perm /o+w -o ! -user "$(id -u)" \) 2>/dev/null)" ]; then
+        echo "$root is writable by other users or not yours" >&2
+        return 1
+    fi
+    return 0
+}
+
 review_auth() {
     local tool="$1" role="${2:-default}" link target root
     root=$(readlink -f "$REVIEW_AUTH" 2>/dev/null) || root="$REVIEW_AUTH"
-    # The root holds the role links. Private leaves protect nothing if anyone
-    # can repoint the symlink that chooses between them.
-    if [ -d "$root" ] && [ -n "$(find "$root" -maxdepth 0 \
-                                      \( -perm /o+w -o ! -user "$(id -u)" \) 2>/dev/null)" ]; then
-        echo "review_auth: $root is writable by other users or not yours" >&2
-        return 2
-    fi
+    auth_root_ok || { echo "review_auth: refusing $tool-$role" >&2; return 2; }
     link="$REVIEW_AUTH/$tool-$role"
     if [ ! -e "$link" ] && [ -L "$link" ]; then
         echo "review_auth: $tool-$role is a dangling symlink" >&2

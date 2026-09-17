@@ -19,7 +19,10 @@ AUTH_SH = os.path.join(BIN, "review-auth.sh")
 
 
 def sh(script, home, *args, path=None):
-    env = dict(os.environ, HOME=home)
+    # Built from nothing rather than inherited: a BASH_ENV that merely resets
+    # PATH made the positive stub test run the real CLI and fail.
+    env = {"HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/bash",
+           "LANG": "C.UTF-8"}
     if path:
         env["PATH"] = path + os.pathsep + env["PATH"]
     return subprocess.run(["bash", "-c", script, "_", *args],
@@ -250,6 +253,68 @@ class StatusView(Base):
         self.assertIn("~/.claude", line)
         self.assertIn("admin@example.org", line)
 
+    def test_a_matching_identity_is_not_flagged_as_a_conflict(self):
+        # flagging every role satisfies the conflict test on its own
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        out = self.status(path=self.stub_cli("admin@example.org"))
+        self.assertNotIn("CONFLICT", out.stdout)
+        self.assertNotIn("MISMATCH", out.stdout)
+
+    def test_a_record_naming_another_account_is_flagged(self):
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        open(os.path.join(self.auth, "claude-ardupilot", "ACCOUNT"), "w") \
+            .write("someone@example.com\n")
+        out = self.status(path=self.stub_cli("admin@example.org"))
+        self.assertIn("MISMATCH", out.stdout)
+        self.assertIn("someone@example.com", out.stdout)
+
+    def test_a_target_outside_the_root_is_not_shown_as_healthy(self):
+        outside = os.path.join(self.home, "elsewhere")
+        os.makedirs(outside)
+        self.link("claude-default", outside)
+        out = self.status(path=self.stub_cli())
+        line = [l for l in out.stdout.splitlines() if l.startswith("claude-default")][0]
+        self.assertIn("REFUSE", line)
+
+    def test_an_unsafe_root_is_not_shown_as_healthy(self):
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        os.chmod(self.auth, 0o777)
+        self.addCleanup(os.chmod, self.auth, 0o700)
+        out = self.status(path=self.stub_cli())
+        self.assertIn("REFUSE", out.stdout)
+        self.assertNotIn("admin@example.org", out.stdout)
+
+    def test_the_fallback_account_is_judged_like_any_other(self):
+        # the missing-default branch used to print and continue, skipping every
+        # check below it
+        own = os.path.join(self.home, ".claude")
+        os.makedirs(own, mode=0o700)
+        open(os.path.join(own, "ACCOUNT"), "w").write("someone@example.com\n")
+        out = self.status(path=self.stub_cli("admin@example.org"))
+        line = [l for l in out.stdout.splitlines() if l.startswith("claude-default")][0]
+        self.assertIn("MISMATCH", line)
+
+    def test_a_fallback_with_no_credentials_is_not_shown_as_signed_in(self):
+        os.makedirs(os.path.join(self.home, ".claude"), mode=0o700)
+        out = self.status()
+        line = [l for l in out.stdout.splitlines() if l.startswith("claude-default")][0]
+        self.assertIn("NOT SIGNED IN", line)
+
+    def test_a_codex_api_key_is_not_shown_as_an_account(self):
+        import json as _json
+        d = os.path.join(self.auth, "codex-personal")
+        _json.dump({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x",
+                    "tokens": {"account_id": "acct-1234"}},
+                   open(os.path.join(d, "auth.json"), "w"))
+        self.link("codex-default", "codex-personal")
+        out = self.status()
+        line = [l for l in out.stdout.splitlines() if l.startswith("codex-default")][0]
+        self.assertIn("API KEY", line)
+        self.assertNotIn("acct-1234", line)
+
     def test_a_missing_non_default_role_is_shown_as_fatal(self):
         out = self.status()
         line = [l for l in out.stdout.splitlines() if l.startswith("claude-rsync")][0]
@@ -359,6 +424,58 @@ class Switching(Base):
             t.join(30)
         self.assertEqual(len(done), 1)
         self.assertEqual(done[0].returncode, 0, done[0].stdout + done[0].stderr)
+
+    def test_a_symlinked_lock_is_refused_rather_than_written_through(self):
+        # a truncating open through a symlink empties whatever it points at
+        victim = os.path.join(self.home, "credentials")
+        open(victim, "w").write("secret\n")
+        os.symlink(victim, os.path.join(self.auth, ".claude-default.lock"))
+        self.link("claude-default", "claude-ardupilot")
+        out = self.use("claude", "default", "personal")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual(open(victim).read(), "secret\n")
+        self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
+                         "claude-ardupilot")
+
+    def test_an_unsafe_root_is_refused_before_the_lock_is_opened(self):
+        os.chmod(self.auth, 0o777)
+        self.addCleanup(os.chmod, self.auth, 0o700)
+        self.link("claude-default", "claude-ardupilot")
+        out = self.use("claude", "default", "personal")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.auth, ".claude-default.lock")))
+
+    def test_the_lock_is_held_until_the_switch_has_been_validated(self):
+        # releasing it once acquired still passes a test that only proves
+        # waiting; what matters is that nobody else can switch while this one
+        # is between replacing the link and deciding whether to keep it
+        import fcntl, threading, time
+        slow = os.path.join(self.home, "slow")
+        os.makedirs(slow)
+        f = os.path.join(slow, "find")
+        with open(f, "w") as fh:          # review_auth's root check calls find
+            fh.write("#!/bin/sh\nsleep 2\nexec /usr/bin/find \"$@\"\n")
+        os.chmod(f, 0o755)
+        self.link("claude-default", "claude-ardupilot")
+        done = []
+        t = threading.Thread(target=lambda: done.append(
+            self.use("claude", "default", "personal", path=slow)))
+        t.start()
+        try:
+            time.sleep(2.5)               # inside the post-switch validation
+            self.assertEqual(done, [], "the switch finished too early to test")
+            self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
+                             "claude-personal", "the link has not been replaced yet")
+            held = False
+            with open(os.path.join(self.auth, ".claude-default.lock"), "a") as fh:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    fcntl.flock(fh, fcntl.LOCK_UN)
+                except BlockingIOError:
+                    held = True
+            self.assertTrue(held, "the lock was released before validation")
+        finally:
+            t.join(60)
 
     def test_a_reader_never_sees_the_role_missing_during_a_switch(self):
         # unlink-then-symlink leaves a window in which a starting run resolves

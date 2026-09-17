@@ -76,7 +76,11 @@ select_account() {           # tool VAR -> exports VAR, or unsets it
            echo "       review-auth.sh status   shows what each role resolves to"
            echo "finish=$(date -Is) status=wrong-claude-account"
            exit 1 ;;
-        1) unset "$var"; return 0 ;;                 # the tool's own default
+        1) # No link for the default role: the tool's own directory. That is
+           # still a path that can be a symlink someone repoints between this
+           # check and the CLI's read, so it goes through the same rule below.
+           d=$(readlink -f "$HOME/.$tool" 2>/dev/null) || d=""
+           [ -n "$d" ] || { unset "$var"; return 0; } ;;
     esac
     # Setting the variable to the tool's own directory is not a no-op: `claude
     # auth status` then reports loggedIn with no address, because that record
@@ -90,8 +94,20 @@ select_account() {           # tool VAR -> exports VAR, or unsets it
         export "$var=$d"
     fi
 }
+# An inherited credential decides the account whatever the role says, and naming
+# them one at a time missed CLAUDE_SECURESTORAGE_CONFIG_DIR - which points the CLI
+# at another credential store while the selected directory still reports its own
+# address - and ANTHROPIC_AUTH_TOKEN. Clear the whole shape instead. Clearing
+# rather than refusing because a manual run from a terminal inside Claude Code
+# legitimately carries CLAUDE_CODE_* variables, and those are not credentials.
+INHERITED=$(env | sed -n \
+    's/^\(\(ANTHROPIC\|OPENAI\)_[A-Z0-9_]*\|\(CLAUDE\|CODEX\)_[A-Z0-9_]*\(TOKEN\|KEY\|AUTH\|SECRET\|CREDENTIAL[A-Z0-9_]*\|CONFIG_DIR\|STORAGE[A-Z0-9_]*\|BASE_URL\|HOME\)\)=.*/\1/p' \
+    | sort -u)
+for v in $INHERITED; do unset "$v" 2>/dev/null || true; done
+# names only, never values: the values are the thing being protected
+[ -z "$INHERITED" ] || echo "cleared from the environment: $(echo $INHERITED)"
 # Belt and braces: select_account unsets on the path where the role resolves to
-# the tool's own directory, and this clears anything inherited before it runs.
+# the tool's own directory, and the sweep above clears anything inherited.
 unset CLAUDE_CONFIG_DIR CODEX_HOME 2>/dev/null || true
 select_account claude CLAUDE_CONFIG_DIR
 select_account codex  CODEX_HOME
@@ -187,15 +203,6 @@ cd "$REVIEW_ROOT/work" || { echo "FATAL: no $REVIEW_ROOT/work"; exit 1; }
 
 clear_stale_oauth_lock "$CLAUDE_DIR"
 
-# An environment token overrides the config directory entirely, so the account we
-# selected would not be the account that pays. Refuse rather than guess.
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-    echo "FATAL: CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY is set; it would"
-    echo "       override the account directory chosen for role $ROLE"
-    echo "finish=$(date -Is) status=wrong-claude-account"
-    exit 1
-fi
-
 # Which account is this? Two sources: the directory's own record, and the CLI.
 # Where both answer they must agree - matching one local record against another
 # does not establish which subscription pays, and a disagreement is exactly the
@@ -266,10 +273,21 @@ try:
 except Exception:
     raise SystemExit
 tok = d.get("tokens") or {}
-print(tok.get("account_id") or d.get("account_id")
-      or ("api-key" if d.get("OPENAI_API_KEY") else ""))
+# An API key wins over leftover OAuth tokens inside the CLI, so an account id
+# still sitting in the file says nothing about which account gets billed.
+if (d.get("auth_mode") or "").lower() in ("apikey", "api_key") or (
+        d.get("OPENAI_API_KEY") and not d.get("auth_mode")):
+    print("api-key")
+else:
+    print(tok.get("account_id") or d.get("account_id") or "")
 PYB
 )
+if [ "$CODEX_ACCOUNT" = api-key ]; then
+    echo "FATAL: $CODEX_DIR authenticates with an API key, not a subscription"
+    echo "       account, so role $ROLE would bill whoever owns that key"
+    echo "finish=$(date -Is) status=wrong-codex-account"
+    exit 1
+fi
 if [ -z "$CODEX_ACCOUNT" ]; then
     echo "FATAL: $CODEX_DIR has no usable codex credentials (role $ROLE)"
     echo "       review-auth.sh login codex <account>   says how"

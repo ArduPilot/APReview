@@ -139,8 +139,9 @@ refused rather than echoed into a run log. A run refuses to start if:
 - its `ACCOUNT` disagrees with what it is signed in as;
 - the directory's own record and the CLI disagree about the address — two local
   records agreeing proves nothing about which subscription pays;
-- `CLAUDE_CODE_OAUTH_TOKEN` or `ANTHROPIC_API_KEY` is set in the environment,
-  because either would override the directory the role selected;
+- the Codex directory authenticates with an API key. An account id left in
+  `auth.json` by an earlier subscription login still matches `ACCOUNT`, but the
+  key is what gets billed;
 - `auth/` itself is writable by other users, or not yours — private account
   directories protect nothing if anyone can repoint the links that choose
   between them;
@@ -148,19 +149,41 @@ refused rather than echoed into a run log. A run refuses to start if:
   determined to check it against. A constraint must not disappear because
   reading it failed.
 
+An inherited credential decides the account whatever the role says, so before
+anything else the run clears every `ANTHROPIC_*` and `OPENAI_*` variable and
+every `CLAUDE_*`/`CODEX_*` one whose name carries `TOKEN`, `KEY`, `AUTH`,
+`SECRET`, `CREDENTIAL`, `CONFIG_DIR`, `STORAGE`, `BASE_URL` or `HOME`, and prints
+what it cleared - names only. Naming them one at a time missed
+`CLAUDE_SECURESTORAGE_CONFIG_DIR`, which points the CLI at another credential
+store while the selected directory still reports its own address. It clears
+rather than refuses because a manual run from a terminal inside Claude Code
+carries `CLAUDE_CODE_*` variables that are not credentials.
+
 Record the account **id** for Codex and the **address** for Claude — that is what
 each tool reports, and the runner compares like with like.
 
 Both tools are checked, not just Claude: a missing `auth.json` used to surface
 only when the validation pool failed, well into a run.
 
+`status` makes exactly the judgements the runner makes, so a role that reads as
+healthy there is one a run will accept. That includes the fallback below: a
+default role with no link is reported as the tool's own account, with the same
+checks applied, rather than as "not set".
+
 Two things worth knowing. An account directory keeps its address in
 `<dir>/.claude.json`, but only if it was created by `claude auth login` under
 `CLAUDE_CONFIG_DIR`; the tool's own `~/.claude` keeps it elsewhere, so a run
 whose role resolves there leaves the variable unset rather than setting it to the
-same path, which would make `claude auth status` report no address at all. And a
-role with no symlink falls back to `default`, so a new role costs nothing until
-it needs its own account.
+same path, which would make `claude auth status` report no address at all. That
+applies only when the path is genuinely that directory: if `~/.claude` is itself
+a symlink the variable is pinned to what it resolves to now, so repointing it
+mid-run cannot move the work to another account. And a role with no symlink falls
+back to `default`, so a new role costs nothing until it needs its own account.
+
+Switching takes a per-role lock. Two switches of the same role could otherwise
+interleave, and a switch that turned out to be invalid would revert over one that
+had already succeeded. If a revert cannot be made, `use` says so and names the
+account the role has been left on rather than reporting success.
 
 ## Publishing
 

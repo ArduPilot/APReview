@@ -85,8 +85,14 @@ try:
 except Exception:
     raise SystemExit
 tok = d.get("tokens") or {}
-print(tok.get("account_id") or d.get("account_id")
-      or ("signed in" if d.get("OPENAI_API_KEY") or tok else ""))
+# The runner refuses an API key: it bills whoever owns the key rather than the
+# subscription the role names, and it wins over any leftover account id here.
+if (d.get("auth_mode") or "").lower() in ("apikey", "api_key") or (
+        d.get("OPENAI_API_KEY") and not d.get("auth_mode")):
+    print("api-key")
+else:
+    print(tok.get("account_id") or d.get("account_id")
+          or ("signed in" if tok else ""))
 PY
                 ;;
     esac
@@ -97,34 +103,49 @@ status)
     printf '%-16s %-26s %s\n' ROLE ACCOUNT-DIR "SIGNED IN AS"
     for tool in $TOOLS; do
         for role in $ROLES; do
-            link="$AUTH/$tool-$role"
-            note=""
-            if [ ! -e "$link" ] && [ ! -L "$link" ]; then
-                # The runner falls back to the tool's own config for the default
-                # role and refuses for any other; say which, rather than "unset".
-                if [ "$role" = default ]; then
-                    dir="$HOME/.$tool"
-                    [ -d "$dir" ] || { printf '%-16s %-26s %s\n' "$tool-$role" "-" "(not set)"; continue; }
-                    printf '%-16s %-26s %s  (no link - the tool'"'"'s own default)\n' \
-                        "$tool-$role" "~/.$tool" "$(account_of "$tool" "$dir")"
-                else
-                    printf '%-16s %-26s %s\n' "$tool-$role" "-" "(not set)  RUNS WILL REFUSE"
-                fi
+            note=""; fallback=""
+            # Ask the resolver rather than reimplementing it: an auth root the
+            # runner will not touch, a target outside it, a dangling link - all
+            # of those used to read here as a healthy role.
+            dir=$(review_auth "$tool" "$role" 2>&1); rc=$?
+            if [ "$rc" -eq 2 ]; then
+                # an unusable root reports twice; keep the row on one line
+                why=$(printf '%s' "$dir" | sed 's/^review_auth: //' | tr '\n' ';' \
+                      | sed 's/;$//; s/;/; /g')
+                printf '%-16s %-26s %s\n' "$tool-$role" "-" "$why  RUNS WILL REFUSE"
                 continue
             fi
-            target=$(basename "$(readlink -f "$link")")
-            dir=$(readlink -f "$link")
+            if [ "$rc" -eq 1 ]; then
+                # No link for the default role: the runner falls back to the
+                # tool's own directory and runs, so report that account, not
+                # "not set" - but judge it by the same rules as any other.
+                dir=$(readlink -f "$HOME/.$tool" 2>/dev/null) || dir=""
+                if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+                    printf '%-16s %-26s %s\n' "$tool-$role" "-" "(not set)"
+                    continue
+                fi
+                target="~/.$tool"
+                fallback="  (no link - the tool's own default)"
+            else
+                target=$(basename "$dir")
+            fi
             want=""
-            if [ -e "$link/ACCOUNT" ] || [ -L "$link/ACCOUNT" ]; then
+            if [ -e "$dir/ACCOUNT" ] || [ -L "$dir/ACCOUNT" ]; then
                 # A record the runner cannot read stops a run, so it cannot be
                 # quietly treated here as no record at all.
-                want=$(read_account_file "$link/ACCOUNT" 2>/dev/null) \
+                want=$(read_account_file "$dir/ACCOUNT" 2>/dev/null) \
                     || note="  BAD ACCOUNT RECORD - runs will refuse"
             fi
             got=$(account_of "$tool" "$dir")
-            # The runner compares the CLI's answer with the directory's own and
-            # refuses when they disagree; status has to make the same comparison.
-            if [ -z "$note" ] && [ "$tool" = claude ]; then
+            # Credentials, not metadata: a directory can carry an address it was
+            # once signed in as and hold no credentials at all.
+            if [ -z "$got" ]; then
+                note="  NOT SIGNED IN"
+            elif [ "$got" = api-key ]; then
+                note="  API KEY, not a subscription - runs will refuse"
+            elif [ "$tool" = claude ] && [ -z "$note" ]; then
+                # The runner compares the CLI's answer with the directory's own
+                # and refuses when they disagree; make the same comparison.
                 rec=$(python3 - "$dir" <<'PYD' 2>/dev/null
 import json, os, sys
 try:
@@ -134,21 +155,23 @@ except Exception:
 print(a.get("emailAddress") or "")
 PYD
 )
-                [ -n "$rec" ] && [ -n "$got" ] && [ "$rec" != "$got" ] \
+                [ -n "$rec" ] && [ "$rec" != "$got" ] \
                     && note="  CONFLICT: directory records $rec - runs will refuse"
             fi
-            # Credentials, not metadata: a directory can carry an address it was
-            # once signed in as and hold no credentials at all.
-            [ -n "$got" ] || note="  NOT SIGNED IN"
-            if [ -z "$note" ] && [ -n "$want" ] && [ -n "$got" ]; then
-                # An email and a uuid are both identities but not the same one;
-                # comparing them reported MISMATCH on a correct setup.
-                case "$want:$got" in
-                    *@*:*@*|*-*-*:*-*-*) [ "$want" != "$got" ] && note="  MISMATCH: expected $want" ;;
-                    *) note="  (recorded $want, reported differently)" ;;
-                esac
+            if [ -z "$note" ]; then
+                if [ -n "$want" ] && [ -n "$got" ] && [ "$got" != api-key ]; then
+                    # An email and a uuid are both identities but not the same
+                    # one; comparing them reported MISMATCH on a correct setup.
+                    case "$want:$got" in
+                        *@*:*@*|*-*-*:*-*-*)
+                            [ "$want" != "$got" ] \
+                                && note="  MISMATCH: expected $want - runs will refuse" ;;
+                        *) note="  (recorded $want, reported differently)" ;;
+                    esac
+                fi
             fi
-            printf '%-16s %-26s %s%s\n' "$tool-$role" "$target" "${got:-none}" "$note"
+            printf '%-16s %-26s %s%s%s\n' "$tool-$role" "$target" "${got:-none}" \
+                "$note" "$fallback"
         done
     done
     ;;
@@ -189,7 +212,12 @@ use)
     # the gap that unlink-then-symlink leaves.
     # Two switches of the same role can interleave: the loser's revert would
     # otherwise undo - or delete - a switch the operator was told had succeeded.
-    exec 9>"$AUTH/.$tool-$role.lock" || { echo "could not lock $tool-$role"; exit 1; }
+    lockf="$AUTH/.$tool-$role.lock"
+    # Opening it is a write: through a symlink an unsafe root could aim that at
+    # any file we can write. Check the root before touching it, and never follow.
+    auth_root_ok || { echo "refusing to switch"; exit 1; }
+    [ ! -L "$lockf" ] || { echo "$lockf is a symlink - refusing to switch"; exit 1; }
+    exec 9>>"$lockf" || { echo "could not lock $tool-$role"; exit 1; }
     flock 9 || { echo "could not lock $tool-$role"; exit 1; }
     was=$(readlink "$link" 2>/dev/null || true)
     tmp="$AUTH/.$tool-$role.$$"; tmp2="$AUTH/.$tool-$role.revert.$$"
