@@ -49,8 +49,13 @@ class Base(unittest.TestCase):
         os.makedirs(d, exist_ok=True)
         f = os.path.join(d, "claude")
         with open(f, "w") as fh:
-            fh.write('#!/bin/sh\nprintf \'{"loggedIn": true, "email": "%s"}\\n\' '
-                     '"${STUB_EMAIL:-' + email + '}"\n')
+            fh.write('#!/bin/sh\n'
+                     "env | grep -oE '^(ANTHROPIC|CLAUDE)_[A-Z0-9_]+' > \"$HOME/cli-env\"\n"
+                     'printf \'{"loggedIn": true, "email": "%s", "authMethod": "%s",'
+                     ' "apiProvider": "%s", "configDirectory": "%s"}\\n\' '
+                     '"${STUB_EMAIL:-' + email + '}" "${STUB_METHOD:-claude.ai}" '
+                     '"${STUB_PROVIDER:-firstParty}" '
+                     '"${STUB_DIR:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}"\n')
         os.chmod(f, 0o755)
         return d
 
@@ -302,6 +307,45 @@ class StatusView(Base):
         out = self.status()
         line = [l for l in out.stdout.splitlines() if l.startswith("claude-default")][0]
         self.assertIn("NOT SIGNED IN", line)
+
+    def test_a_token_login_is_not_shown_as_the_subscription(self):
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        out = self.status(path=self.stub_cli())
+        self.assertIn("admin@example.org", out.stdout)
+        out = sh('STUB_METHOD=oauth_token "$1" status', self.home, AUTH_SH,
+                 path=self.stub_cli())
+        self.assertIn("not the subscription", out.stdout)
+
+    def test_it_asks_with_the_environment_the_runner_will_have(self):
+        # reading an identity that an inherited override supplied would report
+        # an account no run can use
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        sh('CLAUDE_SECURESTORAGE_CONFIG_DIR=/x "$1" status', self.home, AUTH_SH,
+           path=self.stub_cli())
+        with open(os.path.join(self.home, "cli-env")) as f:
+            self.assertNotIn("CLAUDE_SECURESTORAGE_CONFIG_DIR", f.read().split())
+
+    def test_credentials_read_from_another_directory_are_flagged(self):
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        d = self.stub_cli()
+        # a stub that reports reading somewhere other than what it was given
+        with open(os.path.join(d, "claude"), "a") as fh:
+            pass
+        out = sh('STUB_DIR="$2" "$1" status', self.home, AUTH_SH,
+                 os.path.join(self.auth, "claude-personal"), path=d)
+        self.assertIn("another directory", out.stdout)
+
+    def test_an_identity_that_cannot_be_checked_is_flagged(self):
+        # signed in, no address, and a record that therefore cannot hold
+        self.link("claude-default", "claude-ardupilot")
+        d = os.path.join(self.auth, "claude-ardupilot")
+        open(os.path.join(d, "ACCOUNT"), "w").write("admin@example.org\n")
+        out = sh('STUB_EMAIL= "$1" status', self.home, AUTH_SH,
+                 path=self.stub_cli(""))
+        self.assertIn("IDENTITY UNKNOWN", out.stdout)
 
     def test_a_codex_api_key_is_not_shown_as_an_account(self):
         import json as _json

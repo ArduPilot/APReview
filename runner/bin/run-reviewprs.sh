@@ -94,18 +94,8 @@ select_account() {           # tool VAR -> exports VAR, or unsets it
         export "$var=$d"
     fi
 }
-# An inherited credential decides the account whatever the role says, and naming
-# them one at a time missed CLAUDE_SECURESTORAGE_CONFIG_DIR - which points the CLI
-# at another credential store while the selected directory still reports its own
-# address - and ANTHROPIC_AUTH_TOKEN. Clear the whole shape instead. Clearing
-# rather than refusing because a manual run from a terminal inside Claude Code
-# legitimately carries CLAUDE_CODE_* variables, and those are not credentials.
-INHERITED=$(env | sed -n \
-    's/^\(\(ANTHROPIC\|OPENAI\)_[A-Z0-9_]*\|\(CLAUDE\|CODEX\)_[A-Z0-9_]*\(TOKEN\|KEY\|AUTH\|SECRET\|CREDENTIAL[A-Z0-9_]*\|CONFIG_DIR\|STORAGE[A-Z0-9_]*\|BASE_URL\|HOME\)\)=.*/\1/p' \
-    | sort -u)
-for v in $INHERITED; do unset "$v" 2>/dev/null || true; done
-# names only, never values: the values are the thing being protected
-[ -z "$INHERITED" ] || echo "cleared from the environment: $(echo $INHERITED)"
+clear_inherited_credentials
+[ -z "$CLEARED_VARS" ] || echo "cleared from the environment: $CLEARED_VARS"
 # Belt and braces: select_account unsets on the path where the role resolves to
 # the tool's own directory, and the sweep above clears anything inherited.
 unset CLAUDE_CONFIG_DIR CODEX_HOME 2>/dev/null || true
@@ -207,15 +197,20 @@ clear_stale_oauth_lock "$CLAUDE_DIR"
 # Where both answer they must agree - matching one local record against another
 # does not establish which subscription pays, and a disagreement is exactly the
 # case worth stopping for.
-read -r CLAUDE_LOGGED CLAUDE_CLI_ACCOUNT <<EOS
+# It also says which credential it used and where it read it from, which settles
+# what no amount of environment sweeping can: an inherited token, a cloud
+# provider, or a different config directory all show up here.
+read -r CLAUDE_LOGGED CLAUDE_CLI_ACCOUNT CLAUDE_METHOD CLAUDE_PROVIDER CLAUDE_CLI_DIR <<EOS
 $(claude auth status --json 2>/dev/null | python3 -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
-    print("no -"); raise SystemExit
-print(("yes" if d.get("loggedIn") else "no"), (d.get("email") or "-"))
-' 2>/dev/null || echo "no -")
+    print("no - - - -"); raise SystemExit
+print(("yes" if d.get("loggedIn") else "no"), (d.get("email") or "-"),
+      (d.get("authMethod") or "-"), (d.get("apiProvider") or "-"),
+      (d.get("configDirectory") or "-"))
+' 2>/dev/null || echo "no - - - -")
 EOS
 CLAUDE_REC_ACCOUNT=$(python3 - "$CLAUDE_DIR" <<'PYA' 2>/dev/null
 import json, os, sys
@@ -229,6 +224,31 @@ PYA
 if [ "$CLAUDE_LOGGED" != "yes" ]; then
     echo "FATAL: $CLAUDE_DIR is not signed in (role $ROLE)"
     echo "       review-auth.sh login claude <account>   says how"
+    echo "finish=$(date -Is) status=wrong-claude-account"
+    exit 1
+fi
+# claude.ai is a subscription login. oauth_token, apiKey and third_party are not:
+# they bill a token or a cloud account, and the directory goes on reporting the
+# address it was last signed in as either way.
+case "$CLAUDE_METHOD" in
+    claude.ai|-) ;;
+    *) echo "FATAL: claude authenticated with $CLAUDE_METHOD, not a subscription"
+       echo "       login, so role $ROLE would not bill the account it names"
+       echo "finish=$(date -Is) status=wrong-claude-account"
+       exit 1 ;;
+esac
+case "$CLAUDE_PROVIDER" in
+    firstParty|-) ;;
+    *) echo "FATAL: claude is using the $CLAUDE_PROVIDER provider, which bills a"
+       echo "       cloud account rather than the subscription role $ROLE names"
+       echo "finish=$(date -Is) status=wrong-claude-account"
+       exit 1 ;;
+esac
+# The directory it actually read, not the one we asked for.
+if [ "$CLAUDE_CLI_DIR" != "-" ] \
+   && [ "$(readlink -f "$CLAUDE_CLI_DIR" 2>/dev/null)" != "$(readlink -f "$CLAUDE_DIR")" ]; then
+    echo "FATAL: claude read its credentials from $CLAUDE_CLI_DIR, not the"
+    echo "       $CLAUDE_DIR chosen for role $ROLE"
     echo "finish=$(date -Is) status=wrong-claude-account"
     exit 1
 fi

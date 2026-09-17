@@ -149,15 +149,25 @@ refused rather than echoed into a run log. A run refuses to start if:
   determined to check it against. A constraint must not disappear because
   reading it failed.
 
-An inherited credential decides the account whatever the role says, so before
-anything else the run clears every `ANTHROPIC_*` and `OPENAI_*` variable and
-every `CLAUDE_*`/`CODEX_*` one whose name carries `TOKEN`, `KEY`, `AUTH`,
-`SECRET`, `CREDENTIAL`, `CONFIG_DIR`, `STORAGE`, `BASE_URL` or `HOME`, and prints
-what it cleared - names only. Naming them one at a time missed
-`CLAUDE_SECURESTORAGE_CONFIG_DIR`, which points the CLI at another credential
-store while the selected directory still reports its own address. It clears
-rather than refuses because a manual run from a terminal inside Claude Code
-carries `CLAUDE_CODE_*` variables that are not credentials.
+An inherited credential or provider selector decides the account whatever the
+role says, so before anything else the run clears every `ANTHROPIC_*` and
+`OPENAI_*` variable and every `CLAUDE_*`/`CODEX_*` one whose name contains
+`TOKEN`, `KEY`, `AUTH`, `SECRET`, `CREDENTIAL`, `CONFIG_DIR`, `STORAGE`,
+`BASE_URL`, `HOME` or `USE_`, anywhere in the name, and prints what it cleared -
+names only. Naming them one at a time missed `CLAUDE_SECURESTORAGE_CONFIG_DIR`,
+which points the CLI at another credential store while the selected directory
+still reports its own address; matching only the end of the name missed
+`CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`. It clears rather than refuses because
+a manual run from a terminal inside Claude Code carries `CLAUDE_CODE_*` variables
+that are not credentials.
+
+No sweep can be proved complete, so the run also asks the CLI what it actually
+did. `claude auth status --json` reports `authMethod`, `apiProvider` and
+`configDirectory`: the run refuses anything but a `claude.ai` login on the
+`firstParty` provider reading the directory the role selected. A token, a cloud
+provider or another config directory all show up there whatever the environment
+looked like. A CLI that reports none of the three is accepted, so an older one
+still runs.
 
 Record the account **id** for Codex and the **address** for Claude — that is what
 each tool reports, and the runner compares like with like.
@@ -165,7 +175,8 @@ each tool reports, and the runner compares like with like.
 Both tools are checked, not just Claude: a missing `auth.json` used to surface
 only when the validation pool failed, well into a run.
 
-`status` makes exactly the judgements the runner makes, so a role that reads as
+`status` clears the same variables before it asks, and makes exactly the
+judgements the runner makes, so a role that reads as
 healthy there is one a run will accept. That includes the fallback below: a
 default role with no link is reported as the tool's own account, with the same
 checks applied, rather than as "not set".

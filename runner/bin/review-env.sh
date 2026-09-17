@@ -45,6 +45,24 @@ read_account_file() {
 # target never spends the project's subscription" would quietly stop being true:
 # the guarantee used to be a hardcoded address, and a symlink that is missing or
 # broken must fail loudly rather than silently becoming default.
+# An inherited credential or provider selector decides the account whatever the
+# role says. Naming them one at a time missed CLAUDE_SECURESTORAGE_CONFIG_DIR,
+# which points the CLI at another credential store while the selected directory
+# goes on reporting its own address, and CLAUDE_CODE_USE_BEDROCK, which bills a
+# cloud account instead of any subscription. Match the shape, with the keyword
+# anywhere in the name - CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR is one of these.
+# Clearing rather than refusing: a run started from a terminal inside Claude Code
+# carries CLAUDE_CODE_* variables that are not credentials.
+# Sets CLEARED_VARS to the names it cleared, never the values. Not a function
+# that prints them: $(...) is a subshell, so the unsets would not reach the
+# caller at all.
+clear_inherited_credentials() {
+    local v
+    CLEARED_VARS=$(env | sed -n 's/^\(\(ANTHROPIC\|OPENAI\)_[A-Z0-9_]*\|\(CLAUDE\|CODEX\)_[A-Z0-9_]*\(TOKEN\|KEY\|AUTH\|SECRET\|CREDENTIAL\|CONFIG_DIR\|STORAGE\|BASE_URL\|HOME\|USE_[A-Z0-9_]\{1,\}\)[A-Z0-9_]*\)=.*/\1/p' \
+            | sort -u | tr '\n' ' ')
+    for v in $CLEARED_VARS; do unset "$v" 2>/dev/null || true; done
+}
+
 # The root holds the role links. Private leaves protect nothing if anyone can
 # repoint the symlink that chooses between them. Separate from review_auth so
 # that writing into the root can check it without resolving a role - a role that
