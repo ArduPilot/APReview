@@ -86,6 +86,24 @@ class CloneDirs(unittest.TestCase):
         self.assertEqual(self.dirs()["mavlink/mavlink"], "upstream-mavlink")
 
 
+class ConfigPath(unittest.TestCase):
+    """The runner reaches repos.py through a symlink, so realpath matters."""
+
+    def test_resolves_through_a_symlinked_bin(self):
+        import tempfile
+        d = tempfile.mkdtemp()
+        self.addCleanup(__import__("shutil").rmtree, d, True)
+        link = os.path.join(d, "bin")
+        os.symlink(os.path.join(ROOT, "runner", "bin"), link)
+        env = dict(os.environ)
+        env.pop("REVIEW_REPO_CONFIG", None)
+        out = subprocess.run([sys.executable, os.path.join(link, "repos.py"), "--sweep"],
+                             capture_output=True, text=True, env=env)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("ArduPilot/ardupilot", out.stdout,
+                      "abspath would look for repos.json beside the symlink")
+
+
 class Cli(unittest.TestCase):
     """Run repos.py as the scripts do. The previous version of these tests
     rebuilt the filters in Python and compared the result against itself, so
@@ -120,6 +138,27 @@ class Cli(unittest.TestCase):
         d = dict(pairs)
         self.assertEqual(d["ArduPilot/ardupilot_wiki"], "ardupilot_wiki")
         self.assertEqual(d["mavlink/mavlink"], "upstream-mavlink")
+
+    def test_keys_pairs_every_repo_with_its_manifest_key(self):
+        pairs = [l.split("\t") for l in self.run_it("--keys")]
+        self.assertEqual(len(pairs), len(REPOS))
+        d = {r: k for k, r in pairs}
+        self.assertEqual(d["mavlink/mavlink"], "upstream-mavlink")
+        self.assertEqual(d["ArduPilot/ardupilot"], "")
+
+    def test_notes_refuses_an_ambiguous_basename(self):
+        # `mavlink` is the fork's manifest key, not mavlink/mavlink's
+        env = dict(os.environ, REVIEW_REPO_CONFIG=os.path.join(ROOT, "repos.json"))
+        out = subprocess.run([sys.executable,
+                              os.path.join(ROOT, "runner", "bin", "repos.py"),
+                              "--notes", "mavlink"],
+                             capture_output=True, text=True, env=env)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("ambiguous", out.stderr + out.stdout)
+
+    def test_notes_answers_for_a_repo_swept_as_a_submodule(self):
+        out = "\n".join(self.run_it("--notes", "ArduPilot/mavlink"))
+        self.assertIn("swept through .gitmodules", out)
 
     def test_notes_prints_the_repos_own_guidance(self):
         out = "\n".join(self.run_it("--notes", "WebTools"))
