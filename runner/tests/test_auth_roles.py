@@ -361,7 +361,8 @@ class StatusView(Base):
     def test_a_custom_codex_provider_is_not_shown_as_the_account(self):
         d = os.path.join(self.auth, "codex-personal")
         import json as _json
-        _json.dump({"tokens": {"account_id": "acct-1234"}},
+        _json.dump({"tokens": {"access_token": "stub-access", "refresh_token": "stub-refresh",
+                              "id_token": "e30.e30.c3R1Yg", "account_id": "11111111-1111-4111-8111-111111111111"}},
                    open(os.path.join(d, "auth.json"), "w"))
         open(os.path.join(d, "config.toml"), "w").write(
             'model_provider = "probe"\n\n[model_providers.probe]\n'
@@ -370,7 +371,7 @@ class StatusView(Base):
         out = self.status()
         line = [l for l in out.stdout.splitlines() if l.startswith("codex-default")][0]
         self.assertIn("config.toml", line)
-        self.assertNotIn("acct-1234", line)
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", line)
 
     def test_a_partial_answer_from_the_cli_is_flagged(self):
         # the runner refuses it; a healthy row here would be the reassuring
@@ -393,11 +394,14 @@ class StatusView(Base):
         out = self.status(path=self.stub_cli())
         self.assertIn("ANTHROPIC_AUTH_TOKEN", out.stdout)
         self.assertIn("runs will refuse", out.stdout)
+        self.assertEqual(out.returncode, 1)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "cli-env")))
 
     def test_a_redirected_chatgpt_endpoint_is_flagged(self):
         d = os.path.join(self.auth, "codex-personal")
         import json as _json
-        _json.dump({"tokens": {"account_id": "acct-1234"}},
+        _json.dump({"tokens": {"access_token": "stub-access", "refresh_token": "stub-refresh",
+                              "id_token": "e30.e30.c3R1Yg", "account_id": "11111111-1111-4111-8111-111111111111"}},
                    open(os.path.join(d, "auth.json"), "w"))
         open(os.path.join(d, "config.toml"), "w").write(
             'chatgpt_base_url = "http://127.0.0.1:1/backend-api"\n')
@@ -405,7 +409,7 @@ class StatusView(Base):
         out = self.status()
         line = [l for l in out.stdout.splitlines() if l.startswith("codex-default")][0]
         self.assertIn("config.toml", line)
-        self.assertNotIn("acct-1234", line)
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", line)
 
     def test_a_warning_on_stderr_is_not_part_of_the_directory(self):
         # the resolver warns and still succeeds for the tool's own directory
@@ -423,13 +427,14 @@ class StatusView(Base):
         import json as _json
         d = os.path.join(self.auth, "codex-personal")
         _json.dump({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x",
-                    "tokens": {"account_id": "acct-1234"}},
+                    "tokens": {"access_token": "stub-access", "refresh_token": "stub-refresh",
+                              "id_token": "e30.e30.c3R1Yg", "account_id": "11111111-1111-4111-8111-111111111111"}},
                    open(os.path.join(d, "auth.json"), "w"))
         self.link("codex-default", "codex-personal")
         out = self.status()
         line = [l for l in out.stdout.splitlines() if l.startswith("codex-default")][0]
         self.assertIn("API KEY", line)
-        self.assertNotIn("acct-1234", line)
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", line)
 
     def test_a_missing_non_default_role_is_shown_as_fatal(self):
         out = self.status()
@@ -563,6 +568,22 @@ class Switching(Base):
         self.assertEqual(open(victim).read(), "secret\n")
         self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
                          "claude-ardupilot")
+
+    def test_an_unsafe_account_is_refused_before_the_cli_reads_it(self):
+        path = self.stub_cli()
+        self.link("claude-default", "claude-ardupilot")
+        for kind in ("root", "outside", "readable"):
+            with self.subTest(kind=kind):
+                account = self.leaves_root() if kind == "outside" else "personal"
+                mode_path = self.auth if kind == "root" else os.path.join(self.auth, "claude-personal")
+                os.chmod(mode_path, 0o777 if kind == "root" else 0o755)
+                try:
+                    out = self.use("claude", "default", account, path=path)
+                finally:
+                    os.chmod(mode_path, 0o700)
+                self.assertNotEqual(out.returncode, 0, out.stdout + out.stderr)
+                self.assertFalse(os.path.exists(os.path.join(self.home, "cli-env")),
+                                 "CLI read a rejected account directory")
 
     def test_an_unsafe_root_is_refused_before_the_lock_is_opened(self):
         os.chmod(self.auth, 0o777)

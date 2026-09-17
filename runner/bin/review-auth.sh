@@ -43,7 +43,7 @@ account_of() {   # tool dir -> the account signed in there, or empty
     local tool="$1" dir="$2"
     case "$tool" in
         claude) python3 - "$dir" <<'PYC' 2>/dev/null
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 d = sys.argv[1]
 # Ask the CLI whether this directory authenticates anyone. A .claude.json left
 # behind by a past login names an account the directory can no longer use, and
@@ -61,7 +61,24 @@ logged, email = False, ""
 try:
     out = subprocess.run(["claude", "auth", "status", "--json"],
                          capture_output=True, text=True, env=env)
+    if out.returncode != 0:
+        raise ValueError("auth status failed")
     got = json.loads(out.stdout)
+    if not isinstance(got, dict) or type(got.get("loggedIn")) is not bool:
+        raise ValueError("invalid login state")
+    for k in ("email", "authMethod", "apiProvider", "configDirectory"):
+        if k not in got:
+            continue
+        v = got[k]
+        if k == "email" and v is None:
+            continue
+        if not isinstance(v, str) or any(ord(c) < 32 or ord(c) == 127 for c in v):
+            raise ValueError("invalid field")
+        if k != "email" and (not v or v == "-"):
+            raise ValueError("empty metadata")
+        if k == "email" and v and (len(v) > 200 or not re.fullmatch(
+                r"[A-Za-z0-9._+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z0-9\-]+", v)):
+            raise ValueError("invalid email")
     logged, email = bool(got.get("loggedIn")), got.get("email") or ""
 except Exception:
     pass
@@ -70,7 +87,7 @@ if not logged:
 # The same three questions the runner asks: a subscription login, the first-party
 # provider, and the directory we selected - not one an inherited variable chose.
 keys = ("authMethod", "apiProvider", "configDirectory")
-if sum(1 for k in keys if got.get(k)) not in (0, 3):
+if sum(1 for k in keys if got.get(k)) != 3:
     print("partial-answer"); raise SystemExit
 if (got.get("authMethod") or "claude.ai") != "claude.ai" or \
         (got.get("apiProvider") or "firstParty") != "firstParty":
@@ -86,71 +103,18 @@ if not email:
         email = acct.get("emailAddress") or ""
     except Exception:
         pass
-print(email or "signed in")
+if not isinstance(email, str) or len(email) > 200 or (email and not re.fullmatch(
+        r"[A-Za-z0-9._+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z0-9\-]+", email)):
+    print("invalid-record")
+else:
+    print(email or "signed in")
 PYC
                 ;;
         codex)  # config.toml can send the request to another provider entirely,
                 # whatever account auth.json names
-                other=$(python3 - "$dir" <<'PYP' 2>/dev/null
-import os, re, sys
-# config.toml decides where the request goes and which credential pays for it,
-# so enumerating the settings that redirect it is a losing game - chatgpt_base_url
-# sent the account's own OAuth token to another host with model_provider still
-# "openai". Refuse anything that names an endpoint or a key, wherever it appears.
-path = os.path.join(sys.argv[1], "config.toml")
-if not os.path.exists(path):
-    raise SystemExit                       # no config is not a redirected one
-try:
-    import tomllib
-    with open(path, "rb") as f:
-        cfg = tomllib.load(f)
-except Exception:
-    # a file we cannot read is not a file we can vouch for
-    print("unreadable-config")
-    raise SystemExit
-OK_HOSTS = ("api.openai.com", "chatgpt.com", "auth.openai.com")
-bad = []
-def walk(node, where):
-    if isinstance(node, dict):
-        for k, v in node.items():
-            key = k.lower()
-            if key in ("env_key", "api_key", "env_http_headers", "http_headers"):
-                bad.append("%s%s" % (where, k))
-            elif key == "requires_openai_auth" and v is False:
-                bad.append("%s%s" % (where, k))
-            elif key == "model_provider" and v != "openai":
-                bad.append("%s%s" % (where, k))
-            else:
-                walk(v, "%s%s." % (where, k))
-    elif isinstance(node, list):
-        for v in node:
-            walk(v, where)
-    elif isinstance(node, str):
-        m = re.match(r"https?://([^/:]+)", node.strip())
-        if m and m.group(1) not in OK_HOSTS:
-            bad.append(where.rstrip(".") or "url")
-walk(cfg, "")
-if bad:
-    print("other-provider: " + ", ".join(sorted(set(bad))[:4]))
-PYP
-)
+                other=$(check_codex_config "$dir")
                 [ -z "$other" ] || { echo "$other"; return 0; }
-                python3 - "$dir/auth.json" <<'PY' 2>/dev/null
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    raise SystemExit
-tok = d.get("tokens") or {}
-# The runner refuses an API key: it bills whoever owns the key rather than the
-# subscription the role names, and it wins over any leftover account id here.
-if (d.get("auth_mode") or "").lower() in ("apikey", "api_key") or (
-        d.get("OPENAI_API_KEY") and not d.get("auth_mode")):
-    print("api-key")
-else:
-    print(tok.get("account_id") or d.get("account_id")
-          or ("signed in" if tok else ""))
-PY
+                read_codex_account "$dir"
                 ;;
     esac
 }
@@ -160,6 +124,7 @@ PY
 if ! clear_inherited_credentials; then
     echo "these could not be removed from the environment and would decide the"
     echo "account instead of the role - runs will refuse:$CLEARED_FAILED"
+    exit 1
 fi
 
 case "${1:-status}" in
@@ -208,11 +173,14 @@ status)
             # once signed in as and hold no credentials at all.
             if [ -z "$got" ]; then
                 note="  NOT SIGNED IN"
+            elif [ "$got" = unsupported-auth-mode ]; then
+                note="  unsupported Codex authentication mode - runs will refuse"
             elif [ "$got" = api-key ]; then
                 note="  API KEY, not a subscription - runs will refuse"
             elif [ -z "${got##other-provider*}" ] || [ "$got" = unreadable-config ]; then
-                note="  config.toml sends this elsewhere - runs will refuse"
-                got=${got%%:*}
+                note="  config.toml cannot establish the selected account - runs will refuse"
+            elif [ "$got" = invalid-record ]; then
+                note="  invalid identity record - runs will refuse"
             elif [ "$got" = partial-answer ]; then
                 note="  the CLI answered only in part - runs will refuse"
             elif [ "$got" = not-a-subscription ]; then
@@ -223,21 +191,30 @@ status)
                 # The runner compares the CLI's answer with the directory's own
                 # and refuses when they disagree; make the same comparison.
                 rec=$(python3 - "$dir" <<'PYD' 2>/dev/null
-import json, os, sys
+import json, os, re, sys
 try:
     a = json.load(open(os.path.join(sys.argv[1], ".claude.json"))).get("oauthAccount") or {}
 except Exception:
     a = {}
-print(a.get("emailAddress") or "")
+email = a.get("emailAddress") or ""
+if not isinstance(email, str) or len(email) > 200 or (email and not re.fullmatch(
+        r"[A-Za-z0-9._+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z0-9\-]+", email)):
+    print("invalid-record")
+else:
+    print(email)
 PYD
 )
-                [ -n "$rec" ] && [ "$rec" != "$got" ] \
-                    && note="  CONFLICT: directory records $rec - runs will refuse"
+                if [ "$rec" = invalid-record ]; then
+                    note="  invalid identity record in .claude.json - runs will refuse"
+                else
+                    [ -n "$rec" ] && [ "$rec" != "$got" ] \
+                        && note="  CONFLICT: directory records $rec - runs will refuse"
+                fi
             fi
             if [ -z "$note" ]; then
                 if [ -n "$want" ] && [ -n "$got" ] && [ "$got" != api-key ]; then
-                    # An email and a uuid are both identities but not the same
-                    # one; comparing them reported MISMATCH on a correct setup.
+                    # Different identity shapes do not waive the runner's
+                    # exact ACCOUNT comparison.
                     case "$want:$got" in
                         *@*:*@*|*-*-*:*-*-*)
                             [ "$want" != "$got" ] \
@@ -246,7 +223,7 @@ PYD
                             # the runner refuses this: a record it cannot check
                             # is not a record that holds
                             note="  IDENTITY UNKNOWN, cannot check $want - runs will refuse" ;;
-                        *) note="  (recorded $want, reported differently)" ;;
+                        *) note="  MISMATCH: expected $want - runs will refuse" ;;
                     esac
                 fi
             fi
@@ -286,8 +263,6 @@ use)
         echo "$link is a directory, not a role symlink - refusing to write inside it"
         exit 1
     fi
-    got=$(account_of "$tool" "$dir")
-    [ -n "$got" ] || echo "warning: $dir is not signed in - runs using it will refuse to start"
     # Atomic: a run starting mid-switch sees the old link or the new one, never
     # the gap that unlink-then-symlink leaves.
     # Two switches of the same role can interleave: the loser's revert would
@@ -327,6 +302,9 @@ use)
         echo "                  fix it with: review-auth.sh use $tool $role <account>"
         exit 1
     fi
+    # The CLI must not read a directory the resolver would refuse.
+    got=$(account_of "$tool" "$dir")
+    [ -n "$got" ] || echo "warning: $dir is not signed in - runs using it will refuse to start"
     echo "$tool-$role -> $tool-$acct${got:+  ($got)}"
     ;;
 login)

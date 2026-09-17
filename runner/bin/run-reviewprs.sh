@@ -62,8 +62,8 @@ esac
 # moving a workload to another subscription - when a weekly quota runs out, say -
 # is `review-auth.sh use claude default personal` and nothing else.
 ROLE=default
-case "$MODE" in
-    rsync|RsyncProject/rsync\#*) ROLE=rsync ;;
+case "$(printf %s "$MODE" | tr "[:upper:]" "[:lower:]")" in
+    rsync|rsyncproject/rsync\#*|https://github.com/rsyncproject/rsync/pull/*) ROLE=rsync ;;
 esac
 # Every path sets or unsets both variables. Leaving an inherited value in place
 # was a hole: a CLAUDE_CONFIG_DIR already in the environment survived whenever the
@@ -207,31 +207,56 @@ clear_stale_oauth_lock "$CLAUDE_DIR"
 # provider, or a different config directory all show up here.
 # One field per line, not six words: an account directory whose path contains a
 # space made the guard read part of the path as the field count.
-{ read -r CLAUDE_LOGGED; read -r CLAUDE_CLI_ACCOUNT; read -r CLAUDE_METHOD
-  read -r CLAUDE_PROVIDER; read -r CLAUDE_CLI_DIR; read -r CLAUDE_META; } <<EOS
-$(claude auth status --json 2>/dev/null | python3 -c '
-import json, sys
+{ IFS= read -r CLAUDE_LOGGED; IFS= read -r CLAUDE_CLI_ACCOUNT; IFS= read -r CLAUDE_METHOD
+  IFS= read -r CLAUDE_PROVIDER; IFS= read -r CLAUDE_CLI_DIR; IFS= read -r CLAUDE_META; } <<EOS
+$(reply=$(claude auth status --json 2>/dev/null) || reply=""
+  printf '%s\n' "$reply" | python3 -c '
+import json, re, sys
 keys = ("authMethod", "apiProvider", "configDirectory")
 try:
     d = json.load(sys.stdin)
+    if not isinstance(d, dict) or type(d.get("loggedIn")) is not bool:
+        raise ValueError("invalid login state")
+    for k in ("email", "authMethod", "apiProvider", "configDirectory"):
+        if k not in d:
+            continue
+        v = d[k]
+        if k == "email" and v is None:
+            continue
+        if not isinstance(v, str) or any(ord(c) < 32 or ord(c) == 127 for c in v):
+            raise ValueError("invalid field")
+        if k != "email" and (not v or v == "-"):
+            raise ValueError("empty metadata")
+        if k == "email" and v and (len(v) > 200 or not re.fullmatch(
+                r"[A-Za-z0-9._+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z0-9\-]+", v)):
+            raise ValueError("invalid email")
 except Exception:
     print("no\n-\n-\n-\n-\n0"); raise SystemExit
 out = [("yes" if d.get("loggedIn") else "no"), (d.get("email") or "-"),
        (d.get("authMethod") or "-"), (d.get("apiProvider") or "-"),
        (d.get("configDirectory") or "-"), str(sum(1 for k in keys if d.get(k)))]
-# a value with a newline in it would shift every field after it
-print("\n".join(v if "\n" not in v else "-" for v in out))
+print("\n".join(out))
 ' 2>/dev/null || printf 'no\n-\n-\n-\n-\n0\n')
 EOS
 CLAUDE_REC_ACCOUNT=$(python3 - "$CLAUDE_DIR" <<'PYA' 2>/dev/null
-import json, os, sys
+import json, os, re, sys
 try:
     acct = json.load(open(os.path.join(sys.argv[1], ".claude.json"))).get("oauthAccount") or {}
-    print(acct.get("emailAddress") or "-")
+    email = acct.get("emailAddress") or ""
+    if not isinstance(email, str) or len(email) > 200 or (email and not re.fullmatch(
+            r"[A-Za-z0-9._+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z0-9\-]+", email)):
+        print("invalid-record")
+    else:
+        print(email or "-")
 except Exception:
     print("-")
 PYA
 )
+if [ "$CLAUDE_REC_ACCOUNT" = invalid-record ]; then
+    echo "FATAL: $CLAUDE_DIR/.claude.json has an invalid identity record"
+    echo "finish=$(date -Is) status=wrong-claude-account"
+    exit 1
+fi
 if [ "$CLAUDE_LOGGED" != "yes" ]; then
     echo "FATAL: $CLAUDE_DIR is not signed in (role $ROLE)"
     echo "       review-auth.sh login claude <account>   says how"
@@ -241,10 +266,9 @@ fi
 # claude.ai is a subscription login. oauth_token, apiKey and third_party are not:
 # they bill a token or a cloud account, and the directory goes on reporting the
 # address it was last signed in as either way.
-# All three or none: a CLI too old to report any of them still runs, but one
-# that reports some and not others is not a version - it is an answer that has
-# lost the part that would have failed.
-if [ "$CLAUDE_META" != 0 ] && [ "$CLAUDE_META" != 3 ]; then
+# Without all three fields, neither the credential store nor billing provider
+# has been established. Older CLIs must be upgraded before this runner can run.
+if [ "$CLAUDE_META" != 3 ]; then
     echo "FATAL: claude reported only part of its authentication state"
     echo "       ($CLAUDE_META of authMethod, apiProvider, configDirectory)"
     echo "finish=$(date -Is) status=wrong-claude-account"
@@ -306,71 +330,21 @@ echo "claude account: ${ACCOUNT:-signed in, address not reported}  (role $ROLE, 
 
 # Codex had no check at all: a missing or malformed auth.json only surfaced when
 # the validation pool failed, well into the run.
-CODEX_ACCOUNT=$(python3 - "$CODEX_DIR/auth.json" <<'PYB' 2>/dev/null
-import json, sys
-try:
-    d = json.load(open(sys.argv[1]))
-except Exception:
-    raise SystemExit
-tok = d.get("tokens") or {}
-# An API key wins over leftover OAuth tokens inside the CLI, so an account id
-# still sitting in the file says nothing about which account gets billed.
-if (d.get("auth_mode") or "").lower() in ("apikey", "api_key") or (
-        d.get("OPENAI_API_KEY") and not d.get("auth_mode")):
-    print("api-key")
-else:
-    print(tok.get("account_id") or d.get("account_id") or "")
-PYB
-)
+CODEX_ACCOUNT=$(read_codex_account "$CODEX_DIR")
+
 # auth.json says which account signed in; config.toml says where the request
 # goes and which key pays for it. A custom provider sends another key to another
 # endpoint while auth.json goes on naming the subscription.
-CODEX_PROVIDER=$(python3 - "$CODEX_DIR" <<'PYC' 2>/dev/null
-import os, re, sys
-# config.toml decides where the request goes and which credential pays for it,
-# so enumerating the settings that redirect it is a losing game - chatgpt_base_url
-# sent the account's own OAuth token to another host with model_provider still
-# "openai". Refuse anything that names an endpoint or a key, wherever it appears.
-path = os.path.join(sys.argv[1], "config.toml")
-if not os.path.exists(path):
-    raise SystemExit                       # no config is not a redirected one
-try:
-    import tomllib
-    with open(path, "rb") as f:
-        cfg = tomllib.load(f)
-except Exception:
-    # a file we cannot read is not a file we can vouch for
-    print("unreadable-config")
-    raise SystemExit
-OK_HOSTS = ("api.openai.com", "chatgpt.com", "auth.openai.com")
-bad = []
-def walk(node, where):
-    if isinstance(node, dict):
-        for k, v in node.items():
-            key = k.lower()
-            if key in ("env_key", "api_key", "env_http_headers", "http_headers"):
-                bad.append("%s%s" % (where, k))
-            elif key == "requires_openai_auth" and v is False:
-                bad.append("%s%s" % (where, k))
-            elif key == "model_provider" and v != "openai":
-                bad.append("%s%s" % (where, k))
-            else:
-                walk(v, "%s%s." % (where, k))
-    elif isinstance(node, list):
-        for v in node:
-            walk(v, where)
-    elif isinstance(node, str):
-        m = re.match(r"https?://([^/:]+)", node.strip())
-        if m and m.group(1) not in OK_HOSTS:
-            bad.append(where.rstrip(".") or "url")
-walk(cfg, "")
-if bad:
-    print("other-provider: " + ", ".join(sorted(set(bad))[:4]))
-PYC
-)
+CODEX_PROVIDER=$(check_codex_config "$CODEX_DIR")
+
 if [ -n "$CODEX_PROVIDER" ]; then
     echo "FATAL: $CODEX_DIR/config.toml selects $CODEX_PROVIDER, so role $ROLE"
     echo "       would not bill the account auth.json names"
+    echo "finish=$(date -Is) status=wrong-codex-account"
+    exit 1
+fi
+if [ "$CODEX_ACCOUNT" = unsupported-auth-mode ]; then
+    echo "FATAL: $CODEX_DIR has an unsupported Codex authentication mode"
     echo "finish=$(date -Is) status=wrong-codex-account"
     exit 1
 fi

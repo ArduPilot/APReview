@@ -170,20 +170,40 @@ did. `claude auth status --json` reports `authMethod`, `apiProvider` and
 `configDirectory`: the run refuses anything but a `claude.ai` login on the
 `firstParty` provider reading the directory the role selected. A token, a cloud
 provider or another config directory all show up there whatever the environment
-looked like. All three or none: a CLI too old to report any of them still runs,
-but one reporting some and not others is not a version, it is an answer that has
-lost the part that would have failed.
+looked like. All three are required: a CLI too old to report them must be
+upgraded. Empty, null, sentinel or control-bearing fields are invalid, not
+missing metadata. The CLI must also exit successfully; a JSON body from a failed
+command is not proof of authentication. Paths are preserved without trimming
+whitespace.
 
-Codex is asked the same question a different way. `auth.json` names the account
-that signed in; `config.toml` decides where the request goes and which key pays
-for it. Enumerating the settings that redirect it is a losing game -
-`chatgpt_base_url` sent the account's own OAuth token to another host with
-`model_provider` still `openai` - so the check is the other way round: any URL in
-`config.toml` whose host is not OpenAI's, any `env_key`/`api_key`/header
-override, any `model_provider` that is not `openai`, anywhere in the file, and
-the run refuses naming the setting. A `config.toml` that cannot be parsed is
-refused too; an absent one is fine. If a legitimate entry ever trips this - an
-MCP server over http, say - the refusal names the key it objected to.
+Codex's `auth.json` must contain subscription tokens and a valid account id;
+an id left behind without tokens is not a login. Unsupported authentication
+modes are refused. The runner and `status` share the check of `config.toml`:
+
+- inference endpoints must use HTTPS on an OpenAI host, with no userinfo,
+  nonstandard port, query or fragment;
+- provider credentials, auth commands, headers and query overrides are refused,
+  including inline bearer tokens;
+- model providers must be `openai`, and the credential store must be `file`
+  if explicitly selected. A keyring can authenticate somebody other than the
+  account recorded in the checked `auth.json`;
+- every table is walked, not only the ones that route inference: `[otel]` takes
+  an exporter endpoint and its own authorization header. `mcp_servers` is the
+  exception - an MCP server's endpoint and headers authenticate that server, and
+  a third-party host there is the point of it;
+- an unreadable, malformed or dangling config is refused. An absent one is fine;
+- `config.toml` is one layer of several. `/etc/codex/config.toml`,
+  `managed_config.toml` and `requirements.toml`, and the `<name>.config.toml`
+  that `--profile` merges, are all checked, and the refusal names the layer.
+
+The refusal names the setting, including in `status`, without printing its value.
+Reported identities are validated before they reach logs.
+
+One layer is deliberately not checked here: Codex also merges project-local
+configuration from the tree it runs in, and a run works in checkouts of other
+people's pull requests. Nothing in this pre-flight can settle that - the checkout
+does not exist yet when it runs - so it needs its own answer in the part of the
+system that prepares those trees, not here.
 
 Record the account **id** for Codex and the **address** for Claude — that is what
 each tool reports, and the runner compares like with like.
@@ -205,8 +225,8 @@ whose role resolves there leaves the variable unset rather than setting it to th
 same path, which would make `claude auth status` report no address at all. That
 applies only when the path is genuinely that directory: if `~/.claude` is itself
 a symlink the variable is pinned to what it resolves to now, so repointing it
-mid-run cannot move the work to another account. And a role with no symlink falls
-back to `default`, so a new role costs nothing until it needs its own account.
+mid-run cannot move the work to another account. A missing `default` link uses
+the tool's own directory; every other missing role is refused.
 
 Switching takes a per-role lock. Two switches of the same role could otherwise
 interleave, and a switch that turned out to be invalid would revert over one that
