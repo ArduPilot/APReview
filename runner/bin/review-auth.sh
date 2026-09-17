@@ -98,12 +98,45 @@ status)
     for tool in $TOOLS; do
         for role in $ROLES; do
             link="$AUTH/$tool-$role"
-            [ -e "$link" ] || { printf '%-16s %-26s %s\n' "$tool-$role" "-" "(not set)"; continue; }
+            note=""
+            if [ ! -e "$link" ] && [ ! -L "$link" ]; then
+                # The runner falls back to the tool's own config for the default
+                # role and refuses for any other; say which, rather than "unset".
+                if [ "$role" = default ]; then
+                    dir="$HOME/.$tool"
+                    [ -d "$dir" ] || { printf '%-16s %-26s %s\n' "$tool-$role" "-" "(not set)"; continue; }
+                    printf '%-16s %-26s %s  (no link - the tool'"'"'s own default)\n' \
+                        "$tool-$role" "~/.$tool" "$(account_of "$tool" "$dir")"
+                else
+                    printf '%-16s %-26s %s\n' "$tool-$role" "-" "(not set)  RUNS WILL REFUSE"
+                fi
+                continue
+            fi
             target=$(basename "$(readlink -f "$link")")
             dir=$(readlink -f "$link")
-            want=$(read_account_file "$link/ACCOUNT" 2>/dev/null) || want=""
+            want=""
+            if [ -e "$link/ACCOUNT" ] || [ -L "$link/ACCOUNT" ]; then
+                # A record the runner cannot read stops a run, so it cannot be
+                # quietly treated here as no record at all.
+                want=$(read_account_file "$link/ACCOUNT" 2>/dev/null) \
+                    || note="  BAD ACCOUNT RECORD - runs will refuse"
+            fi
             got=$(account_of "$tool" "$dir")
-            note=""
+            # The runner compares the CLI's answer with the directory's own and
+            # refuses when they disagree; status has to make the same comparison.
+            if [ -z "$note" ] && [ "$tool" = claude ]; then
+                rec=$(python3 - "$dir" <<'PYD' 2>/dev/null
+import json, os, sys
+try:
+    a = json.load(open(os.path.join(sys.argv[1], ".claude.json"))).get("oauthAccount") or {}
+except Exception:
+    a = {}
+print(a.get("emailAddress") or "")
+PYD
+)
+                [ -n "$rec" ] && [ -n "$got" ] && [ "$rec" != "$got" ] \
+                    && note="  CONFLICT: directory records $rec - runs will refuse"
+            fi
             # Credentials, not metadata: a directory can carry an address it was
             # once signed in as and hold no credentials at all.
             [ -n "$got" ] || note="  NOT SIGNED IN"
@@ -154,21 +187,36 @@ use)
     [ -n "$got" ] || echo "warning: $dir is not signed in - runs using it will refuse to start"
     # Atomic: a run starting mid-switch sees the old link or the new one, never
     # the gap that unlink-then-symlink leaves.
+    # Two switches of the same role can interleave: the loser's revert would
+    # otherwise undo - or delete - a switch the operator was told had succeeded.
+    exec 9>"$AUTH/.$tool-$role.lock" || { echo "could not lock $tool-$role"; exit 1; }
+    flock 9 || { echo "could not lock $tool-$role"; exit 1; }
     was=$(readlink "$link" 2>/dev/null || true)
     tmp="$AUTH/.$tool-$role.$$"; tmp2="$AUTH/.$tool-$role.revert.$$"
-    ln -sfn "$tool-$acct" "$tmp" || { echo "could not create the new link"; exit 1; }
+    ln -sfn -- "$tool-$acct" "$tmp" || { echo "could not create the new link"; exit 1; }
     mv -T "$tmp" "$link" || { rm -f "$tmp"; echo "could not replace $link"; exit 1; }
     [ "$(readlink "$link")" = "$tool-$acct" ] || { echo "switch did not take effect"; exit 1; }
     # Refusing role names and self-links is not enough: an account that resolves
     # through the role link becomes a cycle only once the switch is made. Ask the
     # resolver, and put the old target back if the answer is no.
     if ! review_auth "$tool" "$role" >/dev/null 2>&1; then
+        # "reverted" has to mean it: a target beginning with - is an option to
+        # ln without --, and either step can fail.
+        back=0
         if [ -n "$was" ]; then
-            ln -sfn "$was" "$tmp2" 2>/dev/null && mv -T "$tmp2" "$link" 2>/dev/null
+            ln -sfn -- "$was" "$tmp2" 2>/dev/null && mv -T "$tmp2" "$link" 2>/dev/null \
+                && [ "$(readlink "$link")" = "$was" ] && back=1
+            rm -f "$tmp2"
         else
-            rm -f "$link"
+            rm -f "$link" && [ ! -e "$link" ] && [ ! -L "$link" ] && back=1
         fi
-        echo "$tool-$acct does not resolve as $tool-$role - reverted"
+        echo "$tool-$acct does not resolve as $tool-$role"
+        if [ "$back" = 1 ]; then
+            echo "reverted to ${was:-no link}"
+            exit 1
+        fi
+        echo "COULD NOT REVERT: $tool-$role still points at $tool-$acct"
+        echo "                  fix it with: review-auth.sh use $tool $role <account>"
         exit 1
     fi
     echo "$tool-$role -> $tool-$acct${got:+  ($got)}"
