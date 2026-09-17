@@ -70,6 +70,137 @@ clear_inherited_credentials() {
     [ -z "$CLEARED_FAILED" ]
 }
 
+# An account id alone is metadata, not a usable subscription credential.
+read_codex_account() {
+    python3 - "$1/auth.json" <<'PYAUTH' 2>/dev/null
+import base64, json, re, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    if not isinstance(d, dict):
+        raise ValueError("not an object")
+    mode = d.get("auth_mode")
+    if (mode or "").lower() in ("apikey", "api_key") or (
+            d.get("OPENAI_API_KEY") and not mode):
+        print("api-key")
+        raise SystemExit
+    if mode not in (None, "chatgpt"):
+        print("unsupported-auth-mode")
+        raise SystemExit
+    tok = d.get("tokens") or {}
+    if not all(isinstance(tok.get(k), str) and tok[k]
+               for k in ("access_token", "refresh_token", "id_token")):
+        raise ValueError("missing tokens")
+    # Codex deserializes this JWT when loading auth.json, even before a request.
+    parts = tok["id_token"].split(".")
+    if len(parts) != 3 or not all(parts):
+        raise ValueError("invalid ID token")
+    payload = base64.b64decode(parts[1] + "=" * (-len(parts[1]) % 4),
+                               altchars=b"-_", validate=True)
+    if not isinstance(json.loads(payload), dict):
+        raise ValueError("invalid ID token payload")
+    account = tok.get("account_id")
+    if not isinstance(account, str) or not re.fullmatch(
+            r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", account):
+        raise ValueError("missing account id")
+    print(account)
+except Exception:
+    pass
+PYAUTH
+}
+
+# One check for status and the runner, so their routing decisions cannot drift.
+check_codex_config() {
+    python3 - "$1" <<'PYCONFIG' 2>/dev/null || echo unreadable-config
+import glob, os, re, sys
+from urllib.parse import urlsplit
+# config.toml is one layer of several. codex also merges /etc/codex/*.toml and,
+# with --profile, <name>.config.toml beside it; a redirect in any of them is the
+# same redirect. The project-local layer is not here - a run works in checkouts
+# of other people's pull requests, and that layer needs its own answer.
+paths = [os.path.join(sys.argv[1], "config.toml")]
+paths += sorted(glob.glob(os.path.join(glob.escape(sys.argv[1]), "*.config.toml")))
+paths += ["/etc/codex/config.toml", "/etc/codex/managed_config.toml",
+          "/etc/codex/requirements.toml"]
+layers = []
+for path in paths:
+    if not os.path.lexists(path):
+        continue                           # absence differs from a broken link
+    try:
+        import tomllib
+        with open(path, "rb") as f:
+            layers.append((path, tomllib.load(f)))
+    except Exception:
+        print("unreadable-config")
+        raise SystemExit
+if not layers:
+    raise SystemExit
+OK_HOSTS = ("api.openai.com", "chatgpt.com", "auth.openai.com")
+bad = []
+def safe_url(value):
+    try:
+        u = urlsplit(value)
+        return (isinstance(value, str) and not re.search(r"[\s\\]", value)
+                and u.scheme == "https" and u.hostname in OK_HOSTS
+                and u.username is None and u.password is None
+                and u.port in (None, 443) and not u.query and not u.fragment)
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+def walk(node, where="", provider=False):
+    if not isinstance(node, dict):
+        bad.append(where.rstrip(".") or "config")
+        return
+    for k, v in node.items():
+        key = k.lower()
+        setting = where + k
+        if key in ("env_key", "api_key", "env_http_headers", "http_headers",
+                   "experimental_bearer_token", "auth", "aws", "query_params"):
+            bad.append(setting)
+        elif key == "requires_openai_auth" and v is not True:
+            bad.append(setting)
+        elif key == "model_provider" and v != "openai":
+            bad.append(setting)
+        elif key == "cli_auth_credentials_store" and v != "file":
+            bad.append(setting)
+        elif key == "forced_login_method" and v != "chatgpt":
+            bad.append(setting)
+        elif key == "mcp_oauth_callback_url" and not provider:
+            continue
+        elif key.endswith(("_url", "_endpoint")) or key in ("url", "endpoint"):
+            if not safe_url(v):
+                bad.append(setting)
+        elif key in ("profiles", "model_providers"):
+            if not isinstance(v, dict):
+                bad.append(setting)
+                continue
+            for name, entry in v.items():
+                walk(entry, setting + "." + name + ".", key == "model_providers")
+        elif provider and isinstance(v, (dict, list)):
+            # A new provider auth mechanism must not silently evade this check.
+            bad.append(setting)
+        elif key == "mcp_servers":
+            # An MCP server's own endpoint and headers authenticate that server,
+            # not inference, so a third-party host there is the point of it.
+            continue
+        elif isinstance(v, dict):
+            # Every other table too: [otel] carries an exporter endpoint and its
+            # headers, and inspecting only the tables that route inference left
+            # that reachable.
+            walk(v, setting + ".", provider)
+        elif isinstance(v, list):
+            for i, item in enumerate(v):
+                if isinstance(item, dict):
+                    walk(item, "%s[%d]." % (setting, i), provider)
+        # Instructions, notifications and project trust entries are not routing.
+for path, cfg in layers:
+    # name the layer when it is not the account's own config.toml
+    walk(cfg, "" if path == paths[0] else os.path.basename(path) + ":")
+if bad:
+    # TOML keys can contain arbitrary text; keep diagnostics on one safe line.
+    print("other-provider: " + ", ".join(ascii(k)[1:-1] for k in sorted(set(bad))[:4]))
+PYCONFIG
+}
+
 # The root holds the role links. Private leaves protect nothing if anyone can
 # repoint the symlink that chooses between them. Separate from review_auth so
 # that writing into the root can check it without resolving a role - a role that

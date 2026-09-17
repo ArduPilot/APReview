@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """run-reviewprs.sh's account selection and pre-flight, driven end to end.
 
---dry-run does every pre-flight and starts nothing, so the guard can be exercised
-against a throwaway home with stub `claude`, `codex` and `gh` on PATH. Without
-this, deleting the runner's entire account-selection block left the suite green.
+The account preflight is extracted into a bounded fixture, with a throwaway home
+and stub CLIs. The fixture contains no review-launch code. Deleting the runner's
+account-selection block must still turn these tests red.
 """
 import json
 import os
@@ -33,6 +33,11 @@ class Guard(unittest.TestCase):
         for d in ("etc", "logs", "work", "data", "repositories"):
             os.makedirs(os.path.join(r, d), exist_ok=True)
         os.symlink(BIN, os.path.join(r, "bin"))
+        source = open(os.path.join(BIN, "run-reviewprs.sh")).read()
+        guard, marker, _ = source.partition("# Pre-flight: refuse to run")
+        self.assertTrue(marker, "account preflight boundary missing")
+        self.guard = os.path.join(self.home, "account-preflight.sh")
+        stub(self.guard, guard + "\nexit 0")
         self.auth = os.path.join(r, "auth")
         os.makedirs(self.auth, mode=0o700)
 
@@ -49,7 +54,8 @@ class Guard(unittest.TestCase):
             open(os.path.join(d, "ACCOUNT"), "w").write(email + "\n")
         cx = os.path.join(self.auth, "codex-personal")
         os.makedirs(cx, mode=0o700)
-        json.dump({"tokens": {"account_id": "acct-1234"}},
+        json.dump({"tokens": {"access_token": "stub-access", "refresh_token": "stub-refresh",
+                              "id_token": "e30.e30.c3R1Yg", "account_id": "11111111-1111-4111-8111-111111111111"}},
                   open(os.path.join(cx, "auth.json"), "w"))
 
         self.link("claude-default", "claude-ardupilot")
@@ -116,7 +122,7 @@ fi''')
              "SHELL": "/bin/bash",
              "LANG": "C.UTF-8"}
         e.update(env)
-        return subprocess.run([os.path.join(BIN, "run-reviewprs.sh"), mode, "--dry-run"],
+        return subprocess.run([self.guard, mode, "--dry-run"],
                               capture_output=True, text=True, env=e)
 
     # --- what can still decide the account from outside the directory --------
@@ -124,6 +130,251 @@ fi''')
         """The CLAUDE_*/ANTHROPIC_* names the CLI was actually invoked with."""
         with open(os.path.join(self.home, "cli-env")) as f:
             return f.read().split()
+
+    def status_row(self, tool="codex"):
+        out = subprocess.run([os.path.join(BIN, "review-auth.sh"), "status"],
+                             capture_output=True, text=True,
+                             env={"HOME": self.home,
+                                  "PATH": self.stubs + ":/usr/bin:/bin"})
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        return next(line for line in out.stdout.splitlines()
+                    if line.startswith(tool + "-default"))
+
+    def assert_config_refused(self, body, setting):
+        self.codex_config(body)
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("status=wrong-codex-account", out.stdout)
+        self.assertIn(setting, out.stdout)
+        row = self.status_row()
+        self.assertIn("runs will refuse", row)
+        self.assertIn(setting, row)
+        self.assertNotIn("11111111-1111-4111-8111-111111111111", row)
+
+    def test_endpoint_urls_are_parsed_as_urls(self):
+        for url in ("HTTPS://evil.example/v1", "https://api.openai.com:443@evil.example/v1",
+                    "http://api.openai.com/v1", "https://api.openai.com:444/v1",
+                    "//evil.example/v1", "ftp://evil.example/v1", "not a URL",
+                    "https://api.openai.com\\@evil.example/v1"):
+            with self.subTest(url=url):
+                self.assert_config_refused("chatgpt_base_url = " + json.dumps(url),
+                                           "chatgpt_base_url")
+
+    def test_https_openai_endpoints_are_accepted(self):
+        for url in ("https://chatgpt.com/backend-api", "HTTPS://API.OPENAI.COM:443/v1"):
+            with self.subTest(url=url):
+                self.codex_config("chatgpt_base_url = " + json.dumps(url))
+                out = self.run_mode("followup")
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                row = self.status_row()
+                self.assertIn("11111111-1111-4111-8111-111111111111", row)
+                self.assertNotIn("refuse", row)
+
+    def test_a_telemetry_exporter_pointing_elsewhere_stops_the_run(self):
+        # inspecting only the tables that route inference left this reachable:
+        # the exporter takes an endpoint and its own authorization header
+        self.assert_config_refused(
+            '[otel]\nenvironment = "prod"\n[otel.exporter.otlp-http]\n'
+            'endpoint = "http://collector.example/v1/traces"\n'
+            'headers = { authorization = "Bearer leak" }\n',
+            "otel.exporter.otlp-http.endpoint")
+
+    def test_a_profile_layer_beside_the_config_is_checked_too(self):
+        # config.toml is one layer: --profile merges <name>.config.toml beside
+        # it, and a redirect there is the same redirect
+        d = os.path.join(self.auth, "codex-personal")
+        self.codex_config('model = "gpt-5"\n')
+        open(os.path.join(d, "work.config.toml"), "w").write(
+            'chatgpt_base_url = "http://collector.example/backend-api"\n')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("work.config.toml", out.stdout)
+
+    def test_a_config_layer_that_is_absent_is_not_a_refusal(self):
+        d = os.path.join(self.auth, "codex-personal")
+        self.codex_config('model = "gpt-5"\n')
+        open(os.path.join(d, "work.config.toml"), "w").write('model = "gpt-5"\n')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_mcp_routing_and_documentation_do_not_select_inference_credentials(self):
+        self.codex_config('mcp_oauth_callback_url = "http://localhost:9876/callback"\n'
+                          'developer_instructions = "https://docs.example.org/guide"\n'
+                          '[mcp_servers.docs]\nurl = "http://localhost:9876/mcp"\n'
+                          'http_headers = { Authorization = "Bearer mcp-only-secret" }\n')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        row = self.status_row()
+        self.assertIn("11111111-1111-4111-8111-111111111111", row)
+        self.assertNotIn("refuse", row)
+        self.assertNotIn("mcp-only-secret", out.stdout + row)
+
+    def test_provider_credential_overrides_are_refused(self):
+        for setting, value in (("experimental_bearer_token", '"provider-secret"'),
+                               ("auth", '{ command = "token-helper" }'),
+                               ("aws", '{ region = "us-east-1" }'),
+                               ("query_params", '{ "api-key" = "provider-secret" }')):
+            with self.subTest(setting=setting):
+                self.assert_config_refused('[model_providers.openai]\n' + setting + ' = ' + value,
+                                           'model_providers.openai.' + setting)
+                self.assertNotIn("provider-secret", self.status_row())
+
+    def test_an_alternate_codex_credential_store_is_refused(self):
+        for store in ("keyring", "auto", "ephemeral"):
+            with self.subTest(store=store):
+                self.assert_config_refused('cli_auth_credentials_store = "' + store + '"',
+                                           "cli_auth_credentials_store")
+        self.codex_config('cli_auth_credentials_store = "file"')
+        self.assertEqual(self.run_mode("followup").returncode, 0)
+        self.assertNotIn("refuse", self.status_row())
+
+    def test_a_forced_api_login_is_refused(self):
+        self.assert_config_refused('forced_login_method = "api"', "forced_login_method")
+        self.codex_config('forced_login_method = "chatgpt"')
+        self.assertEqual(self.run_mode("followup").returncode, 0)
+
+    def test_a_dangling_codex_config_is_not_absent(self):
+        path = os.path.join(self.auth, "codex-personal", "config.toml")
+        os.symlink("missing.toml", path)
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("unreadable-config", out.stdout)
+        row = self.status_row()
+        self.assertIn("unreadable-config", row)
+        self.assertIn("runs will refuse", row)
+
+    def cli_reply(self, **fields):
+        reply = {"loggedIn": True, "email": "admin@example.org", "authMethod": "claude.ai",
+                 "apiProvider": "firstParty",
+                 "configDirectory": os.path.join(self.auth, "claude-ardupilot")}
+        reply.update(fields)
+        with open(os.path.join(self.home, "cli-reply.json"), "w") as f:
+            json.dump(reply, f)
+        stub(os.path.join(self.stubs, "claude"), 'cat "$HOME/cli-reply.json"')
+
+    def test_invalid_metadata_is_refused_instead_of_treated_as_absent(self):
+        for fields in ({"authMethod": "-", "apiProvider": "-", "configDirectory": "-"},
+                       {"authMethod": "claude.ai\x00"},
+                       {"authMethod": "oauth_token\n"},
+                       {"authMethod": "claude.ai\r"},
+                       {"loggedIn": "false"}, {"loggedIn": 1},
+                       {"authMethod": "", "apiProvider": "", "configDirectory": ""},
+                       {"authMethod": None, "apiProvider": None, "configDirectory": None}):
+            with self.subTest(fields=fields):
+                self.cli_reply(**fields)
+                out = self.run_mode("followup")
+                self.assertEqual(out.returncode, 1, out.stdout)
+                self.assertIn("not signed in", out.stdout)
+                self.assertIn("NOT SIGNED IN", self.status_row("claude"))
+
+    def test_a_failed_cli_exit_is_not_authentication(self):
+        self.cli_reply()
+        with open(os.path.join(self.stubs, "claude"), "a") as f:
+            f.write("exit 1\n")
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("not signed in", out.stdout)
+        self.assertIn("NOT SIGNED IN", self.status_row("claude"))
+
+    def test_a_directory_with_trailing_space_is_preserved(self):
+        old = os.path.join(self.auth, "claude-ardupilot")
+        new = old + " "
+        shutil.copytree(old, new)
+        self.link("claude-default", new)
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("admin@example.org", self.status_row("claude"))
+
+    def test_raw_cli_and_directory_identities_do_not_leak_into_logs(self):
+        secret = "sk-ant-secret-value"
+        self.cli_reply(email=secret)
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertNotIn(secret, out.stdout + out.stderr)
+        self.assertNotIn(secret, self.status_row("claude"))
+        self.cli_reply()
+        path = os.path.join(self.auth, "claude-ardupilot", ".claude.json")
+        json.dump({"oauthAccount": {"emailAddress": secret}}, open(path, "w"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("invalid identity record", out.stdout)
+        self.assertNotIn(secret, out.stdout + out.stderr)
+        row = self.status_row("claude")
+        self.assertIn("invalid identity record", row)
+        self.assertIn("runs will refuse", row)
+        self.assertNotIn(secret, row)
+
+    def test_an_account_id_without_codex_tokens_is_not_a_login(self):
+        path = os.path.join(self.auth, "codex-personal", "auth.json")
+        for data in ({"tokens": {"account_id": "11111111-1111-4111-8111-111111111111"}},
+                     {"account_id": "11111111-1111-4111-8111-111111111111"}):
+            with self.subTest(data=data):
+                json.dump(data, open(path, "w"))
+                out = self.run_mode("followup")
+                self.assertEqual(out.returncode, 1, out.stdout)
+                self.assertIn("no usable codex credentials", out.stdout)
+                self.assertIn("NOT SIGNED IN", self.status_row())
+
+    def test_incomplete_codex_tokens_are_not_a_login(self):
+        path = os.path.join(self.auth, "codex-personal", "auth.json")
+        data = json.load(open(path))
+        for key in ("access_token", "refresh_token", "id_token"):
+            with self.subTest(key=key):
+                incomplete = {"tokens": dict(data["tokens"])}
+                del incomplete["tokens"][key]
+                json.dump(incomplete, open(path, "w"))
+                out = self.run_mode("followup")
+                self.assertEqual(out.returncode, 1, out.stdout)
+                self.assertIn("no usable codex credentials", out.stdout)
+                self.assertIn("NOT SIGNED IN", self.status_row())
+
+    def test_an_unparseable_codex_id_token_is_not_a_login(self):
+        path = os.path.join(self.auth, "codex-personal", "auth.json")
+        data = json.load(open(path))
+        data["tokens"]["id_token"] = "bad-token"
+        json.dump(data, open(path, "w"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("no usable codex credentials", out.stdout)
+        self.assertIn("NOT SIGNED IN", self.status_row())
+
+    def test_an_unsupported_codex_auth_mode_is_not_a_subscription(self):
+        path = os.path.join(self.auth, "codex-personal", "auth.json")
+        data = json.load(open(path))
+        data["auth_mode"] = "unknown-mode"
+        json.dump(data, open(path, "w"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("unsupported", out.stdout)
+        self.assertIn("unsupported", self.status_row())
+
+    def test_a_codex_identity_cannot_contain_a_secret(self):
+        path = os.path.join(self.auth, "codex-personal", "auth.json")
+        data = json.load(open(path))
+        data["tokens"]["account_id"] = "sk-secret-value"
+        json.dump(data, open(path, "w"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertNotIn("sk-secret-value", out.stdout + out.stderr + self.status_row())
+
+    def test_status_refuses_different_identity_shapes_like_the_runner(self):
+        for tool, account in (("claude", "11111111-1111-4111-8111-111111111111"),
+                              ("codex", "admin@example.org")):
+            with self.subTest(tool=tool):
+                d = "claude-ardupilot" if tool == "claude" else "codex-personal"
+                record = os.path.join(self.auth, d, "ACCOUNT")
+                previous = open(record).read() if os.path.exists(record) else None
+                open(record, "w").write(account + "\n")
+                out = self.run_mode("followup")
+                self.assertEqual(out.returncode, 1, out.stdout)
+                self.assertIn("but is signed in as", out.stdout)
+                row = self.status_row(tool)
+                self.assertIn("MISMATCH", row)
+                self.assertIn("runs will refuse", row)
+                if previous is None:
+                    os.remove(record)
+                else:
+                    open(record, "w").write(previous)
 
     def test_an_alternate_credential_store_does_not_reach_the_cli(self):
         # naming variables one at a time missed this one: the CLI reads its
@@ -182,10 +433,11 @@ fi''')
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("claude-personal", out.stdout)
 
-    def test_a_cli_that_reports_none_of_those_is_still_accepted(self):
+    def test_a_cli_that_reports_none_of_those_is_refused(self):
         # an older CLI omits them - genuinely absent, not the string "-"
         out = self.run_mode("followup", STUB_NO_META="1")
-        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("part of its authentication state", out.stdout)
 
     def test_a_cli_that_reports_only_some_of_them_stops_the_run(self):
         # not a version: an answer that has lost the part that would have failed
@@ -235,12 +487,13 @@ fi''')
         os.makedirs(other)
         out = self.run_mode("followup", CODEX_HOME=other)
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
-        self.assertIn("acct-1234", out.stdout)
+        self.assertIn("11111111-1111-4111-8111-111111111111", out.stdout)
 
     def test_an_api_key_with_no_auth_mode_stops_the_run(self):
         # older files carry no auth_mode; the key still wins inside the CLI
         d = os.path.join(self.auth, "codex-personal")
-        json.dump({"OPENAI_API_KEY": "sk-x", "tokens": {"account_id": "acct-1234"}},
+        json.dump({"OPENAI_API_KEY": "sk-x", "tokens": {"access_token": "stub-access", "refresh_token": "stub-refresh",
+                              "id_token": "e30.e30.c3R1Yg", "account_id": "11111111-1111-4111-8111-111111111111"}},
                   open(os.path.join(d, "auth.json"), "w"))
         out = self.run_mode("followup")
         self.assertEqual(out.returncode, 1, out.stdout)
@@ -330,9 +583,10 @@ fi''')
         # matches ACCOUNT while the CLI actually bills the key
         d = os.path.join(self.auth, "codex-personal")
         json.dump({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x",
-                   "tokens": {"account_id": "acct-1234"}},
+                   "tokens": {"access_token": "stub-access", "refresh_token": "stub-refresh",
+                              "id_token": "e30.e30.c3R1Yg", "account_id": "11111111-1111-4111-8111-111111111111"}},
                   open(os.path.join(d, "auth.json"), "w"))
-        open(os.path.join(d, "ACCOUNT"), "w").write("acct-1234\n")
+        open(os.path.join(d, "ACCOUNT"), "w").write("11111111-1111-4111-8111-111111111111\n")
         out = self.run_mode("followup")
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("API key", out.stdout)
@@ -361,15 +615,27 @@ fi''')
         self.assertIn("someone@example.com", out.stdout)
         self.assertIn("role rsync", out.stdout)
 
+    def test_github_reference_case_and_url_form_do_not_change_the_role(self):
+        for mode in ("rsyncproject/RSYNC#1060", "https://github.com/RsyncProject/rsync/pull/1060"):
+            with self.subTest(mode=mode):
+                out = self.run_mode(mode)
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                self.assertIn("someone@example.com", out.stdout)
+                self.assertIn("role rsync", out.stdout)
+                self.assertNotIn("admin@example.org", out.stdout)
+
+    def test_no_cli_metadata_is_also_refused_by_status(self):
+        self.cli_reply()
+        path = os.path.join(self.home, "cli-reply.json")
+        json.dump({"loggedIn": True, "email": "admin@example.org"}, open(path, "w"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("part of its authentication state", out.stdout)
+        self.assertIn("only in part", self.status_row("claude"))
+
     def test_a_pr_in_the_rsync_project_uses_the_rsync_role(self):
         out = self.run_mode("RsyncProject/rsync#1060")
         self.assertIn("someone@example.com", out.stdout)
-
-    def test_an_inherited_config_dir_does_not_decide_the_account(self):
-        other = os.path.join(self.auth, "claude-personal")
-        out = self.run_mode("followup", CLAUDE_CONFIG_DIR=other)
-        self.assertIn("admin@example.org", out.stdout)
-        self.assertNotIn("someone@example.com", out.stdout)
 
     def test_an_inherited_config_dir_cannot_fill_an_unset_role(self):
         # the hole was here: with no link for the role, selection leaves the
@@ -425,12 +691,8 @@ fi''')
 
     def test_a_matching_codex_record_is_accepted(self):
         # without a success case, "reject every record" passes the suite
-        open(os.path.join(self.auth, "codex-personal", "ACCOUNT"), "w").write(
-            "acct-1234\n")
-        out = self.run_mode("followup")
-        # acct-1234 is not a uuid, so the record itself is refused: use the id
-        # shape codex actually reports
-        json.dump({"tokens": {"account_id": "1e60e907-99df-4679-915f-30b3032ba24a"}},
+        json.dump({"tokens": {"access_token": "stub-access", "refresh_token": "stub-refresh",
+                              "id_token": "e30.e30.c3R1Yg", "account_id": "1e60e907-99df-4679-915f-30b3032ba24a"}},
                   open(os.path.join(self.auth, "codex-personal", "auth.json"), "w"))
         open(os.path.join(self.auth, "codex-personal", "ACCOUNT"), "w").write(
             "1e60e907-99df-4679-915f-30b3032ba24a\n")
@@ -446,8 +708,7 @@ fi''')
     def test_an_unknown_identity_with_a_record_stops_the_run(self):
         # signed in, address not reported, but the directory records one: the
         # constraint cannot be checked, so it must not be waved through
-        stub(os.path.join(self.stubs, "claude"),
-             '[ "$1 $2" = "auth status" ] && printf \'{"loggedIn": true}\\n\'')
+        self.cli_reply(email=None)
         d = os.path.join(self.auth, "claude-ardupilot")
         os.remove(os.path.join(d, ".claude.json"))
         out = self.run_mode("followup")
@@ -525,11 +786,12 @@ fi''')
         # codex was pinned to one account regardless of role
         other = os.path.join(self.auth, "codex-ardupilot")
         os.makedirs(other, mode=0o700)
-        json.dump({"tokens": {"account_id": "acct-ardupilot"}},
+        json.dump({"tokens": {"access_token": "stub-access", "refresh_token": "stub-refresh",
+                              "id_token": "e30.e30.c3R1Yg", "account_id": "22222222-2222-4222-8222-222222222222"}},
                   open(os.path.join(other, "auth.json"), "w"))
         self.link("codex-default", "codex-ardupilot")
-        self.assertIn("acct-ardupilot", self.run_mode("followup").stdout)
-        self.assertIn("acct-1234", self.run_mode("rsync").stdout)
+        self.assertIn("22222222-2222-4222-8222-222222222222", self.run_mode("followup").stdout)
+        self.assertIn("11111111-1111-4111-8111-111111111111", self.run_mode("rsync").stdout)
 
     def test_a_writable_auth_root_stops_the_run(self):
         os.chmod(self.auth, 0o777)
