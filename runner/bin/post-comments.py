@@ -175,7 +175,11 @@ def main():
     # Which repos hold their comments is recorded once, in repos.json. A plan may
     # add to that, but it should not have to restate it: two sources for one fact
     # is what this tool exists to stop.
-    hold = set(plan.get("hold") or []) | held_repos()
+    try:
+        hold = {r.lower() for r in (plan.get("hold") or [])} | held_repos()
+    except Exception as e:
+        # Nothing is posted on a guess about who consented to be commented on.
+        sys.exit("post-comments: cannot read the hold list from repos.json (%s)" % e)
     base = os.path.dirname(os.path.abspath(args.plan))
     tally = {}
     failed = 0
@@ -213,7 +217,7 @@ def main():
             print("  REFUSED %s: plan entry has no head" % what)
             count("refused"); failed += 1
             continue
-        if repo in hold:
+        if repo.lower() in hold:
             print("  held    %s (upstream repo, needs a human)" % what)
             count("held")
             continue
@@ -242,17 +246,10 @@ def main():
             continue
 
         if action == "deprecate-stale":
-            # nothing new to post; collapse whatever an earlier run left live
-            ok = True
-            for c in thread:
-                if (c["kind"] == "comment" and c["login"] in accounts
-                        and MARKER in c["body"] and c["id"] != cid
-                        and not c["body"].lstrip().startswith(DEPRECATED_PREFIX)):
-                    if not patch(repo, c["id"], deprecate_body(c["body"], c["at"])):
-                        ok = False
-            print("  %s %s" % ("tidied  " if ok else "FAILED  ", what))
-            count("tidied" if ok else "failed")
-            failed += 0 if ok else 1
+            # Nothing new to say, but an earlier run left one of ours live.
+            ok = collapse_stale(repo, thread, accounts, keep=cid, what=what)
+            print("  %s %s" % ("tidied " if ok else "PARTIAL", what))
+            count("tidied" if ok else "undeprecated")
             continue
 
         if action == "edit":
@@ -274,25 +271,10 @@ def main():
             count("failed"); failed += 1
             continue
         posted = "posted" if action == "post" else "reposted"
-        if cid is not None:
-            old = [c for c in thread if c["kind"] == "comment" and c["id"] == cid]
-            if old and not old[0]["body"].lstrip().startswith(DEPRECATED_PREFIX):
-                if not patch(repo, cid, deprecate_body(old[0]["body"], old[0]["at"])):
-                    # The PR now shows two live AI reviews, which may disagree.
-                    # Whose comment it is decides whether that is a fault: one
-                    # written by the account we replaced is not ours to edit and
-                    # the handover job collapses it, but ours failing to PATCH
-                    # is a real failure the run should report.
-                    theirs = old[0]["login"] != accounts[0]
-                    print("  %s %s: new review posted, comment %s left "
-                          "undeprecated%s"
-                          % ("note   " if theirs else "PARTIAL", what, cid,
-                             " (written by %s, not ours to edit)" % old[0]["login"]
-                             if theirs else ""))
-                    count("undeprecated")
-                    if not theirs:
-                        failed += 1
-                    continue
+        # Collapse every live review of ours, not only the newest: an earlier run
+        # whose deprecation failed leaves one behind, and with a changed body
+        # that older one used to stay live for good.
+        collapse_stale(repo, thread, accounts, keep=None, what=what)
         print("  %-8s %s" % (posted, what))
         count(posted)
 
@@ -303,17 +285,48 @@ def main():
 
 
 def held_repos():
-    """Repos whose comments are held for a human, from repos.json."""
+    """Repos whose comments are held for a human, from repos.json.
+
+    Raises rather than returning an empty set. An unreadable config is not "hold
+    nothing": the first repo to stop being held is mavlink/mavlink, a third-party
+    upstream that never opted into being commented on by a machine. A trailing
+    comma - the very mistake repos.json exists to make easy - would do it.
+    """
     here = os.path.realpath(__file__)
     cfg = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(here))),
                        "repos.json")
-    try:
-        with open(os.environ.get("REVIEW_REPO_CONFIG", cfg)) as f:
-            return {r["repo"] for r in json.load(f).get("repos", [])
-                    if not r.get("post_comments", True)}
-    except Exception:
-        # No config found: the plan's own hold list is then the only word on it.
-        return set()
+    path = os.environ.get("REVIEW_REPO_CONFIG", cfg)
+    with open(path) as f:                       # OSError propagates
+        data = json.load(f)                     # JSONDecodeError propagates
+    return {r["repo"].lower() for r in data.get("repos", [])
+            if not r.get("post_comments", True)}
+
+
+def collapse_stale(repo, thread, accounts, keep, what):
+    """Deprecate every live AI review of ours on this PR except `keep`.
+
+    Returns False only for a failure that is ours to fix. A comment written by an
+    account we replaced is not ours to edit - the handover job collapses those -
+    so that is reported and not counted against the run, which would otherwise
+    fail on every PR reviewed before the switch, every time, for ever.
+    """
+    ok = True
+    for c in thread:
+        if c["kind"] != "comment" or c["id"] == keep:
+            continue
+        if c["login"] not in accounts or MARKER not in c["body"]:
+            continue
+        if c["body"].lstrip().startswith(DEPRECATED_PREFIX):
+            continue
+        if patch(repo, c["id"], deprecate_body(c["body"], c["at"])):
+            continue
+        if c["login"] != accounts[0]:
+            print("  note    %s: comment %s left undeprecated (written by %s, "
+                  "not ours to edit)" % (what, c["id"], c["login"]))
+        else:
+            print("  PARTIAL %s: comment %s left undeprecated" % (what, c["id"]))
+            ok = False
+    return ok
 
 
 def patch(repo, cid, body):

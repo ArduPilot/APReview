@@ -295,6 +295,148 @@ def setattr_all(mod, saved):
     mod.thread_of, mod.decide, mod.patch, mod.post = saved
 
 
+class Guards(unittest.TestCase):
+    """The checks that decide whether we write to GitHub at all.
+
+    Each of these was a mutation that left the suite green: disabling the marker
+    refusal, disabling the hold, letting the config read fail open, and letting
+    the write helper report success without calling gh.
+    """
+
+    def setUp(self):
+        self.tmp = __import__("tempfile").TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.saved = (pc.thread_of, pc.decide, pc.patch, pc.post)
+        self.calls = []
+        self.addCleanup(lambda: setattr_all(pc, self.saved))
+        pc.thread_of = lambda *a: []
+        pc.patch = lambda *a: self.calls.append("patch") or True
+        pc.post = lambda *a: self.calls.append("post") or True
+
+    def run_plan(self, plan, body="x"):
+        import json, os, sys
+        d = self.tmp.name
+        open(os.path.join(d, "b.md"), "w").write(body)
+        p = os.path.join(d, "g.json")
+        json.dump(plan, open(p, "w"))
+        argv = sys.argv
+        sys.argv = ["post-comments.py", p]
+        try:
+            return pc.main()
+        finally:
+            sys.argv = argv
+
+    def test_a_body_without_the_marker_is_never_posted(self):
+        rc = self.run_plan({"accounts": ACCOUNTS,
+                            "comments": [{"key": "1", "repo": "o/r", "number": 1,
+                                          "head": "abc1234", "body_file": "b.md"}]},
+                           body="a review with no marker")
+        self.assertEqual(self.calls, [], "posted an unmarked machine review")
+        self.assertEqual(rc, 1)
+
+    def test_a_held_repo_is_never_posted_to(self):
+        rc = self.run_plan({"accounts": ACCOUNTS, "hold": ["o/r"],
+                            "comments": [{"key": "1", "repo": "o/r", "number": 1,
+                                          "head": "abc1234", "body_file": "b.md"}]},
+                           body=NEW_BODY)
+        self.assertEqual(self.calls, [], "posted to a repo whose comments are held")
+        self.assertEqual(rc, 0)
+
+    def test_the_hold_is_case_insensitive(self):
+        rc = self.run_plan({"accounts": ACCOUNTS, "hold": ["MAVLink/MAVLink"],
+                            "comments": [{"key": "1", "repo": "mavlink/mavlink",
+                                          "number": 1, "head": "abc1234",
+                                          "body_file": "b.md"}]}, body=NEW_BODY)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(rc, 0)
+
+    def test_an_unreadable_config_stops_the_run_rather_than_holding_nothing(self):
+        import os
+        os.environ["REVIEW_REPO_CONFIG"] = os.path.join(self.tmp.name, "nope.json")
+        self.addCleanup(os.environ.pop, "REVIEW_REPO_CONFIG", None)
+        with self.assertRaises(SystemExit):
+            self.run_plan({"accounts": ACCOUNTS,
+                           "comments": [{"key": "1", "repo": "o/r", "number": 1,
+                                         "head": "abc1234", "body_file": "b.md"}]},
+                          body=NEW_BODY)
+        self.assertEqual(self.calls, [])
+
+    def test_the_write_helper_actually_calls_gh(self):
+        import subprocess as sp
+        seen = {}
+        real = pc.subprocess.run
+
+        def spy(cmd, **kw):
+            seen["cmd"] = cmd
+            return sp.CompletedProcess(cmd, 0, "{}", "")
+
+        pc.subprocess.run = spy
+        real_post = self.saved[3]          # setUp stubbed pc.post; test the real one
+        try:
+            self.assertTrue(real_post("o/r", 1, "body"))
+        finally:
+            pc.subprocess.run = real
+        self.assertEqual(seen["cmd"][:2], ["gh", "api"])
+        self.assertIn("repos/o/r/issues/1/comments", seen["cmd"])
+
+    def test_reads_are_paginated(self):
+        import subprocess as sp
+        seen = {}
+        real = pc.subprocess.run
+
+        def spy(cmd, **kw):
+            seen["cmd"] = cmd
+            return sp.CompletedProcess(cmd, 0, "[]", "")
+
+        pc.subprocess.run = spy
+        try:
+            pc.gh_json("repos/o/r/issues/1/comments")
+        finally:
+            pc.subprocess.run = real
+        self.assertIn("--paginate", seen["cmd"],
+                      "a thread past page one would read as shorter than it is")
+
+
+class StaleComments(unittest.TestCase):
+    """An earlier run whose deprecation failed leaves a live comment behind."""
+
+    def test_an_identical_body_still_tidies_a_stale_one(self):
+        thread = [c(BOT, "2026-09-01T00:00:00Z", AI, cid=5),
+                  c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+        self.assertEqual(pc.decide(thread, AI, ACCOUNTS, head="abcdef1234"),
+                         ("deprecate-stale", 7))
+
+    def test_nothing_to_tidy_is_simply_unchanged(self):
+        dep = "> **Deprecated** ...\n" + AI
+        thread = [c(BOT, "2026-09-01T00:00:00Z", dep, cid=5),
+                  c(BOT, "2026-09-02T00:00:00Z", AI, cid=7)]
+        self.assertEqual(pc.decide(thread, AI, ACCOUNTS, head="abcdef1234"),
+                         ("unchanged", 7))
+
+    def test_a_legacy_comment_we_cannot_edit_is_not_a_run_failure(self):
+        # it belongs to the account we replaced; the handover job collapses it
+        saved = pc.patch
+        pc.patch = lambda *a: False
+        try:
+            ok = pc.collapse_stale("o/r",
+                                   [c(OLD, "2026-09-01T00:00:00Z", AI, cid=5)],
+                                   ACCOUNTS, keep=None, what="o/r#1")
+        finally:
+            pc.patch = saved
+        self.assertTrue(ok)
+
+    def test_our_own_comment_failing_to_collapse_is_a_failure(self):
+        saved = pc.patch
+        pc.patch = lambda *a: False
+        try:
+            ok = pc.collapse_stale("o/r",
+                                   [c(BOT, "2026-09-01T00:00:00Z", AI, cid=5)],
+                                   ACCOUNTS, keep=None, what="o/r#1")
+        finally:
+            pc.patch = saved
+        self.assertFalse(ok)
+
+
 class Deprecation(unittest.TestCase):
     def test_wraps_the_original_and_dates_it(self):
         out = pc.deprecate_body("original text", "2026-09-10T12:00:00Z")

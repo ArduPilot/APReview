@@ -1072,13 +1072,20 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
 
      ```bash
      cat > "$SCRATCH/plan.json" <<'JSON'
-     {"mode": "followup",
-      "hold": ["mavlink/mavlink"],
+     {"mode": "<label|followup|pr>",
       "comments": [{"key": "34292", "repo": "ArduPilot/ardupilot", "number": 34292,
                     "head": "0374a23d84", "body_file": "bodies/34292.md"}]}
      JSON
      "$HOME/review/bin/post-comments.py" "$SCRATCH/plan.json"   # --dry-run to see the decisions
      ```
+
+     **Set `mode` to the mode this run resolved in step 0** — `label` for a label sweep, `followup`,
+     or `pr` for a single PR named on the command line. It is not decoration: copying `followup`
+     into a LABEL run costs a needless deprecate-and-repost on every quiet PR, and copying `label`
+     into a PR-mode run makes an unchanged body post nothing at all, silently dropping the comment
+     that mode exists to leave. Every entry also needs the `head` it reviewed; the tool refuses an
+     entry without one rather than falling back to the behaviour the head test replaced. `hold`
+     comes from `repos.json` and does not belong in the plan.
 
      It decides per PR — post, edit in place, or deprecate-and-repost — by the rules below, which
      it implements and which `runner/tests/test_post_comments.py` covers. It refuses a body with no

@@ -66,12 +66,33 @@ def main(argv):
     elif what == "--notes":
         if len(argv) < 2:
             sys.exit("repos.py --notes <owner/repo or key>")
-        want = argv[1]
+        want = argv[1].lower()
+        # Match the full name or the manifest key only. Matching the basename as
+        # well made `--notes mavlink` answer with mavlink/mavlink's rules - hold
+        # the comment, upstream conventions - when `mavlink` is the manifest key
+        # of the ArduPilot fork, which is swept as a submodule and is a different
+        # project with different rules. That is the collision key_collisions
+        # exists to prevent, arriving through the lookup instead.
         for r in repos:
-            if want in (r["repo"], r.get("key"), r["repo"].split("/")[-1]):
+            if want in (r["repo"].lower(), (r.get("key") or "").lower()):
                 print(r.get("notes") or "(no special instructions)")
                 return 0
-        sys.exit("repos.py: %s is not in %s" % (want, config_path()))
+        for r in repos:
+            if want == r["repo"].split("/")[-1].lower():
+                sys.exit("repos.py: %s is ambiguous - %s has the manifest key "
+                         "%r. Ask by full name or by key."
+                         % (argv[1], r["repo"], r.get("key")))
+        # A repo can be swept without being listed: ardupilot's own submodules are
+        # found through .gitmodules. Say so, rather than leaving a reviewer who
+        # asked about ArduPilot/mavlink with nothing.
+        owners = [o.lower() for o in cfg.get("submodule_sweep", {}).get("owners", [])]
+        if "/" in want and want.split("/")[0] in owners:
+            print("Not listed in repos.json: ArduPilot-owned submodules of the main "
+                  "repo are swept through .gitmodules and keyed by their basename. "
+                  "The main repo's rules apply (house_rules: ardupilot), and "
+                  "comments post normally.")
+            return 0
+        sys.exit("repos.py: %s is not in %s" % (argv[1], config_path()))
     elif what == "--json":
         json.dump(cfg, sys.stdout, indent=1)
         print()
