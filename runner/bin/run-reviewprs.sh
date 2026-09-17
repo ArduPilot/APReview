@@ -56,15 +56,24 @@ esac
 # Per-mode Claude account, chosen before anything can spend quota: the EXIT trap
 # below takes a closing usage reading, and on a lock-skipped rsync run that would
 # otherwise be charged to - and recorded against - the wrong account.
-# `rsync` mode, and a single PR in that project asked for by hand, both belong to
-# the separate account: review-now.sh resolves rsync#1060 to RsyncProject/rsync#1060,
-# and without this that run would quietly spend the main subscription instead.
-RSYNC_TARGET=0
+# Which account this task runs as. `rsync` mode, and a single PR in that project
+# asked for by hand, are the non-ArduPilot target and use the rsync role;
+# everything else uses the default role. The roles are symlinks under auth/, so
+# moving a workload to another subscription - when a weekly quota runs out, say -
+# is `review-auth.sh use claude default personal` and nothing else.
+ROLE=default
 case "$MODE" in
-    rsync|RsyncProject/rsync\#*) RSYNC_TARGET=1 ;;
+    rsync|RsyncProject/rsync\#*) ROLE=rsync ;;
 esac
-if [ "$RSYNC_TARGET" = 1 ] && [ -n "${REVIEW_RSYNC_CLAUDE_DIR:-}" ]; then
-    export CLAUDE_CONFIG_DIR="$REVIEW_RSYNC_CLAUDE_DIR"
+# Setting CLAUDE_CONFIG_DIR to the tool's own default directory is not a no-op:
+# `claude auth status` then reports loggedIn but no email, because the address
+# lives in a record the CLI only consults when the variable is unset. Leave it
+# alone in that case and the account is reported normally.
+if d=$(review_auth claude "$ROLE") && [ "$d" != "$(readlink -f "$HOME/.claude")" ]; then
+    export CLAUDE_CONFIG_DIR="$d"
+fi
+if d=$(review_auth codex "$ROLE") && [ "$d" != "$(readlink -f "$HOME/.codex")" ]; then
+    export CODEX_HOME="$d"
 fi
 CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
 
@@ -85,7 +94,8 @@ mkdir -p "$REVIEW_LOGS" "$REVIEW_ROOT/etc"
 if [ "$DRY" = 1 ]; then
     echo "DRY RUN: mode=$MODE  host=$(hostname)"
     echo "  log would be:   $LOG"
-    echo "  claude account: ${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    echo "  claude config:  ${CLAUDE_CONFIG_DIR:-$HOME/.claude} (role $ROLE)"
+    echo "  codex home:     ${CODEX_HOME:-$HOME/.codex}"
 fi
 
 # Keep 30 days of logs; they are the only record of an unattended run.
@@ -156,36 +166,58 @@ cd "$REVIEW_ROOT/work" || { echo "FATAL: no $REVIEW_ROOT/work"; exit 1; }
 
 clear_stale_oauth_lock "$CLAUDE_DIR"
 
-# Which account is this? A run on the wrong one is the failure that matters:
-# it works, and quietly spends the wrong subscription. Refuse instead.
-ACCOUNT=$(claude auth status --json 2>/dev/null | python3 -c '
+# Which account is this, and is it the one that directory is meant to hold? A run
+# on the wrong account is the failure that matters: it works, and quietly spends
+# the wrong subscription. Which role uses which account is the operator's choice,
+# expressed by the auth/ symlinks - so the check here is not "must be this
+# address" but "this directory is signed in, as the account it records".
+# Signed in at all? That answer is reliable either way. The address is not: when
+# CLAUDE_CONFIG_DIR is set it comes from <dir>/.claude.json, which only a
+# directory created by `claude auth login` under that variable carries. So take
+# whichever source has it, and treat "signed in, address unknown" as fine.
+LOGGED_IN=$(claude auth status --json 2>/dev/null | python3 -c '
 import json,sys
 try:
-    d=json.load(sys.stdin)
+    print("yes" if json.load(sys.stdin).get("loggedIn") else "")
 except Exception:
-    sys.exit(0)
-print(d.get("email","") if d.get("loggedIn") else "")
+    pass
 ' 2>/dev/null)
-WANT=""
-if [ "$RSYNC_TARGET" = 1 ]; then
-    WANT="${REVIEW_RSYNC_CLAUDE_ACCOUNT:-}"
-    # An unset account must stop the run, not quietly fall through to the
-    # default one: a missing etc/account.conf would otherwise put tridge's own
-    # project back on the ArduPilot subscription with no sign in the log.
-    if [ -z "$WANT" ]; then
-        echo "FATAL: mode=rsync needs REVIEW_RSYNC_CLAUDE_ACCOUNT (set it in $REVIEW_ROOT/etc/account.conf)"
+ACCOUNT=$(python3 - "$CLAUDE_DIR" <<'PYA' 2>/dev/null
+import json, os, subprocess, sys
+d = sys.argv[1]
+try:
+    acct = json.load(open(os.path.join(d, ".claude.json"))).get("oauthAccount") or {}
+    if acct.get("emailAddress"):
+        print(acct["emailAddress"]); raise SystemExit
+except Exception:
+    pass
+try:
+    out = subprocess.run(["claude", "auth", "status", "--json"],
+                         capture_output=True, text=True)
+    print(json.loads(out.stdout).get("email") or "")
+except Exception:
+    pass
+PYA
+)
+if [ -z "$LOGGED_IN" ]; then
+    echo "FATAL: $CLAUDE_DIR is not signed in (role=$ROLE)"
+    echo "       review-auth.sh login claude <account>   says how"
+    echo "finish=$(date -Is) status=wrong-claude-account"
+    exit 1
+fi
+if [ -f "$CLAUDE_DIR/ACCOUNT" ] && [ -n "$ACCOUNT" ]; then
+    WANT=$(cat "$CLAUDE_DIR/ACCOUNT")
+    if [ "$ACCOUNT" != "$WANT" ]; then
+        echo "FATAL: $CLAUDE_DIR records $WANT but is signed in as $ACCOUNT"
+        echo "       either sign it back in, or update its ACCOUNT file"
         echo "finish=$(date -Is) status=wrong-claude-account"
         exit 1
     fi
 fi
-if [ -n "$WANT" ] && [ "$ACCOUNT" != "$WANT" ]; then
-    echo "FATAL: mode=$MODE must run as $WANT, but $CLAUDE_DIR is ${ACCOUNT:-not logged in}"
-    echo "       log in once with:"
-    echo "         CLAUDE_CONFIG_DIR=$CLAUDE_DIR claude auth login --email $WANT"
-    echo "finish=$(date -Is) status=wrong-claude-account"
-    exit 1
+echo "claude account: ${ACCOUNT:-signed in, address not reported}  (role $ROLE, config $CLAUDE_DIR)"
+if [ -n "${CODEX_HOME:-}" ]; then
+    echo "codex home:     $CODEX_HOME"
 fi
-echo "claude account: ${ACCOUNT:-unknown}  (config $CLAUDE_DIR)"
 
 # Pre-flight: refuse to run if the permission rules are not in force. This box
 # runs unattended, so a settings.json that has lost its deny list must stop the

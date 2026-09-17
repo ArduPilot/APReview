@@ -18,11 +18,14 @@ REVIEW_PUBLIC_URL="https://reviews.example.org"
 # Name shown on the runs dashboard. Defaults to the short hostname.
 #REVIEW_BOX_NAME="runner1"
 
-# Optional: run `reviewprs rsync` as a separate Claude account, so that project's
-# reviews do not consume the main account's quota. Log that account in once with
-#   CLAUDE_CONFIG_DIR=$HOME/review/etc/claude-rsync claude auth login --email <addr>
-# and name the address here. Leave unset to run every mode as the default account.
-#REVIEW_RSYNC_CLAUDE_ACCOUNT="someone@example.com"
+# Accounts are not configured here. Each one is a directory under
+# $HOME/review/auth, and a symlink says which account each role uses:
+#
+#   review-auth.sh status                        what every role resolves to
+#   review-auth.sh login claude personal         how to sign an account in
+#   review-auth.sh use claude default personal   move a role to another account
+#
+# The rsync role covers the non-ArduPilot target; everything else is default.
 
 # Accounts whose AI comments count as ours, space separated, newest first. The
 # account you post as now, plus any it replaced - otherwise comments posted

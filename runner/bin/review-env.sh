@@ -5,6 +5,24 @@ export REVIEW_DATA="$REVIEW_ROOT/data"
 export REVIEW_LOGS="$REVIEW_ROOT/logs"
 export REVIEW_REPOS="$REVIEW_ROOT/repositories"
 
+# --- accounts ------------------------------------------------------------------
+# One directory per account under auth/, and a symlink per role saying which
+# account that role uses - see review-auth.sh. Never in git: these hold
+# credentials. A task resolves its own directories rather than inheriting
+# whatever the box happens to be signed in as.
+export REVIEW_AUTH="$REVIEW_ROOT/auth"
+
+# review_auth <claude|codex> <role> - the account directory for that role, or
+# the default role's, or nothing if neither exists (then the tool's own default
+# applies, which is the box's own ~/.claude or ~/.codex).
+review_auth() {
+    local tool="$1" role="${2:-default}" d
+    for d in "$REVIEW_AUTH/$tool-$role" "$REVIEW_AUTH/$tool-default"; do
+        [ -d "$d" ] && { readlink -f "$d"; return 0; }
+    done
+    return 1
+}
+
 
 # Isolated git config: no https->ssh rewrite, so HTTPS clones work without a key.
 export GIT_CONFIG_GLOBAL="$REVIEW_ROOT/etc/gitconfig"
@@ -29,13 +47,6 @@ export PATH="$REVIEW_ROOT/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 # CLAUDE_CONFIG_DIR relocates the whole config dir, credentials included; the
 # shared parts (commands, skills, CLAUDE.md, plugins) are symlinks back into
 # ~/.claude so the skill can never drift between the two accounts.
-# A mode can run as its own Claude account, so that work does not eat the main
-# account's quota. CLAUDE_CONFIG_DIR relocates the whole config dir, credentials
-# included; the shared parts (commands, skills, CLAUDE.md, plugins) are symlinks
-# back into ~/.claude so the command can never drift between accounts. The
-# address is set in etc/local.conf; an env value wins, for testing.
-export REVIEW_RSYNC_CLAUDE_DIR="$REVIEW_ROOT/etc/claude-rsync"
-export REVIEW_RSYNC_CLAUDE_ACCOUNT="${REVIEW_RSYNC_CLAUDE_ACCOUNT:-}"
 
 # A Claude Code OAuth refresh that dies mid-flight leaves .oauth_refresh.lock
 # behind in the config dir, and every later invocation then refuses to refresh

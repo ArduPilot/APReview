@@ -100,6 +100,45 @@ objects from another base where the submodule is a repo already kept locally. Ag
 then clone with `--shared` plus `submodule.alternateLocation=superproject`, which
 costs seconds and transfers no objects.
 
+## Accounts
+
+Each account is a directory under `~/review/auth`, and a symlink per role says
+which account that role uses. Nothing here is in git — these hold credentials.
+
+```
+auth/claude-ardupilot/   a CLAUDE_CONFIG_DIR   auth/claude-default -> claude-ardupilot
+auth/claude-personal/                          auth/claude-rsync   -> claude-personal
+auth/codex-ardupilot/    a CODEX_HOME          auth/codex-default  -> codex-personal
+auth/codex-personal/                           auth/codex-rsync    -> codex-personal
+```
+
+`default` covers ArduPilot work; `rsync` covers the non-ArduPilot target, which
+is reviewed on a personal subscription so the project's quota is not spent on it.
+
+```sh
+review-auth.sh status                        # what every role resolves to
+review-auth.sh list                          # the accounts available
+review-auth.sh login claude personal         # how to sign one in
+review-auth.sh use claude default personal   # move a role to another account
+```
+
+**Switching account is repointing a symlink.** When the ArduPilot subscription
+runs out of weekly quota, `use claude default personal` moves the whole workload
+across and the next run picks it up; `use claude default ardupilot` moves it back.
+Nothing is edited and no run is interrupted.
+
+A directory may record the address it is meant to hold, in a file called
+`ACCOUNT`. A run checks it and refuses to start if the directory has been signed
+in as somebody else — the one failure that otherwise looks like success.
+
+Two things worth knowing. An account directory keeps its address in
+`<dir>/.claude.json`, but only if it was created by `claude auth login` under
+`CLAUDE_CONFIG_DIR`; the tool's own `~/.claude` keeps it elsewhere, so a run
+whose role resolves there leaves the variable unset rather than setting it to the
+same path, which would make `claude auth status` report no address at all. And a
+role with no symlink falls back to `default`, so a new role costs nothing until
+it needs its own account.
+
 ## Publishing
 
 Reports go out with `rsync`, either to an rsync daemon (`rsync://user@host` plus a
