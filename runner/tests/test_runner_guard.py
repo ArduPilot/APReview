@@ -65,6 +65,9 @@ class Guard(unittest.TestCase):
         # agreeing proves nothing about which subscription pays.
         stub(os.path.join(self.stubs, "claude"), '''
 d="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+# what the CLI would actually read its credentials from, for the tests that
+# care whether an inherited override survived to this point
+env | grep -oE '^(ANTHROPIC|CLAUDE)_[A-Z0-9_]+' > "$HOME/cli-env"
 if [ "$1 $2" = "auth status" ]; then
     e="${STUB_CLI_EMAIL:-}"
     [ -n "$e" ] || e=$(python3 -c "
@@ -102,6 +105,74 @@ fi''')
         e.update(env)
         return subprocess.run([os.path.join(BIN, "run-reviewprs.sh"), mode, "--dry-run"],
                               capture_output=True, text=True, env=e)
+
+    # --- what can still decide the account from outside the directory --------
+    def cli_env(self):
+        """The CLAUDE_*/ANTHROPIC_* names the CLI was actually invoked with."""
+        with open(os.path.join(self.home, "cli-env")) as f:
+            return f.read().split()
+
+    def test_an_alternate_credential_store_does_not_reach_the_cli(self):
+        # naming variables one at a time missed this one: the CLI reads its
+        # credentials from here and still reports the selected directory's
+        # address, so the identity checks all pass while another account pays
+        out = self.run_mode("followup",
+                            CLAUDE_SECURESTORAGE_CONFIG_DIR="/nonexistent")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("CLAUDE_SECURESTORAGE_CONFIG_DIR", self.cli_env())
+        self.assertIn("CLAUDE_SECURESTORAGE_CONFIG_DIR", out.stdout)
+
+    def test_an_environment_auth_token_does_not_reach_the_cli(self):
+        out = self.run_mode("followup", ANTHROPIC_AUTH_TOKEN="x")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("ANTHROPIC_AUTH_TOKEN", self.cli_env())
+
+    def test_an_inherited_config_dir_does_not_decide_the_account(self):
+        other = os.path.join(self.auth, "claude-personal")
+        out = self.run_mode("followup", CLAUDE_CONFIG_DIR=other)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("admin@example.org", out.stdout)
+        self.assertNotIn("someone@example.com", out.stdout)
+
+    def test_it_names_what_it_cleared_and_not_the_value(self):
+        out = self.run_mode("followup", ANTHROPIC_AUTH_TOKEN="sk-secret-value")
+        self.assertIn("ANTHROPIC_AUTH_TOKEN", out.stdout)
+        self.assertNotIn("sk-secret-value", out.stdout + out.stderr)
+
+    def test_a_harness_variable_that_is_not_a_credential_is_left_alone(self):
+        # a manual run from a terminal inside Claude Code carries these; the
+        # earlier blanket refusal would have stopped it
+        out = self.run_mode("followup", CLAUDE_CODE_ENTRYPOINT="cli")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("CLAUDE_CODE_ENTRYPOINT", self.cli_env())
+        self.assertNotIn("cleared", out.stdout)
+
+    def test_an_unrelated_variable_does_not_stop_the_run(self):
+        out = self.run_mode("followup", EDITOR="vi")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_a_codex_api_key_stops_the_run(self):
+        # an account id left in auth.json from an earlier subscription login
+        # matches ACCOUNT while the CLI actually bills the key
+        d = os.path.join(self.auth, "codex-personal")
+        json.dump({"auth_mode": "apikey", "OPENAI_API_KEY": "sk-x",
+                   "tokens": {"account_id": "acct-1234"}},
+                  open(os.path.join(d, "auth.json"), "w"))
+        open(os.path.join(d, "ACCOUNT"), "w").write("acct-1234\n")
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("API key", out.stdout)
+
+    def test_a_symlinked_tool_home_is_pinned_even_with_no_role_link(self):
+        # the fallback used to leave CODEX_HOME unset, so the symlink decided
+        # the account every time a child read it - repointable mid-run
+        os.remove(os.path.join(self.auth, "codex-default"))
+        real = os.path.join(self.home, "codex-real")
+        shutil.copytree(os.path.join(self.auth, "codex-personal"), real)
+        os.symlink(real, os.path.join(self.home, ".codex"))
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn(real, out.stdout)
 
     # --- the selection itself ------------------------------------------------
     def test_a_default_run_uses_the_default_role(self):
@@ -148,11 +219,6 @@ fi''')
         out = self.run_mode("rsync")
         self.assertEqual(out.returncode, 1)
         self.assertIn("status=wrong-claude-account", out.stdout)
-
-    def test_an_environment_token_stops_the_run(self):
-        out = self.run_mode("followup", CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-x")
-        self.assertEqual(out.returncode, 1)
-        self.assertIn("would", out.stdout + out.stderr)
 
     def test_a_directory_signed_in_as_someone_else_stops_the_run(self):
         d = os.path.join(self.auth, "claude-ardupilot")
@@ -260,10 +326,6 @@ fi''')
         out = self.run_mode("followup")
         self.assertEqual(out.returncode, 1)
         self.assertIn("status=wrong-codex-account", out.stdout)
-
-    def test_an_api_key_in_the_environment_stops_the_run(self):
-        out = self.run_mode("followup", ANTHROPIC_API_KEY="sk-ant-api03-x")
-        self.assertEqual(out.returncode, 1)
 
     def test_a_dangling_account_record_stops_the_run(self):
         # an identity constraint must not disappear because reading it failed
