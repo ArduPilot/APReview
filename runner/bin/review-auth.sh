@@ -49,7 +49,11 @@ d = sys.argv[1]
 # behind by a past login names an account the directory can no longer use, and
 # reporting it as "signed in as" is the reassuring half of a broken setup.
 env = dict(os.environ)
-if os.path.realpath(d) == os.path.realpath(os.path.expanduser("~/.claude")):
+own = os.path.expanduser("~/.claude")
+# The same rule the runner uses. Unsetting whenever the canonical paths match
+# diagnosed a working account as broken: with ~/.claude a symlink to an account
+# directory, the unset form reports whatever the home record says.
+if os.path.realpath(d) == os.path.realpath(own) and not os.path.islink(own):
     env.pop("CLAUDE_CONFIG_DIR", None)
 else:
     env["CLAUDE_CONFIG_DIR"] = d
@@ -150,10 +154,23 @@ use)
     [ -n "$got" ] || echo "warning: $dir is not signed in - runs using it will refuse to start"
     # Atomic: a run starting mid-switch sees the old link or the new one, never
     # the gap that unlink-then-symlink leaves.
-    tmp="$AUTH/.$tool-$role.$$"
+    was=$(readlink "$link" 2>/dev/null || true)
+    tmp="$AUTH/.$tool-$role.$$"; tmp2="$AUTH/.$tool-$role.revert.$$"
     ln -sfn "$tool-$acct" "$tmp" || { echo "could not create the new link"; exit 1; }
     mv -T "$tmp" "$link" || { rm -f "$tmp"; echo "could not replace $link"; exit 1; }
     [ "$(readlink "$link")" = "$tool-$acct" ] || { echo "switch did not take effect"; exit 1; }
+    # Refusing role names and self-links is not enough: an account that resolves
+    # through the role link becomes a cycle only once the switch is made. Ask the
+    # resolver, and put the old target back if the answer is no.
+    if ! review_auth "$tool" "$role" >/dev/null 2>&1; then
+        if [ -n "$was" ]; then
+            ln -sfn "$was" "$tmp2" 2>/dev/null && mv -T "$tmp2" "$link" 2>/dev/null
+        else
+            rm -f "$link"
+        fi
+        echo "$tool-$acct does not resolve as $tool-$role - reverted"
+        exit 1
+    fi
     echo "$tool-$role -> $tool-$acct${got:+  ($got)}"
     ;;
 login)
@@ -170,7 +187,7 @@ login)
                 echo "  CODEX_HOME=$dir codex login"
                 echo "then record the account id it reports - not an address, which"
                 echo "is what the runner compares against:"
-                echo "  review-auth.sh status            # shows the id"
+                echo "  review-auth.sh list              # shows the id for every account"
                 echo "  echo <account-id> > $dir/ACCOUNT" ;;
     esac
     ;;

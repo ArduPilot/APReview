@@ -167,6 +167,29 @@ class AccountRecords(Base):
         self.assertEqual(out, "")
 
 
+class StatusView(Base):
+    """review-auth.sh status - the thing an operator reads before switching."""
+
+    def status(self):
+        return sh('"$1" status', self.home, AUTH_SH)
+
+    def test_it_lists_every_role(self):
+        self.link("claude-default", "claude-ardupilot")
+        out = self.status()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        for role in ("claude-default", "claude-rsync", "codex-default", "codex-rsync"):
+            self.assertIn(role, out.stdout)
+
+    def test_a_role_with_no_link_is_shown_as_unset(self):
+        out = self.status()
+        self.assertIn("(not set)", out.stdout)
+
+    def test_a_directory_with_no_credentials_is_not_reported_as_signed_in(self):
+        self.link("claude-default", "claude-ardupilot")
+        out = self.status()
+        self.assertIn("NOT SIGNED IN", out.stdout)
+
+
 class Switching(Base):
     """review-auth.sh use - the command reached for when quota runs out."""
 
@@ -201,6 +224,19 @@ class Switching(Base):
         self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
                          "claude-ardupilot")
 
+    def test_an_account_that_leaves_the_root_is_put_back(self):
+        # reaches the post-switch check: the account directory looks fine on its
+        # own, and only resolving it as the role shows it leaves the auth root
+        outside = os.path.join(self.home, "elsewhere")
+        os.makedirs(outside, exist_ok=True)
+        os.symlink(outside, os.path.join(self.auth, "claude-out"))
+        self.link("claude-default", "claude-ardupilot")
+        out = self.use("claude", "default", "out")
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("reverted", out.stdout)
+        self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
+                         "claude-ardupilot")
+
     def test_a_reader_never_sees_the_role_missing_during_a_switch(self):
         # unlink-then-symlink leaves a window in which a starting run resolves
         # nothing; the replacement must be atomic
@@ -216,15 +252,22 @@ class Switching(Base):
 
         t = threading.Thread(target=watch)
         t.start()
+        targets = []
         try:
             for i in range(20):
                 acct = "personal" if i % 2 else "ardupilot"
-                self.use("claude", "default", acct)
+                out = self.use("claude", "default", acct)
+                self.assertEqual(out.returncode, 0, out.stderr)
+                targets.append(os.readlink(os.path.join(self.auth, "claude-default")))
         finally:
             stop.set()
             t.join()
         self.assertTrue(seen, "watcher never ran")
         self.assertNotIn(False, seen, "the role vanished mid-switch")
+        # a switch that never happens would also never be seen missing
+        self.assertEqual(targets[0], "claude-ardupilot")   # i=0 -> ardupilot
+        self.assertEqual(targets[1], "claude-personal")
+        self.assertEqual(len(set(targets)), 2)
 
     def test_login_creates_a_private_directory(self):
         out = sh('"$1" login claude newacct', self.home, AUTH_SH)
