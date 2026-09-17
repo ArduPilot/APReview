@@ -18,10 +18,12 @@ ENV_SH = os.path.join(BIN, "review-env.sh")
 AUTH_SH = os.path.join(BIN, "review-auth.sh")
 
 
-def sh(script, home, *args):
+def sh(script, home, *args, path=None):
+    env = dict(os.environ, HOME=home)
+    if path:
+        env["PATH"] = path + os.pathsep + env["PATH"]
     return subprocess.run(["bash", "-c", script, "_", *args],
-                          capture_output=True, text=True,
-                          env=dict(os.environ, HOME=home))
+                          capture_output=True, text=True, env=env)
 
 
 class Base(unittest.TestCase):
@@ -32,6 +34,29 @@ class Base(unittest.TestCase):
         os.makedirs(self.auth, mode=0o700)
         for d in ("claude-ardupilot", "claude-personal", "codex-personal"):
             os.makedirs(os.path.join(self.auth, d), mode=0o700)
+
+    def stub_cli(self, email="admin@example.org"):
+        """A claude that reports a signed-in identity.
+
+        Without it account_of reaches the real CLI, which reads the fixture's
+        made-up credentials as not signed in - so every status assertion could
+        only ever be a negative one.
+        """
+        d = os.path.join(self.home, "stubs")
+        os.makedirs(d, exist_ok=True)
+        f = os.path.join(d, "claude")
+        with open(f, "w") as fh:
+            fh.write('#!/bin/sh\nprintf \'{"loggedIn": true, "email": "%s"}\\n\' '
+                     '"${STUB_EMAIL:-' + email + '}"\n')
+        os.chmod(f, 0o755)
+        return d
+
+    def signed_in(self, name, email):
+        d = os.path.join(self.auth, name)
+        import json as _json
+        _json.dump({"oauthAccount": {"emailAddress": email}},
+                   open(os.path.join(d, ".claude.json"), "w"))
+        open(os.path.join(d, "ACCOUNT"), "w").write(email + "\n")
 
     def link(self, name, target):
         p = os.path.join(self.auth, name)
@@ -170,8 +195,8 @@ class AccountRecords(Base):
 class StatusView(Base):
     """review-auth.sh status - the thing an operator reads before switching."""
 
-    def status(self):
-        return sh('"$1" status', self.home, AUTH_SH)
+    def status(self, path=None):
+        return sh('"$1" status', self.home, AUTH_SH, path=path)
 
     def test_it_lists_every_role(self):
         self.link("claude-default", "claude-ardupilot")
@@ -189,12 +214,63 @@ class StatusView(Base):
         out = self.status()
         self.assertIn("NOT SIGNED IN", out.stdout)
 
+    def test_it_reports_the_address_a_signed_in_role_will_run_as(self):
+        # the positive case: without it, an account_of that always answers
+        # nothing satisfies every other assertion here
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        out = self.status(path=self.stub_cli())
+        self.assertIn("admin@example.org", out.stdout)
+        self.assertNotIn("NOT SIGNED IN", out.stdout)
+
+    def test_a_record_the_runner_cannot_read_is_flagged(self):
+        # an unreadable ACCOUNT record stops a run, so status may not show the
+        # role as healthy
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "admin@example.org")
+        rec = os.path.join(self.auth, "claude-ardupilot", "ACCOUNT")
+        os.remove(rec)
+        os.mkdir(rec)
+        out = self.status(path=self.stub_cli())
+        self.assertIn("BAD ACCOUNT RECORD", out.stdout)
+
+    def test_a_directory_that_disagrees_with_the_cli_is_flagged(self):
+        self.link("claude-default", "claude-ardupilot")
+        self.signed_in("claude-ardupilot", "someone@example.com")
+        out = self.status(path=self.stub_cli("admin@example.org"))
+        self.assertIn("CONFLICT", out.stdout)
+        self.assertIn("someone@example.com", out.stdout)
+
+    def test_a_missing_default_role_is_shown_as_the_tools_own_account(self):
+        # the runner leaves CLAUDE_CONFIG_DIR unset here and runs as ~/.claude;
+        # reporting "not set" describes neither the config nor the outcome
+        os.makedirs(os.path.join(self.home, ".claude"), mode=0o700)
+        out = self.status(path=self.stub_cli())
+        line = [l for l in out.stdout.splitlines() if l.startswith("claude-default")][0]
+        self.assertIn("~/.claude", line)
+        self.assertIn("admin@example.org", line)
+
+    def test_a_missing_non_default_role_is_shown_as_fatal(self):
+        out = self.status()
+        line = [l for l in out.stdout.splitlines() if l.startswith("claude-rsync")][0]
+        self.assertIn("REFUSE", line)
+
 
 class Switching(Base):
     """review-auth.sh use - the command reached for when quota runs out."""
 
-    def use(self, tool, role, acct):
-        return sh('"$1" use "$2" "$3" "$4"', self.home, AUTH_SH, tool, role, acct)
+    def use(self, tool, role, acct, path=None):
+        return sh('"$1" use "$2" "$3" "$4"', self.home, AUTH_SH, tool, role, acct,
+                  path=path)
+
+    def leaves_root(self):
+        """An account directory that only fails once the role points at it."""
+        outside = os.path.join(self.home, "elsewhere")
+        os.makedirs(outside, exist_ok=True)
+        p = os.path.join(self.auth, "claude-out")
+        if not os.path.islink(p):
+            os.symlink(outside, p)
+        return "out"
 
     def test_it_repoints_the_role(self):
         self.link("claude-default", "claude-ardupilot")
@@ -237,6 +313,53 @@ class Switching(Base):
         self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
                          "claude-ardupilot")
 
+    def test_a_revert_to_an_option_shaped_target_is_not_claimed_falsely(self):
+        # ln reads a leading - as an option: without --, the revert silently
+        # does nothing while the command still says it reverted
+        self.link("claude-default", "-old")
+        out = self.use("claude", "default", self.leaves_root())
+        self.assertNotEqual(out.returncode, 0)
+        self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")), "-old")
+        self.assertIn("reverted", out.stdout)
+
+    def test_a_revert_that_fails_says_so(self):
+        # the operator has to know the role is left on the rejected account
+        d = os.path.join(self.home, "faulty")
+        os.makedirs(d)
+        f = os.path.join(d, "mv")
+        with open(f, "w") as fh:
+            fh.write("#!/bin/sh\ncase \"$*\" in *.revert.*) exit 1;; esac\n"
+                     "exec /bin/mv \"$@\"\n")
+        os.chmod(f, 0o755)
+        self.link("claude-default", "claude-ardupilot")
+        out = self.use("claude", "default", self.leaves_root(), path=d)
+        self.assertNotEqual(out.returncode, 0)
+        self.assertIn("COULD NOT REVERT", out.stdout)
+        self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
+                         "claude-out")
+
+    def test_one_switch_at_a_time(self):
+        # a slow switch that is going to fail must not revert over a switch that
+        # succeeded while it ran
+        import fcntl, threading, time
+        lock = os.path.join(self.auth, ".claude-default.lock")
+        fh = open(lock, "w")
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        self.link("claude-default", "claude-ardupilot")
+        done = []
+        t = threading.Thread(target=lambda: done.append(
+            self.use("claude", "default", "personal")))
+        t.start()
+        try:
+            time.sleep(1.0)
+            self.assertEqual(done, [], "the switch did not wait for the lock")
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            fh.close()
+            t.join(30)
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0].returncode, 0, done[0].stdout + done[0].stderr)
+
     def test_a_reader_never_sees_the_role_missing_during_a_switch(self):
         # unlink-then-symlink leaves a window in which a starting run resolves
         # nothing; the replacement must be atomic
@@ -265,9 +388,10 @@ class Switching(Base):
         self.assertTrue(seen, "watcher never ran")
         self.assertNotIn(False, seen, "the role vanished mid-switch")
         # a switch that never happens would also never be seen missing
-        self.assertEqual(targets[0], "claude-ardupilot")   # i=0 -> ardupilot
-        self.assertEqual(targets[1], "claude-personal")
-        self.assertEqual(len(set(targets)), 2)
+        # every switch, not just the first two: asserting the head alone lets a
+        # "succeed without doing anything when the target is already right" pass
+        self.assertEqual(targets, ["claude-personal" if i % 2 else "claude-ardupilot"
+                                   for i in range(20)])
 
     def test_login_creates_a_private_directory(self):
         out = sh('"$1" login claude newacct', self.home, AUTH_SH)
@@ -280,8 +404,13 @@ class Switching(Base):
     def test_it_leaves_no_temporary_link_behind(self):
         self.link("claude-default", "claude-ardupilot")
         self.use("claude", "default", "personal")
-        leftovers = [f for f in os.listdir(self.auth) if f.startswith(".claude-")]
+        # the lock is meant to persist; a half-made symlink is not
+        leftovers = [f for f in os.listdir(self.auth)
+                     if f.startswith(".claude-") and not f.endswith(".lock")]
         self.assertEqual(leftovers, [])
+        for f in os.listdir(self.auth):
+            self.assertFalse(os.path.islink(os.path.join(self.auth, f))
+                             and f.startswith("."), f)
 
 
 if __name__ == "__main__":
