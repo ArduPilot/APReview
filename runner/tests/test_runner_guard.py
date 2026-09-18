@@ -33,6 +33,11 @@ class Guard(unittest.TestCase):
         for d in ("etc", "logs", "work", "data", "repositories"):
             os.makedirs(os.path.join(r, d), exist_ok=True)
         os.symlink(BIN, os.path.join(r, "bin"))
+        # The account pre-flight is extracted and run on its own, so these tests
+        # stay fast and start nothing. The cost is that everything AFTER the
+        # marker - the permission and gh pre-flights, the quota probe, the
+        # launch - is not exercised here: a test for any of those must drive
+        # run-reviewprs.sh itself, as the two whole_run tests below do.
         source = open(os.path.join(BIN, "run-reviewprs.sh")).read()
         guard, marker, _ = source.partition("# Pre-flight: refuse to run")
         self.assertTrue(marker, "account preflight boundary missing")
@@ -124,6 +129,66 @@ fi''')
         e.update(env)
         return subprocess.run([self.guard, mode, "--dry-run"],
                               capture_output=True, text=True, env=e)
+
+    # --- the whole script, not the extracted guard --------------------------
+    def whole_run(self, mode, *args, **env):
+        e = {"HOME": self.home, "PATH": self.stubs + ":/usr/bin:/bin",
+             "SHELL": "/bin/bash", "LANG": "C.UTF-8"}
+        e.update(env)
+        return subprocess.run([os.path.join(BIN, "run-reviewprs.sh"), mode, *args],
+                              capture_output=True, text=True, env=e)
+
+    def settings(self, deny):
+        for name in ("claude-ardupilot", "claude-personal"):
+            p = os.path.join(self.auth, name, "settings.json")
+            json.dump({"permissions": {"deny": deny, "defaultMode": "auto"}},
+                      open(p, "w"))
+
+    AUTH_DENY = ["Bash(git push)", "Bash(git push:*)",
+                 "Read(//review/auth/**)", "Bash(cat //review/auth/*)"]
+
+    def test_credentials_inside_the_granted_directory_must_be_denied(self):
+        # the agent gets --add-dir $REVIEW_ROOT and reads other people's pull
+        # requests; every account's credentials now live under it
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("does not deny reading", out.stdout)
+
+    def test_a_deny_rule_for_the_auth_directory_satisfies_it(self):
+        self.settings(self.AUTH_DENY)
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("permission pre-flight OK", out.stdout)
+
+    def test_the_git_push_denials_are_still_required(self):
+        self.settings(["Read(//review/auth/**)"])
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("missing deny rules", out.stdout)
+
+    # --- a refusal has to be visible ----------------------------------------
+    def test_a_refusal_is_written_to_the_run_log(self):
+        """Not --dry-run: the refusal must land in the log a human reads.
+
+        Every other test here uses --dry-run, which writes no log at all - so a
+        refusal that exited before the redirect passed all 78 of them while
+        saying nothing anywhere. Under cron with MAILTO empty that is a slot
+        that simply goes quiet.
+        """
+        os.remove(os.path.join(self.auth, "claude-rsync"))
+        os.symlink("nowhere", os.path.join(self.auth, "claude-rsync"))
+        e = {"HOME": self.home, "PATH": self.stubs + ":/usr/bin:/bin",
+             "SHELL": "/bin/bash", "LANG": "C.UTF-8"}
+        out = subprocess.run([os.path.join(BIN, "run-reviewprs.sh"), "rsync"],
+                             capture_output=True, text=True, env=e)
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        logs = [f for f in os.listdir(os.path.join(self.home, "review", "logs"))
+                if f.startswith("reviewprs-rsync-")]
+        self.assertTrue(logs, "the refusal left no log: %s" % (out.stdout,))
+        with open(os.path.join(self.home, "review", "logs", logs[0])) as f:
+            body = f.read()
+        self.assertIn("FATAL", body)
+        self.assertIn("status=wrong-", body)     # so the dashboard shows a row
 
     # --- what can still decide the account from outside the directory --------
     def cli_env(self):

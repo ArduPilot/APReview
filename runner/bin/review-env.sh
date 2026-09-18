@@ -208,9 +208,12 @@ PYCONFIG
 # emptiness applies only to the genuine directory, not to a symlink that could be
 # repointed underneath us. One copy of the rule, because a run and a meter
 # reading disagreeing about which account is in use is how a switch goes unseen.
-role_config_dir() {        # tool role -> the directory, or empty
-    local tool="$1" role="${2:-default}" d own="$HOME/.$1"
-    d=$(review_auth "$tool" "$role" 2>/dev/null) || d=""
+# A caller that has already resolved the role passes the path as $3, so the
+# decision is made from what it validated rather than from a second resolution a
+# switch could land in the middle of.
+role_config_dir() {        # tool role [resolved-dir] -> the directory, or empty
+    local tool="$1" role="${2:-default}" d="${3-}" own="$HOME/.$1"
+    [ $# -ge 3 ] || d=$(review_auth "$tool" "$role" 2>/dev/null) || d=""
     [ -n "$d" ] || d=$(readlink -f "$own" 2>/dev/null) || d=""
     [ -n "$d" ] && [ "$d" = "$(readlink -f "$own" 2>/dev/null)" ] \
         && [ ! -L "$own" ] && d=""
@@ -294,12 +297,12 @@ export PATH="/opt/gcc-arm-none-eabi-10-2020-q4-major/bin:$PATH"
 export PATH="$REVIEW_REPOS/ardupilot/Tools/autotest:$PATH"
 export PATH="$REVIEW_ROOT/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
-# --- per-mode Claude account ------------------------------------------------
-# rsync reviews are tridge's own project, so they run on a separate Claude
-# subscription and leave the main account's quota for ArduPilot work.
-# CLAUDE_CONFIG_DIR relocates the whole config dir, credentials included; the
-# shared parts (commands, skills, CLAUDE.md, plugins) are symlinks back into
-# ~/.claude so the skill can never drift between the two accounts.
+# --- accounts ----------------------------------------------------------------
+# Which account a run uses is the role links under $REVIEW_AUTH, resolved by
+# review_auth and role_config_dir above. CLAUDE_CONFIG_DIR and CODEX_HOME
+# relocate the whole config directory, credentials included; the shared parts
+# (commands, skills, CLAUDE.md, plugins) are symlinks back into ~/.claude so the
+# skill cannot drift between accounts.
 
 # A Claude Code OAuth refresh that dies mid-flight leaves .oauth_refresh.lock
 # behind in the config dir, and every later invocation then refuses to refresh
@@ -354,8 +357,9 @@ export REVIEW_PUBLIC_URL="${REVIEW_PUBLIC_URL:-}"
 export REVIEW_BOX_NAME="${REVIEW_BOX_NAME:-$(hostname -s 2>/dev/null || echo runner)}"
 
 # --- site configuration --------------------------------------------------------
-# local.conf holds the publishing target, the runner's name and the Claude
-# account a given mode runs as. It sets plain shell variables, and a variable
+# local.conf holds the publishing target and the runner's name - not accounts,
+# which are the directories and role links under $REVIEW_AUTH. It sets plain
+# shell variables, and a variable
 # that is set but not exported is invisible to every child process - gh, python,
 # the review tools. That has bitten twice: GH_TOKEN, so runs kept posting as the
 # keyring account, and REVIEW_COMMENT_ACCOUNTS, so post-comments.py saw only the

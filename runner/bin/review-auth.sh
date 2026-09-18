@@ -127,6 +127,18 @@ if ! clear_inherited_credentials; then
     exit 1
 fi
 
+# Names are pasted into paths. A typo carrying a slash or a .. is an operator
+# footgun rather than an attack - roles are not user input - but `use claude
+# ../../work/x personal` really does create a role link and a lock file outside
+# auth/, and the containment check only refuses the result afterwards.
+plain_name() {
+    case "$1" in
+        ""|*[!A-Za-z0-9._-]*|.|..|-*)
+            echo "'$1' is not a plain name (letters, digits, . _ - only)" >&2
+            return 1 ;;
+    esac
+}
+
 case "${1:-status}" in
 status)
     printf '%-16s %-26s %s\n' ROLE ACCOUNT-DIR "SIGNED IN AS"
@@ -244,6 +256,8 @@ list)
 use)
     [ $# -eq 4 ] || { echo "usage: review-auth.sh use <claude|codex> <role> <account>"; exit 2; }
     tool="$2"; role="$3"; acct="$4"
+    plain_name "$role" || exit 2
+    plain_name "$acct" || exit 2
     dir="$AUTH/$tool-$acct"
     link="$AUTH/$tool-$role"
     [ -d "$dir" ] || { echo "no such account directory: $dir"; exit 1; }
@@ -309,9 +323,12 @@ use)
     ;;
 login)
     [ $# -eq 3 ] || { echo "usage: review-auth.sh login <claude|codex> <account>"; exit 2; }
-    tool="$2"; acct="$3"; dir="$AUTH/$tool-$acct"
-    # Credentials go in here: not readable by anyone else, and neither is the root.
-    mkdir -p "$dir" && chmod 700 "$dir" "$AUTH"
+    tool="$2"; acct="$3"
+    plain_name "$acct" || exit 2
+    dir="$AUTH/$tool-$acct"
+    # Credentials go in here: not readable by anyone else, and neither is the
+    # root. umask first, so the directory is never briefly group-readable.
+    (umask 077; mkdir -p "$dir") && chmod 700 "$dir" "$AUTH"
     case "$tool" in
         claude) echo "Run this, then answer in a browser:"
                 echo "  CLAUDE_CONFIG_DIR=$dir claude auth login"

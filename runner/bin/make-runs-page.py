@@ -31,12 +31,29 @@ def account_dirs(tool):
     account that pays changes by repointing a link, and a meter that only knows
     the old one goes quiet exactly when someone is watching it.
     """
-    dirs = [os.path.join(HOME, '.' + tool)]
-    for d in sorted(glob.glob(os.path.join(AUTH, tool + '-*'))):
-        if os.path.islink(d) or not os.path.isdir(d):
-            continue                      # role links, and stray files
-        dirs.append(d)
+    dirs, seen = [], set()
+    for d in [os.path.join(HOME, '.' + tool)] + \
+             sorted(glob.glob(os.path.join(AUTH, tool + '-*'))):
+        if not os.path.isdir(d):
+            continue
+        real = os.path.realpath(d)
+        if real in seen:
+            # By real path, so the role links resolve onto the accounts they
+            # point at rather than counting them a second time - and so does a
+            # ~/.claude that is itself a symlink into auth/, which the runner
+            # supports and which would otherwise double every figure.
+            continue
+        seen.add(real)
+        dirs.append(real)
     return dirs
+
+
+def role_dir(tool, role='default'):
+    """The account directory that role selects - the role link, or the tool's own."""
+    link = os.path.join(AUTH, '%s-%s' % (tool, role))
+    if os.path.isdir(link):
+        return os.path.realpath(link)
+    return os.path.realpath(os.path.join(HOME, '.' + tool))
 
 # Site-specific, from the review environment: where published reports live, and
 # what to call this runner. Both have safe empty/default behaviour so the page
@@ -130,10 +147,16 @@ runs.sort(key=lambda r: r['start'], reverse=True)
 quota = []            # (timestamp, used_percent)
 reset_epochs = set()
 plan = None
-_codex_sessions = [p for d in account_dirs('codex')
-                   for p in glob.glob(os.path.join(
-                       d, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))]
-for rp in sorted(set(_codex_sessions)):
+# One meter per account: two subscriptions' percentages in one series reads as
+# a quota that jumps about, and the decision this page exists to inform is which
+# account to move the work to. Take the account the default role selects; the
+# others are shown by review-auth.sh.
+_codex_pick = os.environ.get('CODEX_HOME') or role_dir('codex')
+_codex_sessions = {}
+for _p in glob.glob(os.path.join(_codex_pick, 'sessions', '*', '*', '*',
+                                 'rollout-*.jsonl')):
+    _codex_sessions.setdefault(os.path.realpath(_p), _p)
+for rp in sorted(_codex_sessions.values()):
     try:
         mt = datetime.datetime.fromtimestamp(os.path.getmtime(rp)).astimezone()
     except Exception:
@@ -243,9 +266,11 @@ claude = []      # (timestamp, total_tokens, weighted)
 _pats = [os.path.join(r, sub) for r in account_dirs('claude')
          for sub in ('projects/*/*.jsonl', 'projects/*/*/*.jsonl',
                      'projects/*/*/*/*.jsonl')]
-_files = set()
+_files = {}
 for _p in _pats:
-    _files.update(glob.glob(os.path.expanduser(_p)))
+    for _f in glob.glob(os.path.expanduser(_p)):
+        _files.setdefault(os.path.realpath(_f), _f)   # one entry per real file
+_files = list(_files.values())
 for f in _files:
     try:
         if datetime.datetime.fromtimestamp(os.path.getmtime(f)).astimezone() < cutoff:

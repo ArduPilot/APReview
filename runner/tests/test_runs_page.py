@@ -89,11 +89,42 @@ class Dashboard(unittest.TestCase):
         self.assertIn("5.0M", page)
         self.assertNotIn("10.0M", page)     # counted through the link as well
 
+    def test_it_does_not_count_an_account_twice_when_the_tools_home_is_a_link(self):
+        # ~/.claude is allowed to be a symlink into an account directory - the
+        # runner goes out of its way to support it - so the same transcripts are
+        # reachable under two names and every figure for them would double
+        self.transcript("claude-personal", 6000000)
+        os.symlink(os.path.join(self.auth, "claude-personal"),
+                   os.path.join(self.home, ".claude"))
+        page = self.build()
+        self.assertIn("6.0M", page)
+        self.assertNotIn("12.0M", page)
+
+    def test_it_does_not_count_one_transcript_reached_two_ways(self):
+        # two distinct account directories can still reach the same file - a
+        # copied account, or a shared projects/ - and deduping directories does
+        # not help there because their real paths differ
+        self.transcript("claude-a", 9000000)
+        b = os.path.join(self.auth, "claude-b")
+        os.makedirs(b)
+        os.symlink(os.path.join(self.auth, "claude-a", "projects"),
+                   os.path.join(b, "projects"))
+        page = self.build()
+        self.assertIn("9.0M", page)
+        self.assertNotIn("18.0M", page)
+
     # --- how a refused run is shown -----------------------------------------
+    def run_log(self, tail=""):
+        # relative to now: the page discards anything outside its window, so a
+        # hardcoded date turns these into tests that start failing on their own
+        start = (datetime.datetime.now().astimezone()
+                 - datetime.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S%z")
+        return ("reviewprs mode=followup  host=t  start=%s\n" % start) + tail
+
     def refusal(self, status):
-        self.log("followup",
-                 "reviewprs mode=followup  host=t  start=2026-09-18T01:00:00+10:00\n"
-                 "FATAL: refused\nfinish=2026-09-18T01:00:01+10:00 status=%s\n" % status)
+        end = datetime.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+        self.log("followup", self.run_log(
+            "FATAL: refused\nfinish=%s status=%s\n" % (end, status)))
         return self.build()
 
     def test_a_refused_claude_run_is_shown_as_refused(self):
@@ -107,8 +138,7 @@ class Dashboard(unittest.TestCase):
         self.assertNotIn(">running<", page)
 
     def test_a_run_with_no_finish_line_is_still_shown_as_running(self):
-        self.log("followup",
-                 "reviewprs mode=followup  host=t  start=2026-09-18T01:00:00+10:00\n")
+        self.log("followup", self.run_log())
         self.assertIn("running", self.build())
 
 

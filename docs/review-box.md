@@ -213,6 +213,14 @@ each tool reports, and the runner compares like with like.
 Both tools are checked, not just Claude: a missing `auth.json` used to surface
 only when the validation pool failed, well into a run.
 
+The reviewing agent is started with `--add-dir $REVIEW_ROOT` and reads other
+people's pull requests, and `~/review/auth/` is inside that directory - same uid,
+so file modes stop nothing. The permission pre-flight therefore requires a deny
+rule covering it, alongside the `git push` denials, and refuses to start without
+one. A refusal is written to the run log and shows on the dashboard: these checks
+used to run before the log was opened, so under cron a refused run said nothing
+anywhere and the slot simply went quiet.
+
 `status` clears the same variables before it asks, and then makes exactly the
 judgements the runner makes - including a variable it could not clear, a partial
 answer from the CLI, and a redirected Codex config - so a role that reads as
