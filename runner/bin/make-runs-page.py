@@ -20,6 +20,24 @@ OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HOME, 'review', 'work',
 now = datetime.datetime.now().astimezone()
 cutoff = now - datetime.timedelta(days=DAYS)
 
+AUTH = os.environ.get('REVIEW_AUTH') or os.path.join(HOME, 'review', 'auth')
+
+
+def account_dirs(tool):
+    """Every directory a role could select for this tool, the tool's own first.
+
+    A role is a symlink into this set, so following the links would count the
+    same transcripts twice and miss the accounts no role points at today. The
+    account that pays changes by repointing a link, and a meter that only knows
+    the old one goes quiet exactly when someone is watching it.
+    """
+    dirs = [os.path.join(HOME, '.' + tool)]
+    for d in sorted(glob.glob(os.path.join(AUTH, tool + '-*'))):
+        if os.path.islink(d) or not os.path.isdir(d):
+            continue                      # role links, and stray files
+        dirs.append(d)
+    return dirs
+
 # Site-specific, from the review environment: where published reports live, and
 # what to call this runner. Both have safe empty/default behaviour so the page
 # still builds on a box that publishes nowhere.
@@ -74,8 +92,10 @@ for path in sorted(glob.glob(os.path.join(LOGS, 'reviewprs-*.log'))):
         r['status'] = 'lock-timeout'
     elif 'status=no-gh-auth' in txt:
         r['status'] = 'no-gh-auth'
-    elif 'status=wrong-claude-account' in txt:
-        # the run refused rather than spend the wrong subscription
+    elif re.search(r'status=wrong-\w+-account', txt):
+        # the run refused rather than spend the wrong subscription. Matched by
+        # shape, not by name: a refusal the dashboard does not recognise shows
+        # as a run still going, with an elapsed time that climbs for ever.
         r['status'] = 'wrong-account'
         r['elapsed'] = 0
     elif 'status=quota-exhausted' in txt:
@@ -110,7 +130,10 @@ runs.sort(key=lambda r: r['start'], reverse=True)
 quota = []            # (timestamp, used_percent)
 reset_epochs = set()
 plan = None
-for rp in glob.glob(os.path.join(HOME, '.codex', 'sessions', '*', '*', '*', 'rollout-*.jsonl')):
+_codex_sessions = [p for d in account_dirs('codex')
+                   for p in glob.glob(os.path.join(
+                       d, 'sessions', '*', '*', '*', 'rollout-*.jsonl'))]
+for rp in sorted(set(_codex_sessions)):
     try:
         mt = datetime.datetime.fromtimestamp(os.path.getmtime(rp)).astimezone()
     except Exception:
@@ -217,9 +240,7 @@ if burn is not None and cur_quota is not None and reset_at:
 # documented proxy for how heavily each token type counts, NOT a quota reading.
 W_IN, W_OUT, W_CW, W_CR = 1.0, 5.0, 1.25, 0.1
 claude = []      # (timestamp, total_tokens, weighted)
-_roots = ['~/.claude', os.environ.get('REVIEW_RSYNC_CLAUDE_DIR',
-                                      '~/review/etc/claude-rsync')]
-_pats = [os.path.join(r, sub) for r in _roots
+_pats = [os.path.join(r, sub) for r in account_dirs('claude')
          for sub in ('projects/*/*.jsonl', 'projects/*/*/*.jsonl',
                      'projects/*/*/*/*.jsonl')]
 _files = set()

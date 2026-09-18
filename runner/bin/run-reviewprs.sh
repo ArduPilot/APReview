@@ -76,24 +76,15 @@ select_account() {           # tool VAR -> exports VAR, or unsets it
            echo "       review-auth.sh status   shows what each role resolves to"
            echo "finish=$(date -Is) status=wrong-claude-account"
            exit 1 ;;
-        1) # No link for the default role: the tool's own directory. That is
-           # still a path that can be a symlink someone repoints between this
-           # check and the CLI's read, so it goes through the same rule below.
-           d=$(readlink -f "$HOME/.$tool" 2>/dev/null) || d=""
-           [ -n "$d" ] || { unset "$var"; return 0; } ;;
+        1) ;;   # no link for the default role: the tool's own directory
     esac
-    # Setting the variable to the tool's own directory is not a no-op: `claude
-    # auth status` then reports loggedIn with no address, because that record
-    # only exists in directories created by `claude auth login` under it. Leave
-    # it unset in that case - but only when the path is genuinely that directory
-    # and not a symlink that could be repointed underneath us.
-    local own="$HOME/.$tool"
-    if [ "$d" = "$(readlink -f "$own" 2>/dev/null)" ] && [ ! -L "$own" ]; then
-        unset "$var"
-    else
-        export "$var=$d"
-    fi
+    # role_config_dir decides between setting it and leaving it unset; the
+    # usage probe asks the same function, so the meter follows a switch.
+    d=$(role_config_dir "$tool" "$ROLE")
+    if [ -n "$d" ]; then export "$var=$d"; else unset "$var"; fi
 }
+# The role a run selected, for the children that take their own readings.
+export REVIEW_ROLE="$ROLE"
 if ! clear_inherited_credentials; then
     echo "FATAL: these could not be removed from the environment and would"
     echo "       decide the account instead of the role:$CLEARED_FAILED"

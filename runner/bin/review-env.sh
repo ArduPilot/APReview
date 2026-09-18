@@ -201,6 +201,22 @@ if bad:
 PYCONFIG
 }
 
+# Which directory a role selects for a tool, or empty meaning "the tool's own,
+# and the variable must be left unset". Setting CLAUDE_CONFIG_DIR to ~/.claude is
+# not a no-op: `claude auth status` then reports loggedIn with no address at all,
+# because that record only exists in directories a login created under it. The
+# emptiness applies only to the genuine directory, not to a symlink that could be
+# repointed underneath us. One copy of the rule, because a run and a meter
+# reading disagreeing about which account is in use is how a switch goes unseen.
+role_config_dir() {        # tool role -> the directory, or empty
+    local tool="$1" role="${2:-default}" d own="$HOME/.$1"
+    d=$(review_auth "$tool" "$role" 2>/dev/null) || d=""
+    [ -n "$d" ] || d=$(readlink -f "$own" 2>/dev/null) || d=""
+    [ -n "$d" ] && [ "$d" = "$(readlink -f "$own" 2>/dev/null)" ] \
+        && [ ! -L "$own" ] && d=""
+    printf '%s\n' "$d"
+}
+
 # The root holds the role links. Private leaves protect nothing if anyone can
 # repoint the symlink that chooses between them. Separate from review_auth so
 # that writing into the root can check it without resolving a role - a role that
@@ -324,21 +340,6 @@ review_comment_accounts() {
     printf '[%s]' "${out%,}"
 }
 
-# --- publishing ---------------------------------------------------------------
-# Where finished reports are rsynced, and the public URL they end up at. Both are
-# site-specific: set them in etc/local.conf (see local.conf.example), which is not
-# in git. REVIEW_PUBLISH is an rsync destination - either an rsync-daemon URL
-# (rsync://user@host) with RSYNC_AUTH pointing at a password file, or an ssh
-# destination (host:path) with RSYNC_AUTH empty.
-export REVIEW_PUBLISH="${REVIEW_PUBLISH:-}"
-export RSYNC_AUTH="${RSYNC_AUTH:-}"
-export REVIEW_PUBLIC_URL="${REVIEW_PUBLIC_URL:-}"
-
-# Shown on the runs dashboard, so several runners can publish side by side.
-export REVIEW_BOX_NAME="${REVIEW_BOX_NAME:-$(hostname -s 2>/dev/null || echo runner)}"
-
-# Site configuration: publishing target, and the Claude account a given mode must
-# run as. Kept out of git because it names hosts, paths and an account.
 # --- publishing ---------------------------------------------------------------
 # Where finished reports are rsynced, and the public URL they end up at. Both are
 # site-specific: set them in etc/local.conf (see local.conf.example), which is not

@@ -103,7 +103,10 @@ never committed:
 | `RSYNC_AUTH` | `--password-file=…` for an rsync daemon, empty for ssh |
 | `REVIEW_PUBLIC_URL` | public base URL those reports appear at |
 | `REVIEW_BOX_NAME` | name shown on the runs dashboard |
-| `REVIEW_RSYNC_CLAUDE_ACCOUNT` | optional: run one mode as a separate Claude account |
+
+Accounts are not configured here — they live under `~/review/auth/`, one
+directory each, with a symlink per role saying which account that role uses.
+`runner/bin/review-auth.sh status` shows what every role resolves to.
 
 With `REVIEW_PUBLISH` unset the reports stay local and the run says so.
 
@@ -134,17 +137,19 @@ the one place the workflow is exercised against an unfamiliar codebase, which ca
 assumptions that have quietly become ArduPilot-specific.
 
 It runs under its own Claude account so that work does not consume the ArduPilot
-subscription's quota. Set `REVIEW_RSYNC_CLAUDE_ACCOUNT` in `local.conf` and log that
-account in once:
+subscription's quota. That is the `rsync` role: sign an account in once, and point the
+role at it.
 
 ```sh
-CLAUDE_CONFIG_DIR=~/review/etc/claude-rsync claude auth login --email <address>
+runner/bin/review-auth.sh login claude personal      # says what to run
+runner/bin/review-auth.sh use claude rsync personal  # point the role at it
 ```
 
 `run-reviewprs.sh` then points the whole run — the command, both usage probes and the
-settings it reads — at that config directory, and **refuses to start** if the account it
-finds is not the one configured. A missing login fails loudly rather than quietly spending
-the wrong subscription.
+settings it reads — at that account, and **refuses to start** unless it can establish that
+the account the role names is the one that will be billed. A missing login fails loudly
+rather than quietly spending the wrong subscription; a missing `rsync` link is an error
+rather than a silent fall back to the default account.
 
 ## Contributing
 
