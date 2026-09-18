@@ -193,7 +193,11 @@ case "$MODE" in
     *)   PROMPT="/reviewprs $MODE" ;;
 esac
 
-cd "$REVIEW_ROOT/work" || { echo "FATAL: no $REVIEW_ROOT/work"; exit 1; }
+cd "$REVIEW_ROOT/work" || {
+    echo "FATAL: no $REVIEW_ROOT/work"
+    echo "finish=$(date -Is) status=no-work-dir"
+    exit 1
+}
 
 clear_stale_oauth_lock "$CLAUDE_DIR"
 
@@ -378,7 +382,7 @@ echo "codex account:  $CODEX_ACCOUNT  (role $ROLE, home $CODEX_DIR)"
 # below: it bypasses deny rules too, which would re-enable git push.
 SETTINGS="$CLAUDE_DIR/settings.json"
 if ! REVIEW_AUTH="$REVIEW_AUTH" python3 - "$SETTINGS" <<'PYCHK'
-import json,os,sys
+import json,os,re,sys
 try:
     d=json.load(open(sys.argv[1]))
 except Exception as e:
@@ -388,15 +392,42 @@ need=["Bash(git push)","Bash(git push:*)"]
 missing=[r for r in need if r not in deny]
 if missing:
     print("FATAL: settings.json is missing deny rules: %s" % missing); sys.exit(1)
-# The agent is given --add-dir $REVIEW_ROOT and reads other people's pull
-# requests. Every account's credentials live under $REVIEW_AUTH, which is inside
-# that directory, so reaching them must be denied explicitly - same uid, so file
-# modes stop nobody.
+# This is a file-tool guardrail, not containment of arbitrary shell readers.
+def denies_auth(rule):
+    if rule == "Read":
+        return True
+    if not isinstance(rule, str) or not rule.startswith("Read(") or not rule.endswith("/**)"):
+        return False
+    path = rule[5:-4]
+    # Only accept anchored recursive rules whose coverage we can prove. A
+    # current-directory rule changes meaning when a subagent changes directory.
+    literal = []
+    chars = iter(path)
+    for c in chars:
+        if c == "\\":
+            c = next(chars, "")
+            if c not in ("\\", "*", "?", "[", "]"):
+                return False
+        elif c in "*?[]":
+            return False
+        literal.append(c)
+    path = "".join(literal)
+    if path.startswith("//"):
+        path = path[1:]
+    elif path.startswith("~/"):
+        path = os.path.join(os.path.expanduser("~"), path[2:])
+    else:
+        return False
+    root = os.path.realpath(path)
+    return os.path.commonpath([root, os.path.realpath(auth)]) == root
+
 auth=os.environ.get("REVIEW_AUTH","")
-if auth and not any(auth in r or "review/auth" in r for r in deny):
+if auth and not any(denies_auth(r) for r in deny):
     print("FATAL: settings.json does not deny reading %s," % auth)
-    print("       which holds every account's credentials and is inside --add-dir.")
-    print("       Add rules such as:  Read(%s/**)  and  Bash(cat %s/*)" % (auth, auth))
+    print("       which holds every account's credentials.")
+    pattern = re.sub(r"([\\*?\[\]])", r"\\\1", os.path.realpath(auth))
+    print("       Add this deny rule: %s" % json.dumps("Read(/%s/**)" % pattern))
+    print("       Use Read(//absolute/path/**), Read(~/path/**), or an ancestor.")
     sys.exit(1)
 if d.get("permissions",{}).get("defaultMode")!="auto":
     print("FATAL: permissions.defaultMode is not 'auto'"); sys.exit(1)
@@ -405,6 +436,7 @@ print("permission pre-flight OK: git push denied, %s denied, defaultMode=auto"
 PYCHK
 then
     echo "ABORTING: permission pre-flight failed"
+    echo "finish=$(date -Is) status=preflight-failed"
     exit 1
 fi
 

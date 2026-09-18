@@ -53,6 +53,8 @@ def role_dir(tool, role='default'):
     link = os.path.join(AUTH, '%s-%s' % (tool, role))
     if os.path.isdir(link):
         return os.path.realpath(link)
+    if os.path.lexists(link) or role != 'default':
+        return None
     return os.path.realpath(os.path.join(HOME, '.' + tool))
 
 # Site-specific, from the review environment: where published reports live, and
@@ -97,6 +99,9 @@ for path in sorted(glob.glob(os.path.join(LOGS, 'reviewprs-*.log'))):
     ac = re.search(r'claude account: (\S+)', txt)
     if ac and ac.group(1) != 'unknown':
         r['account'] = ac.group(1)
+    cx = re.search(r'^codex account:  (\S+)  \(role \S+, home (.+)\)$', txt, re.M)
+    if cx:
+        r['codex_account'], r['codex_home'] = cx.groups()
     fi_any = re.search(r'finish=(\S+) status=\S+', txt)
     if fi_any:
         r['finish'] = parse_iso(fi_any.group(1))
@@ -109,6 +114,9 @@ for path in sorted(glob.glob(os.path.join(LOGS, 'reviewprs-*.log'))):
         r['status'] = 'lock-timeout'
     elif 'status=no-gh-auth' in txt:
         r['status'] = 'no-gh-auth'
+    elif re.search(r'status=(preflight-failed|no-work-dir)\b', txt):
+        r['status'] = re.search(r'status=(preflight-failed|no-work-dir)\b', txt).group(1)
+        r['elapsed'] = 0
     elif re.search(r'status=wrong-\w+-account', txt):
         # the run refused rather than spend the wrong subscription. Matched by
         # shape, not by name: a refusal the dashboard does not recognise shows
@@ -144,63 +152,73 @@ runs.sort(key=lambda r: r['start'], reverse=True)
 
 # ------------------------------------------------- codex weekly quota meter
 # Each token_count event carries the live meter. window_minutes 10080 == weekly.
-quota = []            # (timestamp, used_percent)
-reset_epochs = set()
-plan = None
-# One meter per account: two subscriptions' percentages in one series reads as
-# a quota that jumps about, and the decision this page exists to inform is which
-# account to move the work to. Take the account the default role selects; the
-# others are shown by review-auth.sh.
-_codex_pick = os.environ.get('CODEX_HOME') or role_dir('codex')
-_codex_sessions = {}
-for _p in glob.glob(os.path.join(_codex_pick, 'sessions', '*', '*', '*',
-                                 'rollout-*.jsonl')):
-    _codex_sessions.setdefault(os.path.realpath(_p), _p)
-for rp in sorted(_codex_sessions.values()):
-    try:
-        mt = datetime.datetime.fromtimestamp(os.path.getmtime(rp)).astimezone()
-    except Exception:
-        continue
-    if mt < cutoff:
-        continue
-    try:
-        for line in open(rp, errors='replace'):
-            if 'token_count' not in line or 'rate_limits' not in line:
-                continue
-            try:
-                d = json.loads(line)
-            except Exception:
-                continue
-            p = d.get('payload') or d
-            if p.get('type') != 'token_count':
-                continue
-            rl = (p.get('info') or {}).get('rate_limits') or p.get('rate_limits') or {}
-            plan = rl.get('plan_type') or plan
-            for slot in ('primary', 'secondary'):
-                s = rl.get(slot) or {}
-                if s.get('window_minutes') == 10080 and s.get('used_percent') is not None:
-                    ts = None
-                    raw = d.get('timestamp')
-                    if raw:
-                        try:
-                            ts = datetime.datetime.fromisoformat(
-                                raw.replace('Z', '+00:00')).astimezone()
-                        except Exception:
-                            ts = None
-                    quota.append((ts or mt, float(s['used_percent']), s.get('resets_at')))
-                    if s.get('resets_at'):
-                        reset_epochs.add(s['resets_at'])
-    except Exception:
-        continue
-quota.sort(key=lambda x: x[0])
+def read_quota(directory):
+    quota, reset_epochs, plan = [], set(), None
+    _codex_sessions = {}
+    for _p in glob.glob(os.path.join(directory, 'sessions', '*', '*', '*',
+                                     'rollout-*.jsonl')):
+        _codex_sessions.setdefault(os.path.realpath(_p), _p)
+    for rp in sorted(_codex_sessions.values()):
+        try:
+            mt = datetime.datetime.fromtimestamp(os.path.getmtime(rp)).astimezone()
+        except Exception:
+            continue
+        if mt < cutoff:
+            continue
+        try:
+            for line in open(rp, errors='replace'):
+                if 'token_count' not in line or 'rate_limits' not in line:
+                    continue
+                try:
+                    d = json.loads(line)
+                except Exception:
+                    continue
+                p = d.get('payload') or d
+                if p.get('type') != 'token_count':
+                    continue
+                rl = (p.get('info') or {}).get('rate_limits') or p.get('rate_limits') or {}
+                plan = rl.get('plan_type') or plan
+                for slot in ('primary', 'secondary'):
+                    s = rl.get(slot) or {}
+                    if s.get('window_minutes') == 10080 and s.get('used_percent') is not None:
+                        ts = None
+                        raw = d.get('timestamp')
+                        if raw:
+                            try:
+                                ts = datetime.datetime.fromisoformat(
+                                    raw.replace('Z', '+00:00')).astimezone()
+                            except Exception:
+                                ts = None
+                        quota.append((ts or mt, float(s['used_percent']), s.get('resets_at')))
+                        if s.get('resets_at'):
+                            reset_epochs.add(s['resets_at'])
+        except Exception:
+            continue
+    quota.sort(key=lambda x: x[0])
+    return quota, reset_epochs, plan
 
 
-def quota_at(t):
+def codex_identity(directory):
+    try:
+        return json.load(open(os.path.join(directory, 'auth.json')))['tokens']['account_id']
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+# Publishing inherits the last run's environment. The headline must still name
+# one stable role; historical rows instead use the account recorded by that run.
+_codex_pick = role_dir('codex')
+codex_quotas = {d: read_quota(d) for d in account_dirs('codex')}
+quota, reset_epochs, plan = codex_quotas.get(_codex_pick, ([], set(), None))
+quota_role = ('default: ' + os.path.basename(_codex_pick)) if _codex_pick else 'default: unavailable'
+
+
+def quota_at(t, samples):
     """Weekly used_percent as of time t (latest sample at or before t)."""
     if not t:
         return None
     best = None
-    for ts, pct, _r in quota:
+    for ts, pct, _r in samples:
         if ts <= t:
             best = pct
         else:
@@ -210,7 +228,13 @@ def quota_at(t):
 
 for r in runs:
     end = r['finish'] or now
-    a, b = quota_at(r['start']), quota_at(end)
+    directory = os.path.realpath(r['codex_home']) if r.get('codex_home') else None
+    samples = []
+    # A directory signed into a different account no longer proves ownership of
+    # its old readings. Missing attribution stays blank rather than guessing.
+    if directory in codex_quotas and codex_identity(directory) == r.get('codex_account'):
+        samples = codex_quotas[directory][0]
+    a, b = quota_at(r['start'], samples), quota_at(end, samples)
     r['q_end'] = b
     r['q_delta'] = (b - a) if (a is not None and b is not None and b >= a) else None
 
@@ -473,7 +497,7 @@ for lab, gen, fup, npr, a, c, rc in labels:
 
 BADGE = {'ok': 'b-ok', 'skipped': 'b-skip', 'running': 'b-run', 'quota': 'b-quota',
          'failed': 'b-fail', 'lock-timeout': 'b-fail', 'no-gh-auth': 'b-fail',
-         'wrong-account': 'b-fail'}
+         'wrong-account': 'b-fail', 'preflight-failed': 'b-fail', 'no-work-dir': 'b-fail'}
 
 rows = []
 for r in runs:
@@ -573,7 +597,7 @@ border-radius:6px;padding:10px 14px;margin:14px 0;color:var(--muted)}
   <div class="card"><div class="k">Claude session</div><div class="v">__CLSESS__</div></div>
   <div class="card"><div class="k">Claude burn rate</div><div class="v">__CLBURN__</div></div>
   <div class="card"><div class="k">Claude tokens (7d)</div><div class="v">__CLWEEK__</div></div>
-  <div class="card"><div class="k">Codex weekly quota__PLAN__</div><div class="v">__QUOTA__</div></div>
+  <div class="card"><div class="k">Codex weekly quota__PLAN__<br>__CODEX_ROLE__</div><div class="v">__QUOTA__</div></div>
   <div class="card"><div class="k">Codex burn rate</div><div class="v">__BURN__</div></div>
   <div class="card"><div class="k">At reset (__RESET__)</div><div class="v">__PROJ__</div></div>
 </div>
@@ -602,7 +626,8 @@ so their state is read from the published reports instead.</p>
 <div class="note">
 <strong>About the quota columns.</strong> The Codex figure is real: the CLI records its own
 rate-limit meter (<code>used_percent</code> for the 10080-minute weekly window) in every session
-rollout, so <em>Codex weekly &Delta;</em> is how much of the weekly allowance that run consumed.
+rollout. The card follows the default role; each <em>Codex weekly &Delta;</em> uses the
+account and home recorded in that run. Runs without matching account records have no delta.
 <strong>Both figures are now real measurements.</strong> Codex records its own rate-limit meter
 (<code>used_percent</code>, 10080-minute weekly window) in every session rollout. Claude's
 <code>/usage</code> works headlessly, so <code>claude-usage-probe.sh</code> reads the true session
@@ -644,7 +669,7 @@ document.querySelectorAll('table.sortable').forEach(function(t){
 nok = sum(1 for r in runs if r['status'] == 'ok')
 nskip = sum(1 for r in runs if r['status'] == 'skipped')
 nfail = sum(1 for r in runs if r['status'] in ('failed', 'lock-timeout', 'no-gh-auth',
-                                               'wrong-account'))
+                                               'wrong-account', 'preflight-failed', 'no-work-dir'))
 nquota = sum(1 for r in runs if r['status'] == 'quota')
 
 doc = (doc.replace('__DAYS__', str(DAYS))
@@ -654,6 +679,7 @@ doc = (doc.replace('__DAYS__', str(DAYS))
           .replace('__NSKIP__', str(nskip))
           .replace('__NFAIL__', str(nfail))
           .replace('__NQUOTA__', str(nquota))
+          .replace('__CODEX_ROLE__', html.escape(quota_role))
           .replace('__PLAN__', (' (%s)' % html.escape(plan)) if plan else '')
           .replace('__CLPCT__', ('%d%%' % cl_pct) if cl_pct is not None else '&mdash;')
           .replace('__CLSESS__', ('%d%%' % cl_session) if cl_session is not None else '&mdash;')

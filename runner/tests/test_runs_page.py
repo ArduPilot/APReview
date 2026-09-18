@@ -19,6 +19,20 @@ BIN = os.path.join(os.path.dirname(HERE), "bin")
 PAGE = os.path.join(BIN, "make-runs-page.py")
 
 
+def build_page(home, out, **env):
+    # Inspect the parsed timestamps as well as the HTML: a badge alone would
+    # miss a refusal whose open time window absorbs the next run's usage.
+    code = ('import json, runpy, sys; sys.argv = [sys.argv[1], sys.argv[2]]; '
+            's = runpy.run_path(sys.argv[0]); '
+            'print(json.dumps({k: s[k] for k in ("runs", "nfail", "cur_quota")}, default=str))')
+    r = subprocess.run(["python3", "-c", code, PAGE, out], capture_output=True,
+                       text=True, env={"HOME": home, "PATH": "/usr/bin:/bin", **env})
+    if r.returncode:
+        raise AssertionError(r.stdout + r.stderr)
+    with open(out) as f:
+        return json.loads(r.stdout.splitlines()[-1]), f.read()
+
+
 def usage_line(when, tokens):
     return json.dumps({"timestamp": when.strftime("%Y-%m-%dT%H:%M:%S%z"),
                        "message": {"usage": {"input_tokens": tokens,
@@ -55,13 +69,89 @@ class Dashboard(unittest.TestCase):
             f.write(body)
         return p
 
-    def build(self):
-        r = subprocess.run(["python3", PAGE, self.out], capture_output=True,
-                           text=True, env={"HOME": self.home,
-                                           "PATH": "/usr/bin:/bin"})
-        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        with open(self.out) as f:
-            return f.read()
+    def build(self, **env):
+        self.state, page = build_page(self.home, self.out, **env)
+        return page
+
+    def codex_quota(self, account, before, after):
+        directory = (os.path.join(self.home, ".codex") if account == "own" else
+                     os.path.join(self.auth, account))
+        sessions = os.path.join(directory, "sessions", "2026", "09", "18")
+        os.makedirs(sessions, exist_ok=True)
+        json.dump({"tokens": {"account_id": account}}, open(os.path.join(directory, "auth.json"), "w"))
+        now = datetime.datetime.now().astimezone()
+        with open(os.path.join(sessions, "rollout-a.jsonl"), "w") as f:
+            for minutes, pct in ((40, before), (5, after)):
+                f.write(json.dumps({"timestamp": (now - datetime.timedelta(minutes=minutes)).isoformat(),
+                                    "payload": {"type": "token_count", "rate_limits": {
+                                        "plan_type": "pro", "primary": {"window_minutes": 10080,
+                                        "used_percent": pct, "resets_at": int(now.timestamp()) + 86400}}}}) + "\n")
+        return directory
+
+    def codex_run(self, mode, account=None, directory=None):
+        now = datetime.datetime.now().astimezone()
+        body = "reviewprs mode=%s host=t start=%s\n" % (
+            mode, (now - datetime.timedelta(minutes=30)).isoformat())
+        if account:
+            body += "codex account:  %s  (role default, home %s)\n" % (account, directory)
+        body += "reviewprs mode=%s rc=0 elapsed=29m finish=%s\n" % (
+            mode, (now - datetime.timedelta(minutes=1)).isoformat())
+        self.log(mode, body)
+
+    def test_codex_card_follows_a_named_default_role_not_the_publisher(self):
+        self.codex_quota("codex-a", 10, 13)
+        other = self.codex_quota("codex-b", 70, 89)
+        os.symlink("codex-a", os.path.join(self.auth, "codex-default"))
+        page = self.build(CODEX_HOME=other)
+        self.assertEqual(self.state["cur_quota"], 13)
+        self.assertIn("default: codex-a", page)
+        self.assertIn('class="v">13%', page)
+
+    def test_codex_deltas_follow_each_logged_account_even_after_a_switch(self):
+        a = self.codex_quota("codex-a with space", 10, 13)
+        b = self.codex_quota("codex-b", 70, 89)
+        # Log IDs have no whitespace, but account directories can have it.
+        json.dump({"tokens": {"account_id": "account-a"}}, open(os.path.join(a, "auth.json"), "w"))
+        self.codex_run("followup", "account-a", a)
+        self.codex_run("rsync", "codex-b", b)
+        link = os.path.join(self.auth, "codex-default")
+        os.symlink(a, link)
+        for target in (b, a):
+            os.remove(link)
+            os.symlink(target, link)
+            page = self.build(CODEX_HOME=target)
+            rows = {r["mode"]: r for r in self.state["runs"]}
+            self.assertEqual(rows["followup"]["q_delta"], 3)
+            self.assertEqual(rows["rsync"]["q_delta"], 19)
+            self.assertIn("+3.0%", page)
+            self.assertIn("+19.0%", page)
+
+    def test_codex_usage_without_matching_account_attribution_stays_unknown(self):
+        a = self.codex_quota("codex-a", 10, 13)
+        os.symlink(a, os.path.join(self.auth, "codex-default"))
+        self.codex_run("old-run")
+        self.codex_run("replaced-account", "former-account", a)
+        self.codex_run("missing-home", "codex-a", a + "-missing")
+        self.build()
+        self.assertEqual(self.state["cur_quota"], 13)
+        self.assertEqual(len(self.state["runs"]), 3)
+        for r in self.state["runs"]:
+            self.assertIsNone(r["q_delta"], r)
+            self.assertIsNone(r["q_end"], r)
+
+    def test_a_dangling_codex_role_does_not_show_the_fallbacks_meter(self):
+        own = self.codex_quota("own", 20, 24)
+        os.symlink("missing", os.path.join(self.auth, "codex-default"))
+        page = self.build(CODEX_HOME=own)
+        self.assertIsNone(self.state["cur_quota"])
+        self.assertIn("default: unavailable", page)
+        self.assertNotIn('class="v">24%', page)
+
+    def test_an_absent_codex_default_role_still_uses_the_tools_own_home(self):
+        self.codex_quota("own", 20, 24)
+        page = self.build()
+        self.assertEqual(self.state["cur_quota"], 24)
+        self.assertIn("default: .codex", page)
 
     # --- which accounts the meters look at ----------------------------------
     def test_it_counts_the_account_a_role_selects(self):
