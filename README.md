@@ -129,6 +129,29 @@ These rules are in the command because each was learned from a wrong review:
 - **Nothing is pushed.** The command's permissions deny `git push`, and the runner
   refuses to start if that denial is missing from its settings.
 
+Before enabling cron, merge this into each selectable Claude account's
+`settings.json`, preserving existing settings and deny entries:
+
+```json
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "deny": [
+      "Bash(git push)",
+      "Bash(git push:*)",
+      "Read(~/review/auth/**)"
+    ]
+  }
+}
+```
+
+This includes `~/.claude/settings.json` when using the default fallback. For a
+custom auth location, `review-auth.sh login claude <account>` prints the exact
+rule. `Read` denials are guardrails, not containment of arbitrary shell readers.
+Existing installations must update every Claude account **before pulling**:
+`~/review/bin` points into the checkout, so pulling deploys the new pre-flight
+immediately. See [runner installation](docs/review-box.md#install).
+
 ## The second target
 
 `/reviewprs rsync` reviews a non-ArduPilot project (`RsyncProject/rsync`, opted in by the

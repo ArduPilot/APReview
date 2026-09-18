@@ -7,11 +7,14 @@ account-selection block must still turn these tests red.
 """
 import json
 import os
+import re
+import shlex
 import shutil
 import stat
 import subprocess
 import tempfile
 import unittest
+from test_runs_page import build_page
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -32,12 +35,17 @@ class Guard(unittest.TestCase):
         r = os.path.join(self.home, "review")
         for d in ("etc", "logs", "work", "data", "repositories"):
             os.makedirs(os.path.join(r, d), exist_ok=True)
-        os.symlink(BIN, os.path.join(r, "bin"))
+        os.makedirs(os.path.join(r, "bin"))
+        shutil.copy(os.path.join(BIN, "review-env.sh"), os.path.join(r, "bin"))
+        # Whole-script refusals run the EXIT trap. None of its helpers may
+        # inspect processes, spend quota or publish from the developer's box.
+        for name in ("reap-orphans.sh", "claude-usage-probe.sh", "publish-runs-page.sh"):
+            stub(os.path.join(r, "bin", name), 'exit 0')
         # The account pre-flight is extracted and run on its own, so these tests
         # stay fast and start nothing. The cost is that everything AFTER the
         # marker - the permission and gh pre-flights, the quota probe, the
         # launch - is not exercised here: a test for any of those must drive
-        # run-reviewprs.sh itself, as the two whole_run tests below do.
+        # run-reviewprs.sh itself, as the whole_run tests below do.
         source = open(os.path.join(BIN, "run-reviewprs.sh")).read()
         guard, marker, _ = source.partition("# Pre-flight: refuse to run")
         self.assertTrue(marker, "account preflight boundary missing")
@@ -108,6 +116,9 @@ print(o.get('accessToken') or '')" 2>/dev/null)
              "apiProvider": "%s", "configDirectory": "%s"}\\n' \
         "$e" "${STUB_METHOD:-claude.ai}" "${STUB_PROVIDER:-firstParty}" \
         "${STUB_CONFIG_DIR:-$d}"
+else
+    echo unexpected-launch > "$HOME/launched"
+    exit 97
 fi''')
         stub(os.path.join(self.stubs, "gh"), 'exit 0')
         stub(os.path.join(self.stubs, "codex"), 'exit 0')
@@ -144,8 +155,9 @@ fi''')
             json.dump({"permissions": {"deny": deny, "defaultMode": "auto"}},
                       open(p, "w"))
 
-    AUTH_DENY = ["Bash(git push)", "Bash(git push:*)",
-                 "Read(//review/auth/**)", "Bash(cat //review/auth/*)"]
+    @property
+    def AUTH_DENY(self):
+        return ["Bash(git push)", "Bash(git push:*)", "Read(/%s/**)" % self.auth]
 
     def test_credentials_inside_the_granted_directory_must_be_denied(self):
         # the agent gets --add-dir $REVIEW_ROOT and reads other people's pull
@@ -161,10 +173,128 @@ fi''')
         self.assertIn("permission pre-flight OK", out.stdout)
 
     def test_the_git_push_denials_are_still_required(self):
-        self.settings(["Read(//review/auth/**)"])
+        self.settings(self.AUTH_DENY[2:])
         out = self.whole_run("followup", "--dry-run")
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("missing deny rules", out.stdout)
+
+    def test_the_deny_rule_must_cover_reads_of_this_whole_auth_tree(self):
+        for rule in ("Edit(/%s/**)" % self.auth, "Bash(cat %s/*)" % self.auth,
+                     "Read(//elsewhere/review/auth/**)", "Read(%s/**)" % self.auth,
+                     "Read(/%s/*)" % self.auth, "Read(/%s/claude-personal/**)" % self.auth,
+                     "Read(/%s-other/**)" % self.auth, "Read(~/review/auth-other/**)",
+                     "Read(./../auth/**)", "Read(~/review/a[ut]h/**)"):
+            with self.subTest(rule=rule):
+                self.settings(self.AUTH_DENY[:2] + [rule])
+                out = self.whole_run("followup", "--dry-run")
+                self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+                self.assertIn("does not deny reading", out.stdout)
+                self.assertIn("status=preflight-failed", out.stdout)
+
+    def test_an_ancestor_read_denial_is_sufficient(self):
+        for rule in ("Read(~/review/**)", "Read(~/review/auth/**)", "Read",
+                     "Read(/%s/**)" % self.home):
+            with self.subTest(rule=rule):
+                self.settings(self.AUTH_DENY[:2] + [rule])
+                out = self.whole_run("followup", "--dry-run")
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                self.assertIn("permission pre-flight OK", out.stdout)
+
+    def test_the_suggested_read_rule_is_absolute_and_satisfies_the_preflight(self):
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        m = re.search(r'Add this deny rule: (.+)', out.stdout)
+        self.assertIsNotNone(m, out.stdout)
+        rule = json.loads(m.group(1))
+        # Do not just ask our own checker: prove the documented // root syntax
+        # actually spells this fixture's path, not /review/auth somewhere else.
+        self.assertEqual(rule, "Read(/%s/**)" % self.auth)
+        self.settings(self.AUTH_DENY[:2] + [rule])
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def check_setup_rules(self, settings):
+        self.assertEqual(settings["permissions"]["defaultMode"], "auto")
+        self.settings(settings["permissions"]["deny"])
+        # Both selectable accounts need the setup, not just the default one.
+        for mode in ("followup", "rsync"):
+            out = self.whole_run(mode, "--dry-run")
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertIn("permission pre-flight OK", out.stdout)
+
+    def check_documented_setup(self, name):
+        doc = open(os.path.join(os.path.dirname(os.path.dirname(BIN)), name)).read()
+        snippets = re.findall(r'```json\n(.*?)\n```', doc, re.S)
+        settings = [json.loads(s) for s in snippets if '"permissions"' in s]
+        self.assertEqual(len(settings), 1, "expected one copyable account settings block")
+        self.check_setup_rules(settings[0])
+
+    def test_install_instructions_supply_working_settings(self):
+        self.check_documented_setup("docs/review-box.md")
+
+    def test_readme_instructions_supply_working_settings(self):
+        self.check_documented_setup("README.md")
+
+    def test_login_instructions_supply_working_settings(self):
+        out = subprocess.run([os.path.join(BIN, "review-auth.sh"), "login", "claude", "personal"],
+                             capture_output=True, text=True,
+                             env={"HOME": self.home, "PATH": self.stubs + ":/usr/bin:/bin"})
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("every claude account", out.stdout.lower())
+        self.assertIn("{", out.stdout)
+        settings, _ = json.JSONDecoder().raw_decode(out.stdout[out.stdout.index("{"):])
+        self.assertIn("Read(/%s/**)" % self.auth, settings["permissions"]["deny"])
+        self.check_setup_rules(settings)
+
+    def test_custom_auth_paths_are_escaped_in_login_and_refusal_instructions(self):
+        auth = os.path.join(self.home, "credentials [live]")
+        os.rename(self.auth, auth)
+        self.auth = auth
+        with open(os.path.join(self.home, "review", "etc", "local.conf"), "w") as f:
+            f.write("REVIEW_AUTH=%s\n" % shlex.quote(auth))
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        m = re.search(r'Add this deny rule: (.+)', out.stdout)
+        self.assertIsNotNone(m, out.stdout)
+        rule = json.loads(m.group(1))
+        self.assertEqual(rule, "Read(/%s/**)" % auth.replace("[", "\\[").replace("]", "\\]"))
+        self.settings(self.AUTH_DENY[:2] + [rule])
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        out = subprocess.run([os.path.join(BIN, "review-auth.sh"), "login", "claude", "personal"],
+                             capture_output=True, text=True,
+                             env={"HOME": self.home, "PATH": self.stubs + ":/usr/bin:/bin"})
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("{", out.stdout)
+        settings, _ = json.JSONDecoder().raw_decode(out.stdout[out.stdout.index("{"):])
+        self.assertIn(rule, settings["permissions"]["deny"])
+        self.check_setup_rules(settings)
+
+    def check_logged_refusal(self, status, diagnostic):
+        out = self.whole_run("followup")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "launched")))
+        logs = os.path.join(self.home, "review", "logs")
+        files = [f for f in os.listdir(logs) if f.startswith("reviewprs-")]
+        self.assertEqual(len(files), 1)
+        body = open(os.path.join(logs, files[0])).read()
+        self.assertIn(diagnostic, body)
+        self.assertRegex(body, r'finish=\S+ status=' + status)
+        state, page = build_page(self.home, os.path.join(self.home, "runs.html"))
+        self.assertEqual(len(state["runs"]), 1)
+        self.assertEqual(state["runs"][0]["status"], status)
+        self.assertIsNotNone(state["runs"][0]["finish"])
+        self.assertEqual(state["nfail"], 1)
+        self.assertIn('class="badge b-fail">' + status, page)
+        self.assertNotIn("so far", page)
+
+    def test_a_permission_refusal_finishes_the_logged_run(self):
+        self.check_logged_refusal("preflight-failed", "does not deny reading")
+
+    def test_a_missing_work_directory_finishes_the_logged_run(self):
+        self.settings(self.AUTH_DENY)
+        os.rmdir(os.path.join(self.home, "review", "work"))
+        self.check_logged_refusal("no-work-dir", "FATAL: no ")
 
     # --- a refusal has to be visible ----------------------------------------
     def test_a_refusal_is_written_to_the_run_log(self):

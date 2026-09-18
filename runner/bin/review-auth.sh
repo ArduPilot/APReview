@@ -256,6 +256,7 @@ list)
 use)
     [ $# -eq 4 ] || { echo "usage: review-auth.sh use <claude|codex> <role> <account>"; exit 2; }
     tool="$2"; role="$3"; acct="$4"
+    case "$tool" in claude|codex) ;; *) echo "unknown tool: $tool"; exit 2 ;; esac
     plain_name "$role" || exit 2
     plain_name "$acct" || exit 2
     dir="$AUTH/$tool-$acct"
@@ -264,7 +265,7 @@ use)
     # `use claude default default` would point the role at itself: exit 0, and a
     # role nothing can resolve. The account must be a real account directory,
     # not another role link.
-    if [ "$acct" = "$role" ] || [ -L "$dir" ] && [ "$(readlink -f "$dir")" = "$(readlink -f "$link")" ]; then
+    if [ "$acct" = "$role" ] || { [ -L "$dir" ] && [ "$(readlink -f "$dir")" = "$(readlink -f "$link")" ]; }; then
         echo "$tool-$acct is the role itself - that would leave $tool-$role unresolvable"
         exit 1
     fi
@@ -324,6 +325,7 @@ use)
 login)
     [ $# -eq 3 ] || { echo "usage: review-auth.sh login <claude|codex> <account>"; exit 2; }
     tool="$2"; acct="$3"
+    case "$tool" in claude|codex) ;; *) echo "unknown tool: $tool"; exit 2 ;; esac
     plain_name "$acct" || exit 2
     dir="$AUTH/$tool-$acct"
     # Credentials go in here: not readable by anyone else, and neither is the
@@ -333,7 +335,16 @@ login)
         claude) echo "Run this, then answer in a browser:"
                 echo "  CLAUDE_CONFIG_DIR=$dir claude auth login"
                 echo "and record the account so a wrong sign-in is caught:"
-                echo "  echo <address> > $dir/ACCOUNT" ;;
+                echo "  echo <address> > $dir/ACCOUNT"
+                echo "Before enabling cron, merge this into $dir/settings.json; preserve other settings."
+                echo "Every Claude account a role can select needs these rules."
+                python3 - "$AUTH" <<'PYSET'
+import json, os, re, sys
+auth = re.sub(r"([\\*?\[\]])", r"\\\1", os.path.realpath(sys.argv[1]))
+print(json.dumps({"permissions": {"defaultMode": "auto", "deny": [
+    "Bash(git push)", "Bash(git push:*)", "Read(/%s/**)" % auth]}}, indent=2))
+PYSET
+                echo "Read denials are guardrails, not containment of arbitrary shell readers." ;;
         codex)  echo "Run this, then answer in a browser:"
                 echo "  CODEX_HOME=$dir codex login"
                 echo "then record the account id it reports - not an address, which"

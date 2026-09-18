@@ -359,10 +359,9 @@ export REVIEW_BOX_NAME="${REVIEW_BOX_NAME:-$(hostname -s 2>/dev/null || echo run
 # --- site configuration --------------------------------------------------------
 # local.conf holds the publishing target and the runner's name - not accounts,
 # which are the directories and role links under $REVIEW_AUTH. It sets plain
-# shell variables, and a variable
-# that is set but not exported is invisible to every child process - gh, python,
-# the review tools. That has bitten twice: GH_TOKEN, so runs kept posting as the
-# keyring account, and REVIEW_COMMENT_ACCOUNTS, so post-comments.py saw only the
+# shell variables; without export they are invisible to child processes - gh,
+# python, the review tools. That has bitten twice: GH_TOKEN, so runs kept posting
+# as the keyring account, and REVIEW_COMMENT_ACCOUNTS, so post-comments.py saw only the
 # current account and would have posted a duplicate on every PR the old one had
 # reviewed. `set -a` marks everything the file assigns for export and lets the
 # shell do the parsing: a regex over the file misses `export FOO=`,

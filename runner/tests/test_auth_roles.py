@@ -539,6 +539,56 @@ class Switching(Base):
         return sh('"$1" use "$2" "$3" "$4"', self.home, AUTH_SH, tool, role, acct,
                   path=path)
 
+    def test_unknown_tools_cannot_create_login_directories(self):
+        before = sorted(os.listdir(self.auth))
+        for tool in ("../../work/x", "other", "Claude", ""):
+            with self.subTest(tool=tool):
+                out = sh('"$1" login "$2" personal', self.home, AUTH_SH, tool)
+                self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+                self.assertIn("unknown tool:", out.stdout)
+                self.assertEqual(sorted(os.listdir(self.auth)), before)
+                self.assertFalse(os.path.exists(os.path.join(self.home, "work")))
+
+    def test_unknown_tools_cannot_switch_roles(self):
+        # Make the directory exist: a missing account must not be what refuses
+        # this call, and traversal must be stopped before any lock or link.
+        os.makedirs(os.path.join(self.home, "work", "x-personal"), mode=0o700)
+        for tool in ("../../work/x", "other", "Claude", ""):
+            with self.subTest(tool=tool):
+                out = self.use(tool, "default", "personal")
+                self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+                self.assertIn("unknown tool:", out.stdout)
+                self.assertFalse(os.path.lexists(os.path.join(self.home, "work", "x-default")))
+                self.assertFalse(any(n.endswith(".lock") for n in os.listdir(self.auth)))
+
+    def test_role_and_account_names_are_checked_before_paths_are_used(self):
+        self.link("claude-default", "claude-ardupilot")
+        for name in ("", ".", "..", "-option", "../../work/x", "has space"):
+            for command in (("use", "claude", name, "personal"),
+                            ("use", "claude", "default", name), ("login", "claude", name)):
+                with self.subTest(command=command):
+                    out = sh('"$@"', self.home, AUTH_SH, *command)
+                    self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+                    self.assertIn("not a plain name", out.stderr)
+                    self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
+                                     "claude-ardupilot")
+                    self.assertFalse(any(n.endswith(".lock") for n in os.listdir(self.auth)))
+
+    def test_plain_account_names_allow_dots_underscores_and_hyphens(self):
+        for tool in ("claude", "codex"):
+            out = sh('"$1" login "$2" personal_2-old.work', self.home, AUTH_SH, tool)
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertTrue(os.path.isdir(os.path.join(self.auth, tool + "-personal_2-old.work")))
+
+    def test_an_alias_of_the_current_role_is_refused_before_switching(self):
+        self.link("claude-default", "claude-ardupilot")
+        self.link("claude-alias", "claude-default")
+        out = self.use("claude", "default", "alias")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("is the role itself", out.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.auth, ".claude-default.lock")))
+        self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")), "claude-ardupilot")
+
     def leaves_root(self):
         """An account directory that only fails once the role points at it."""
         outside = os.path.join(self.home, "elsewhere")

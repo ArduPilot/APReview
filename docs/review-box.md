@@ -44,6 +44,38 @@ cp ~/APReview/runner/etc/local.conf.example ~/review/etc/local.conf   # then edi
 ~/review/bin/clone-ardupilot.sh      # base clone with submodules
 ~/review/bin/clone-repos.sh          # everything in repos.json, submodules included
 ~/review/bin/base-build.sh           # proves the toolchain, warms ccache
+```
+
+Before enabling cron, merge these settings into `settings.json` in **every Claude
+account directory** a role can select (including `~/.claude` if using the default
+fallback). Preserve existing settings and deny entries:
+
+```json
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "deny": [
+      "Bash(git push)",
+      "Bash(git push:*)",
+      "Read(~/review/auth/**)"
+    ]
+  }
+}
+```
+
+For a custom `REVIEW_AUTH`, `review-auth.sh login claude <account>` prints the
+exact absolute rule. The pre-flight accepts `Read(~/path/**)` or
+`Read(//absolute/path/**)` covering the auth directory or an ancestor, or `Read`
+to deny the tool entirely. A single leading slash is relative to the settings
+source, not the filesystem root. Other glob forms are refused if coverage cannot
+be established. These rules are guardrails; arbitrary shell readers can still
+reach credentials under the same uid.
+
+On an existing box, update **all** Claude accounts before pulling this change:
+the `bin` symlink makes that pull the deploy, and missing rules abort every slot.
+Then enable cron:
+
+```sh
 crontab ~/review/etc/crontab.reviewprs
 ```
 
@@ -217,9 +249,10 @@ The reviewing agent is started with `--add-dir $REVIEW_ROOT` and reads other
 people's pull requests, and `~/review/auth/` is inside that directory - same uid,
 so file modes stop nothing. The permission pre-flight therefore requires a deny
 rule covering it, alongside the `git push` denials, and refuses to start without
-one. A refusal is written to the run log and shows on the dashboard: these checks
-used to run before the log was opened, so under cron a refused run said nothing
-anywhere and the slot simply went quiet.
+one; the Install block above gives the exact settings. This does not contain
+arbitrary shell readers. A refusal is written to the run log and shows on the
+dashboard: these checks used to run before the log was opened, so under cron a
+refused run said nothing anywhere and the slot simply went quiet.
 
 `status` clears the same variables before it asks, and then makes exactly the
 judgements the runner makes - including a variable it could not clear, a partial
