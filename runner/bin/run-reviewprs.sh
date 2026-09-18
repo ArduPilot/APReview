@@ -74,32 +74,16 @@ select_account() {           # tool VAR -> exports VAR, or unsets it
     case "$rc" in
         2) echo "FATAL: cannot use the $tool account for role $ROLE"
            echo "       review-auth.sh status   shows what each role resolves to"
-           echo "finish=$(date -Is) status=wrong-claude-account"
+           echo "finish=$(date -Is) status=wrong-$tool-account"
            exit 1 ;;
         1) ;;   # no link for the default role: the tool's own directory
     esac
-    # role_config_dir decides between setting it and leaving it unset; the
-    # usage probe asks the same function, so the meter follows a switch.
-    d=$(role_config_dir "$tool" "$ROLE")
+    # Decide from the path review_auth just returned, not from a second
+    # resolution: a switch landing between the two reads would give an answer
+    # the return code above was never checked against.
+    d=$(role_config_dir "$tool" "$ROLE" "$d")
     if [ -n "$d" ]; then export "$var=$d"; else unset "$var"; fi
 }
-# The role a run selected, for the children that take their own readings.
-export REVIEW_ROLE="$ROLE"
-if ! clear_inherited_credentials; then
-    echo "FATAL: these could not be removed from the environment and would"
-    echo "       decide the account instead of the role:$CLEARED_FAILED"
-    echo "finish=$(date -Is) status=wrong-claude-account"
-    exit 1
-fi
-[ -z "$CLEARED_VARS" ] || echo "cleared from the environment: $CLEARED_VARS"
-# Belt and braces: select_account unsets on the path where the role resolves to
-# the tool's own directory, and the sweep above clears anything inherited.
-unset CLAUDE_CONFIG_DIR CODEX_HOME 2>/dev/null || true
-select_account claude CLAUDE_CONFIG_DIR
-select_account codex  CODEX_HOME
-CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
-
 STAMP=$(date +%Y%m%d_%H%M%S)
 # The mode can be a PR reference - ArduPilot/ardupilot#34206 from review-now.sh -
 # which cannot go in a filename: the slash names a directory that does not exist.
@@ -117,8 +101,6 @@ mkdir -p "$REVIEW_LOGS" "$REVIEW_ROOT/etc"
 if [ "$DRY" = 1 ]; then
     echo "DRY RUN: mode=$MODE  host=$(hostname)"
     echo "  log would be:   $LOG"
-    echo "  claude config:  ${CLAUDE_CONFIG_DIR:-$HOME/.claude} (role $ROLE)"
-    echo "  codex home:     ${CODEX_HOME:-$HOME/.codex}"
 fi
 
 # Keep 30 days of logs; they are the only record of an unattended run.
@@ -136,6 +118,32 @@ echo "reviewprs mode=$MODE  host=$(hostname)  start=$(date -Is)"
 echo "REVIEW_DATA=$REVIEW_DATA  TMPDIR=$TMPDIR"
 echo "follow with:  tail -f $LATEST"
 echo "=============================================================="
+
+# Account selection comes after the redirect, not before it. These refusals used
+# to run at the top of the script, where there is no log yet: under cron, with
+# MAILTO empty, a refused run said nothing anywhere and left no row on the
+# dashboard - the rsync slot would simply go quiet. Nothing above this point
+# spends quota or touches an account, so it loses nothing by waiting.
+# The role a run selected, for the children that take their own readings.
+export REVIEW_ROLE="$ROLE"
+if ! clear_inherited_credentials; then
+    echo "FATAL: these could not be removed from the environment and would"
+    echo "       decide the account instead of the role:$CLEARED_FAILED"
+    echo "finish=$(date -Is) status=wrong-claude-account"
+    exit 1
+fi
+[ -z "$CLEARED_VARS" ] || echo "cleared from the environment: $CLEARED_VARS"
+# Belt and braces: select_account unsets on the path where the role resolves to
+# the tool's own directory, and the sweep above clears anything inherited.
+unset CLAUDE_CONFIG_DIR CODEX_HOME 2>/dev/null || true
+select_account claude CLAUDE_CONFIG_DIR
+select_account codex  CODEX_HOME
+CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+if [ "$DRY" = 1 ]; then
+    echo "  claude config:  $CLAUDE_DIR (role $ROLE)"
+    echo "  codex home:     $CODEX_DIR"
+fi
 
 # Lock policy. REVIEWPRS_LOCK_WAIT is seconds to wait for the lock:
 #   0 (default)  - skip this slot if busy. Right for the frequent cron jobs,
@@ -369,8 +377,8 @@ echo "codex account:  $CODEX_ACCOUNT  (role $ROLE, home $CODEX_DIR)"
 # run, not silently grant it. "bypassPermissions" is deliberately NOT used
 # below: it bypasses deny rules too, which would re-enable git push.
 SETTINGS="$CLAUDE_DIR/settings.json"
-if ! python3 - "$SETTINGS" <<'PYCHK'
-import json,sys
+if ! REVIEW_AUTH="$REVIEW_AUTH" python3 - "$SETTINGS" <<'PYCHK'
+import json,os,sys
 try:
     d=json.load(open(sys.argv[1]))
 except Exception as e:
@@ -380,9 +388,20 @@ need=["Bash(git push)","Bash(git push:*)"]
 missing=[r for r in need if r not in deny]
 if missing:
     print("FATAL: settings.json is missing deny rules: %s" % missing); sys.exit(1)
+# The agent is given --add-dir $REVIEW_ROOT and reads other people's pull
+# requests. Every account's credentials live under $REVIEW_AUTH, which is inside
+# that directory, so reaching them must be denied explicitly - same uid, so file
+# modes stop nobody.
+auth=os.environ.get("REVIEW_AUTH","")
+if auth and not any(auth in r or "review/auth" in r for r in deny):
+    print("FATAL: settings.json does not deny reading %s," % auth)
+    print("       which holds every account's credentials and is inside --add-dir.")
+    print("       Add rules such as:  Read(%s/**)  and  Bash(cat %s/*)" % (auth, auth))
+    sys.exit(1)
 if d.get("permissions",{}).get("defaultMode")!="auto":
     print("FATAL: permissions.defaultMode is not 'auto'"); sys.exit(1)
-print("permission pre-flight OK: git push denied, defaultMode=auto")
+print("permission pre-flight OK: git push denied, %s denied, defaultMode=auto"
+      % os.path.basename(auth.rstrip("/") or "auth"))
 PYCHK
 then
     echo "ABORTING: permission pre-flight failed"
