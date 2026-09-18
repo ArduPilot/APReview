@@ -15,7 +15,8 @@ Everything lives under `~/review`, which is `$REVIEW_ROOT`:
 | path | what |
 |---|---|
 | `~/review/bin/` | the scripts from `runner/bin/` in this repo |
-| `~/review/etc/` | `local.conf`, the run lock, the crontab, per-account config |
+| `~/review/etc/` | `local.conf`, the run lock, the crontab |
+| `~/review/auth/` | one directory per account, and a symlink per role. Never in git |
 | `~/review/data/` | all scratch: checkouts, clones, build trees. `$REVIEW_DATA` |
 | `~/review/repositories/` | maintained base clones of every reviewed repo. `$REVIEW_REPOS` |
 | `~/review/work/` | working dir for a run; reports land here, base checkouts stay clean |
@@ -47,8 +48,9 @@ crontab ~/review/etc/crontab.reviewprs
 ```
 
 `local.conf` is where the site-specific settings go: the rsync destination, its
-credentials, the public URL reports appear at, and optionally a separate Claude
-account for one mode. It is never committed.
+credentials and the public URL reports appear at. It is never committed. Accounts
+are not in it - they are the directories and role links under `~/review/auth/`,
+described below.
 
 ## Scripts
 

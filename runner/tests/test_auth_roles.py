@@ -18,13 +18,14 @@ ENV_SH = os.path.join(BIN, "review-env.sh")
 AUTH_SH = os.path.join(BIN, "review-auth.sh")
 
 
-def sh(script, home, *args, path=None):
+def sh(script, home, *args, path=None, **extra):
     # Built from nothing rather than inherited: a BASH_ENV that merely resets
     # PATH made the positive stub test run the real CLI and fail.
     env = {"HOME": home, "PATH": "/usr/bin:/bin", "SHELL": "/bin/bash",
            "LANG": "C.UTF-8"}
     if path:
         env["PATH"] = path + os.pathsep + env["PATH"]
+    env.update(extra)
     return subprocess.run(["bash", "-c", script, "_", *args],
                           capture_output=True, text=True, env=env)
 
@@ -440,6 +441,95 @@ class StatusView(Base):
         out = self.status()
         line = [l for l in out.stdout.splitlines() if l.startswith("claude-rsync")][0]
         self.assertIn("REFUSE", line)
+
+
+class UsageProbe(Base):
+    """The hourly meter has to follow the role, or a switch freezes it."""
+
+    def resolved(self, role="default", **env):
+        out = sh('. "$1" >/dev/null 2>&1; role_config_dir claude "$2"',
+                 self.home, ENV_SH, role, **env)
+        return out.stdout.strip()
+
+    def test_it_reads_the_account_the_default_role_selects(self):
+        self.link("claude-default", "claude-personal")
+        self.assertEqual(self.resolved(),
+                         os.path.join(self.auth, "claude-personal"))
+
+    def test_it_follows_the_role_when_the_link_moves(self):
+        # `use claude default personal` is the headline command; a meter that
+        # keeps sampling the old account is worse than no meter, because the
+        # frozen reading looks like a real one
+        self.link("claude-default", "claude-ardupilot")
+        first = self.resolved()
+        self.link("claude-default", "claude-personal")
+        self.assertNotEqual(first, self.resolved())
+        self.assertEqual(self.resolved(),
+                         os.path.join(self.auth, "claude-personal"))
+
+    def test_the_tools_own_directory_reads_as_leave_it_unset(self):
+        # setting CLAUDE_CONFIG_DIR to ~/.claude makes the CLI report no
+        # address at all, so the answer there is emptiness, not the path
+        own = os.path.join(self.home, ".claude")
+        os.makedirs(own, mode=0o700)
+        os.rmdir(os.path.join(self.auth, "claude-ardupilot"))
+        os.symlink(own, os.path.join(self.auth, "claude-ardupilot"))
+        self.link("claude-default", "claude-ardupilot")
+        self.assertEqual(self.resolved(), "")
+
+    def probe(self, **env):
+        """Run the probe with a stub CLI that reports whatever directory it read."""
+        d = os.path.join(self.home, "stubs")
+        os.makedirs(d, exist_ok=True)
+        f = os.path.join(d, "claude")
+        with open(f, "w") as fh:
+            fh.write('#!/bin/sh\n'
+                     'e="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"\n'
+                     'case "$1 $2" in\n'
+                     '  "auth status") printf \'{"loggedIn": true, "email": "%s@x.y"}\\n\''
+                     ' "$(basename "$e")"; exit 0 ;;\n'
+                     'esac\n'
+                     'echo "Current session: 7%"\n'
+                     'echo "Current week (all models): 11%"\n')
+        os.chmod(f, 0o755)
+        os.makedirs(os.path.join(self.home, "review", "logs"), exist_ok=True)
+        os.makedirs(os.path.join(self.home, "review", "bin"), exist_ok=True)
+        for n in ("review-env.sh", "claude-usage-probe.sh"):
+            link = os.path.join(self.home, "review", "bin", n)
+            if not os.path.exists(link):
+                os.symlink(os.path.join(BIN, n), link)
+        sh('"$1" hourly', self.home,
+           os.path.join(self.home, "review", "bin", "claude-usage-probe.sh"),
+           path=d, **env)
+        p = os.path.join(self.home, "review", "logs", "claude-usage.jsonl")
+        if not os.path.exists(p):
+            return []
+        import json as _json
+        with open(p) as fh:
+            return [_json.loads(l) for l in fh if l.strip()]
+
+    def test_the_hourly_probe_reads_the_account_the_role_selects(self):
+        # the hourly trace has no environment from a run, so it must resolve the
+        # role itself - otherwise it samples ~/.claude for ever after a switch
+        self.link("claude-default", "claude-personal")
+        recs = self.probe()
+        self.assertTrue(recs, "the probe recorded nothing")
+        self.assertEqual(recs[-1].get("account"), "claude-personal@x.y")
+
+    def test_a_run_probe_keeps_the_account_the_run_selected(self):
+        # inside a run there is nothing to decide: the run already chose, and
+        # re-resolving would misdirect the rsync probes to the default account
+        self.link("claude-default", "claude-personal")
+        recs = self.probe(CLAUDE_CONFIG_DIR=os.path.join(self.auth, "claude-ardupilot"),
+                          REVIEW_ROLE="rsync")
+        self.assertTrue(recs, "the probe recorded nothing")
+        self.assertEqual(recs[-1].get("account"), "claude-ardupilot@x.y")
+
+    def test_an_unresolvable_role_reads_as_the_tools_own_directory(self):
+        # the probe only reads a meter: it reports what a run would use, and a
+        # run of that role refuses separately
+        os.makedirs(os.path.join(self.home, ".claude"), mode=0o700)
+        self.assertEqual(self.resolved("rsync"), "")
 
 
 class Switching(Base):

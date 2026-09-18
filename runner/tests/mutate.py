@@ -18,6 +18,8 @@ RUN = "runner/bin/run-reviewprs.sh"
 AUT = "runner/bin/review-auth.sh"
 ENV = "runner/bin/review-env.sh"
 BOTH = (RUN, AUT)
+PAGE = "runner/bin/make-runs-page.py"
+PRB = "runner/bin/claude-usage-probe.sh"
 
 # name -> (file(s), old, new)   old must appear exactly once in each file
 M = [
@@ -59,8 +61,8 @@ M = [
  ("suffixgap", ENV, '\\|USE_[A-Z0-9_]\\{1,\\}\\)[A-Z0-9_]*', '\\|USE_[A-Z0-9_]\\{1,\\}\\)'),
  ("noopenai", ENV, '\\(ANTHROPIC\\|OPENAI\\)', '\\(ANTHROPIC\\)'),
  ("nocodex", ENV, '\\(CLAUDE\\|CODEX\\)_[A-Z0-9_]*\\(', '\\(CLAUDE\\)_[A-Z0-9_]*\\('),
- ("nofallbackpin", RUN, 'd=$(readlink -f "$HOME/.$tool" 2>/dev/null) || d=""\n           [ -n "$d" ] || { unset "$var"; return 0; } ;;',
-                        'unset "$var"; return 0 ;;'),
+ ("nofallbackpin", ENV, '[ -n "$d" ] && [ "$d" = "$(readlink -f "$own" 2>/dev/null)" ] \\\n        && [ ! -L "$own" ] && d=""',
+                        '[ -n "$d" ] && [ "$d" = "$(readlink -f "$own" 2>/dev/null)" ] && d=""'),
  ("nomethod", RUN, '    claude.ai|-) ;;', '    *) ;;'),
  ("noprovider", RUN, '    firstParty|-) ;;', '    *) ;;'),
  ("noclidir", RUN, 'if [ "$CLAUDE_CLI_DIR" != "-" ]', 'if false && [ "$CLAUDE_CLI_DIR" != "-" ]'),
@@ -117,6 +119,18 @@ M = [
  ("oneconfiglayer", ENV, 'paths += sorted(glob.glob(', 'paths += list((lambda *a: [])('),
  ("otelscan", ENV, '        elif isinstance(v, dict):\n            # Every other table too',
                    '        elif False:\n            # Every other table too'),
+ # the dashboard: it describes the accounts the roles select
+ ("pagerolelink", PAGE, '        if os.path.islink(d) or not os.path.isdir(d):',
+                        '        if not os.path.isdir(d):'),
+ ("pageaccounts", PAGE, "    for d in sorted(glob.glob(os.path.join(AUTH, tool + '-*'))):",
+                        "    for d in []:"),
+ ("pageown", PAGE, "    dirs = [os.path.join(HOME, '.' + tool)]", "    dirs = []"),
+ ("pagestatus", PAGE, "elif re.search(r'status=wrong-\\w+-account', txt):",
+                      "elif 'status=wrong-claude-account' in txt:"),
+ ("probefollow", PRB, 'PROBE_DIR=$(role_config_dir claude default)',
+                      'PROBE_DIR=""'),
+ ("proberunenv", PRB, 'if [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -z "${REVIEW_ROLE:-}" ]; then',
+                      'if true; then'),
  ("earlyprobe", AUT, '    lockf="$AUTH/.$tool-$role.lock"',
                      '    got=$(account_of "$tool" "$dir")\n    lockf="$AUTH/.$tool-$role.lock"'),
 ]
@@ -157,7 +171,6 @@ REGRESSION = {
     'suffixgap': 'Guard.test_a_token_variable_with_a_suffix_does_not_reach_the_cli',
     'noopenai': 'Guard.test_an_openai_key_does_not_reach_the_cli',
     'nocodex': 'Guard.test_a_codex_credential_variable_is_cleared',
-    'nofallbackpin': 'Guard.test_a_symlinked_tool_home_is_pinned_even_with_no_role_link',
     'nomethod': 'Guard.test_a_token_login_stops_the_run',
     'noprovider': 'Guard.test_a_cloud_provider_stops_the_run',
     'noclidir': 'Guard.test_credentials_read_from_another_directory_stop_the_run',
@@ -203,6 +216,13 @@ REGRESSION = {
     'urlparser': 'Guard.test_endpoint_urls_are_parsed_as_urls',
     'oneconfiglayer': 'Guard.test_a_profile_layer_beside_the_config_is_checked_too',
     'otelscan': 'Guard.test_a_telemetry_exporter_pointing_elsewhere_stops_the_run',
+    'pagerolelink': 'Dashboard.test_it_does_not_count_an_account_twice_through_its_role_link',
+    'pageaccounts': 'Dashboard.test_it_counts_the_account_a_role_selects',
+    'pageown': 'Dashboard.test_it_counts_the_tools_own_directory',
+    'pagestatus': 'Dashboard.test_a_refused_codex_run_is_shown_as_refused',
+    'probefollow': 'UsageProbe.test_the_hourly_probe_reads_the_account_the_role_selects',
+    'nofallbackpin': 'Guard.test_a_symlinked_tool_home_is_pinned_even_with_no_role_link',
+    'proberunenv': 'UsageProbe.test_a_run_probe_keeps_the_account_the_run_selected',
     'earlyprobe': 'Switching.test_an_unsafe_account_is_refused_before_the_cli_reads_it',
 }
 
@@ -226,7 +246,7 @@ def main():
                 print("baseline failed: " + t)
                 print(result.stdout + result.stderr)
                 return 1
-        print("all four test files pass", flush=True)
+        print("%d test files pass" % len(tests), flush=True)
         for name, files, old, new in selected:
             shutil.rmtree(tree, ignore_errors=True)
             shutil.copytree(SRC, tree, ignore=shutil.ignore_patterns(
@@ -240,7 +260,18 @@ def main():
                 io.open(path, "w").write(s.replace(old, new, 1))
             else:
                 case = REGRESSION[name]
-                test = "test_runner_guard.py" if case.startswith("Guard.") else "test_auth_roles.py"
+                # find the class rather than guessing from two filenames: a
+                # third test file silently sent every case to the wrong one,
+                # which reads as NOT CAUGHT whatever the mutation did
+                cls = case.split(".")[0]
+                test = next((t for t in tests
+                             if re.search(r"^class %s\(" % re.escape(cls),
+                                          io.open(os.path.join(tree, "runner/tests", t)).read(),
+                                          re.M)), None)
+                if test is None:
+                    print("  %-16s NO SUCH TEST CLASS: %s" % (name, cls))
+                    bad += 1
+                    continue
                 r = subprocess.run(["python3", os.path.join(tree, "runner/tests", test), case, "-f"],
                                    capture_output=True, text=True, env=test_env)
                 output = r.stdout + r.stderr

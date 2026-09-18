@@ -11,6 +11,17 @@ set -u
 OUT="$REVIEW_LOGS/claude-usage.jsonl"
 TAG="${1:-probe}"
 
+# Which account to read. A run exports CLAUDE_CONFIG_DIR for the role it chose
+# (or leaves it unset when the role is the tool's own directory) along with
+# REVIEW_ROLE, so inside a run there is nothing to decide. The hourly trace has
+# neither and must resolve the role itself - otherwise it keeps sampling
+# ~/.claude after `review-auth.sh use claude default personal`, freezing one
+# meter and never starting the other.
+if [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -z "${REVIEW_ROLE:-}" ]; then
+    PROBE_DIR=$(role_config_dir claude default)
+    [ -z "$PROBE_DIR" ] || export CLAUDE_CONFIG_DIR="$PROBE_DIR"
+fi
+
 clear_stale_oauth_lock >/dev/null 2>&1 || true
 
 # Which account this reading belongs to. Runs can use different subscriptions
