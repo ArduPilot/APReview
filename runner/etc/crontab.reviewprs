@@ -15,11 +15,12 @@ MAILTO=""
 30 2 * * *   $HOME/review/bin/refresh-repos.sh
 
 # Follow-ups: frequent and cheap. Does nothing when nothing has moved.
-# Waits up to 30m for the lock: a followup slot falls 34m after an `all` slot,
-# so a long `all` run (34-71m observed) would otherwise skip the next followup
-# every time. 30m rescues that without letting slots pile up: the next followup
-# is 3h away regardless.
-47 1,4,7,10,13,16,19,22 * * *   REVIEWPRS_LOCK_WAIT=1800 $HOME/review/bin/run-reviewprs.sh followup
+# Waits up to 2h for the lock: a followup slot falls 34m after an `all` slot, so
+# a long run would otherwise skip the next followup every time. 30m was not
+# enough - a 46m AIReview run released the lock six seconds after the wait
+# expired, and the slot was lost for nothing. The next followup is 3h away
+# regardless, so a wait cannot let slots pile up.
+47 1,4,7,10,13,16,19,22 * * *   REVIEWPRS_LOCK_WAIT=7200 $HOME/review/bin/run-reviewprs.sh followup
 
 # The full label sweep, every 6 hours.
 13 0,6,12,18 * * *   $HOME/review/bin/run-reviewprs.sh all
