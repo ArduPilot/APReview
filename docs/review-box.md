@@ -314,6 +314,13 @@ quota.py --json     the same as records
 quota.py --record   append them to $REVIEW_LOGS/quota.jsonl
 ```
 
+Cron records a reading for every account hourly, at :05, and the runs dashboard
+has a **Quotas** section showing the newest one per account: what is left, the
+windows behind that figure, when the soonest rolls over, and how old the reading
+is. The page reads the recorded file - it is rebuilt every ten minutes, and
+asking an account for its quota starts the CLI, which is how runs and probes
+come to contend for the OAuth refresh.
+
 Both CLIs publish structured figures, which is worth knowing because the
 hourly probe still reads Claude's by regex over English prose:
 

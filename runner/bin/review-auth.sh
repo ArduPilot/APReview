@@ -347,7 +347,12 @@ print(json.dumps({"permissions": {"defaultMode": "auto", "deny": [
 PYSET
                 echo "Read denials are guardrails, not containment of arbitrary shell readers." ;;
         codex)  echo "Run this, then answer in a browser:"
-                echo "  CODEX_HOME=$dir codex login"
+                echo "  CODEX_HOME=$dir codex login --device-auth"
+                echo "--device-auth because the review box has no browser of its"
+                echo "own: plain 'codex login' waits on a local callback that"
+                echo "nothing will answer. It prints a code to type on another"
+                echo "machine instead. Do not use --with-api-key: a key bills"
+                echo "whoever owns it, and a run refuses to start on one."
                 echo "then record the account id it reports - not an address, which"
                 echo "is what the runner compares against:"
                 echo "  review-auth.sh list              # shows the id for every account"

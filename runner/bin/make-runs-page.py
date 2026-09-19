@@ -159,6 +159,32 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
 
 runs.sort(key=lambda r: r['start'], reverse=True)
 
+# ------------------------------------------------- quotas, as recorded
+# From $REVIEW_LOGS/quota.jsonl, written hourly by quota.py - not read live.
+# This page is rebuilt every ten minutes, and asking an account for its quota
+# starts the CLI: three of those per rebuild would contend with a run for the
+# OAuth refresh, which is a failure this system has already had.
+quotas = []
+_seen_account = set()
+try:
+    with open(os.path.join(LOGS, 'quota.jsonl'), errors='replace') as fh:
+        lines = fh.readlines()
+except OSError:
+    lines = []
+for line in reversed(lines):          # newest first, one row per account
+    try:
+        q = json.loads(line)
+    except Exception:
+        continue
+    key = (q.get('tool'), q.get('dir'))
+    if not key[0] or key in _seen_account:
+        continue
+    _seen_account.add(key)
+    at = parse_iso(q.get('at') or '')
+    q['age_min'] = int((now - at).total_seconds() // 60) if at else None
+    quotas.append(q)
+quotas.sort(key=lambda q: (q['tool'], os.path.basename(q['dir'])))
+
 # ------------------------------------------------- codex weekly quota meter
 # Each token_count event carries the live meter. window_minutes 10080 == weekly.
 def read_quota(directory):
@@ -490,6 +516,54 @@ for lab in ('DevCallTopic', 'DevCallEU', 'AIReview'):
     rc = len(re.findall(r'Verdict: <span class="v-request"', body))
     labels.append((lab, gen, fup, npr, a, c, rc))
 
+def _rollover(q):
+    """Soonest reset among the windows that gate work, as a local time."""
+    when = []
+    for w in q.get('windows') or []:
+        if w.get('scoped') or not w.get('resets_at'):
+            continue
+        t = parse_iso(w['resets_at'])
+        if t:
+            when.append(t)
+    if not when:
+        return '&mdash;'
+    soonest = min(when)
+    hours = (soonest - now).total_seconds() / 3600.0
+    return '%s <span class="sub">(%s)</span>' % (
+        soonest.strftime('%a %d %b %H:%M'),
+        'now' if hours < 0 else ('%.0fh' % hours if hours < 48 else '%.0fd' % (hours / 24)))
+
+
+qrows = []
+for q in quotas:
+    free = q.get('free_pct')
+    # an account with no figure is not an account with quota: say which it is
+    if q.get('error'):
+        detail = '<span class="sub">%s</span>' % html.escape(str(q['error'])[:80])
+    else:
+        detail = ' '.join(
+            '%s&nbsp;%s%%%s' % (html.escape(w.get('kind') or '?'), w.get('used_pct'),
+                                '*' if w.get('scoped') else '')
+            for w in q.get('windows') or []) or '&mdash;'
+    age = q.get('age_min')
+    qrows.append(
+        '<tr><td>%s</td><td>%s</td><td>%s</td>'
+        '<td data-sort="%s" class="%s">%s</td><td>%s</td><td>%s</td>'
+        '<td data-sort="%s">%s</td></tr>' % (
+            html.escape(q.get('tool') or '?'),
+            html.escape(os.path.basename(q.get('dir') or '?')),
+            html.escape(q.get('account') or '&mdash;') if q.get('account') else '&mdash;',
+            -1 if free is None else free,
+            '' if free is None or free > 5 else 'bad',
+            '&mdash;' if free is None else '%.0f%%' % free,
+            detail, _rollover(q),
+            -1 if age is None else age,
+            '&mdash;' if age is None else ('%dm ago' % age if age < 120
+                                           else '%.0fh ago' % (age / 60.0))))
+if not qrows:
+    qrows.append('<tr><td colspan="7">no readings yet - quota.py --record '
+                 'writes them hourly</td></tr>')
+
 lrows = []
 for lab, gen, fup, npr, a, c, rc in labels:
     if gen is None:
@@ -583,6 +657,8 @@ th[aria-sort=ascending]::after{content:"\\25B2";opacity:1}
 th[aria-sort=descending]::after{content:"\\25BC";opacity:1}
 tr:last-child td{border-bottom:0}
 .badge{padding:1px 7px;border-radius:10px;font-size:12px;font-weight:600}
+/* an account at or below the threshold a run would ask for */
+td.bad{color:#b42318;font-weight:600}
 .b-ok{background:rgba(15,123,61,.14);color:var(--ok)}
 .b-skip{background:rgba(161,92,0,.14);color:var(--warn)}
 .b-run{background:rgba(29,78,216,.14);color:var(--run)}
@@ -611,6 +687,16 @@ border-radius:6px;padding:10px 14px;margin:14px 0;color:var(--muted)}
   <div class="card"><div class="k">Codex burn rate</div><div class="v">__BURN__</div></div>
   <div class="card"><div class="k">At reset (__RESET__)</div><div class="v">__PROJ__</div></div>
 </div>
+
+<h2>Quotas</h2>
+<p class="sub">What each account has left, and when it rolls over. Recorded hourly
+by <code>quota.py</code> from the tools&#39; own meters, not read when this page is
+built. <em>Free</em> is the least remaining of the windows that gate ordinary work;
+a per-model window is shown but does not count towards it.</p>
+<div class="scroll"><table class="sortable">
+<thead><tr><th>Tool</th><th>Account</th><th>Signed in as</th><th>Free</th>
+<th>Windows</th><th>Rolls over</th><th>Reading</th></tr></thead>
+<tbody>__QROWS__</tbody></table></div>
 
 <h2>Label coverage</h2>
 <p class="sub">Only <code>followup</code>, <code>all</code> and <code>rsync</code> appear as run rows.
@@ -700,6 +786,7 @@ doc = (doc.replace('__DAYS__', str(DAYS))
           .replace('__BURN__', ('%.1f%%/day' % burn) if burn is not None else '&mdash;')
           .replace('__RESET__', reset_at.strftime('%a %d %b') if reset_at else '?')
           .replace('__PROJ__', ('~%.0f%%' % projected) if projected is not None else '&mdash;')
+          .replace('__QROWS__', '\n'.join(qrows))
           .replace('__LROWS__', '\n'.join(lrows))
           .replace('__SROWS__', '\n'.join(srows))
           .replace('__ROWS__', '\n'.join(rows))

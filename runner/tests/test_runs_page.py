@@ -205,6 +205,102 @@ class Dashboard(unittest.TestCase):
         self.assertEqual(self.state["cur_quota"], 24)
         self.assertIn("default: .codex", page)
 
+    # --- the Quotas section --------------------------------------------------
+    def quota_record(self, tool, name, free=50.0, windows=None, age_min=20,
+                     account="a@example.org", error=None):
+        at = (datetime.datetime.now().astimezone()
+              - datetime.timedelta(minutes=age_min)).isoformat()
+        rec = {"at": at, "tool": tool, "dir": os.path.join(self.auth, name),
+               "account": account, "free_pct": free,
+               "windows": windows if windows is not None else
+               [{"kind": "weekly_all", "used_pct": 100 - free, "scoped": False,
+                 "resets_at": (datetime.datetime.now().astimezone()
+                               + datetime.timedelta(hours=30)).isoformat()}]}
+        if error:
+            rec["error"] = error
+            rec["free_pct"] = None
+        with open(os.path.join(self.home, "review", "logs", "quota.jsonl"), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+        return rec
+
+    def quota_section(self, page):
+        self.assertIn("<h2>Quotas</h2>", page)
+        return page.split("<h2>Quotas</h2>", 1)[1].split("</table>", 1)[0]
+
+    def test_it_shows_a_row_for_every_account_it_has_a_reading_for(self):
+        self.quota_record("claude", "claude-personal", account="p@example.org")
+        self.quota_record("codex", "codex-work", account="efb1e83d")
+        sec = self.quota_section(self.build())
+        self.assertIn("claude-personal", sec)
+        self.assertIn("codex-work", sec)
+        self.assertIn("p@example.org", sec)
+
+    def test_the_newest_reading_wins(self):
+        self.quota_record("codex", "codex-work", free=90.0, age_min=300)
+        self.quota_record("codex", "codex-work", free=7.0, age_min=5)
+        sec = self.quota_section(self.build())
+        self.assertIn("7%", sec)
+        self.assertNotIn("90%", sec)
+        self.assertEqual(sec.count("codex-work"), 1)
+
+    def test_a_reading_that_failed_shows_why_rather_than_a_figure(self):
+        self.quota_record("codex", "codex-work", error="no answer from the app-server")
+        sec = self.quota_section(self.build())
+        self.assertIn("no answer from the app-server", sec)
+        self.assertNotIn("100%", sec)
+
+    def test_rollover_is_the_soonest_window_that_gates_work(self):
+        soon = datetime.datetime.now().astimezone() + datetime.timedelta(hours=2)
+        late = datetime.datetime.now().astimezone() + datetime.timedelta(days=5)
+        self.quota_record("claude", "claude-a", free=40.0, windows=[
+            {"kind": "weekly_all", "used_pct": 60, "scoped": False,
+             "resets_at": late.isoformat()},
+            {"kind": "session", "used_pct": 10, "scoped": False,
+             "resets_at": soon.isoformat()}])
+        sec = self.quota_section(self.build())
+        self.assertIn(soon.strftime("%H:%M"), sec)
+        self.assertNotIn(late.strftime("%a %d %b %H:%M"), sec)
+
+    def test_a_per_model_window_is_shown_but_does_not_set_the_rollover(self):
+        soon = datetime.datetime.now().astimezone() + datetime.timedelta(hours=1)
+        late = datetime.datetime.now().astimezone() + datetime.timedelta(days=4)
+        self.quota_record("claude", "claude-a", free=55.0, windows=[
+            {"kind": "weekly_all", "used_pct": 45, "scoped": False,
+             "resets_at": late.isoformat()},
+            {"kind": "weekly_scoped", "used_pct": 99, "scoped": True,
+             "resets_at": soon.isoformat()}])
+        sec = self.quota_section(self.build())
+        self.assertIn("weekly_scoped", sec)                 # shown
+        self.assertNotIn(soon.strftime("%a %d %b %H:%M"), sec)   # but not the rollover
+
+    def test_an_account_at_the_threshold_is_marked(self):
+        self.quota_record("codex", "codex-low", free=4.0)
+        self.quota_record("codex", "codex-ok", free=60.0)
+        sec = self.quota_section(self.build())
+        low = [r for r in sec.split("<tr>") if "codex-low" in r][0]
+        ok = [r for r in sec.split("<tr>") if "codex-ok" in r][0]
+        self.assertIn('class="bad"', low)
+        self.assertNotIn('class="bad"', ok)
+
+    def test_with_no_readings_it_says_so_rather_than_showing_nothing(self):
+        sec = self.quota_section(self.build())
+        self.assertIn("no readings yet", sec)
+
+    def test_building_the_page_never_starts_a_cli(self):
+        """The page is rebuilt every ten minutes; asking an account for its
+        quota starts the CLI, and that contends with a run for the OAuth
+        refresh. The figures must come from the recorded file."""
+        marker = os.path.join(self.home, "cli-was-run")
+        for name in ("claude", "codex"):
+            p = os.path.join(self.home, name)
+            with open(p, "w") as f:
+                f.write("#!/bin/sh\necho %s >> %s\n" % (name, marker))
+            os.chmod(p, 0o755)
+        self.quota_record("codex", "codex-work", free=42.0)
+        self.build(PATH=self.home + ":/usr/bin:/bin")
+        self.assertFalse(os.path.exists(marker),
+                         "the page started a CLI to read a quota")
+
     # --- which accounts the meters look at ----------------------------------
     def test_it_counts_the_account_a_role_selects(self):
         # the whole point of the layout: `use claude default personal` moves the

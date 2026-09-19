@@ -919,6 +919,20 @@ class Switching(Base):
         return sh('"$1" use "$2" "$3" "$4"', self.home, AUTH_SH, tool, role, acct,
                   path=path)
 
+    def test_codex_login_says_how_to_sign_in_without_a_browser(self):
+        # the box has none, and plain `codex login` waits on a local callback
+        # that nothing answers - working that out cost a round trip
+        out = sh('"$1" login codex work', self.home, AUTH_SH)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("--device-auth", out.stdout)
+        self.assertNotIn("codex login\n", out.stdout)   # never the bare form
+
+    def test_codex_login_warns_off_an_api_key(self):
+        # a key bills whoever owns it, and the runner refuses a run on one, so
+        # saying it here beats discovering it at the next cron slot
+        out = sh('"$1" login codex work', self.home, AUTH_SH)
+        self.assertIn("--with-api-key", out.stdout)
+
     def test_unknown_tools_cannot_create_login_directories(self):
         before = sorted(os.listdir(self.auth))
         for tool in ("../../work/x", "other", "Claude", ""):
