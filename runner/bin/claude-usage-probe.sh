@@ -18,7 +18,12 @@ TAG="${1:-probe}"
 # ~/.claude after `review-auth.sh use claude default personal`, freezing one
 # meter and never starting the other.
 if [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -z "${REVIEW_ROLE:-}" ]; then
-    PROBE_DIR=$(role_config_dir claude default)
+    PROBE_DIR=$(review_auth claude default); PROBE_RC=$?
+    if [ "$PROBE_RC" -eq 2 ]; then
+        echo "usage probe: cannot use the claude account for role default" >&2
+        exit 1
+    fi
+    PROBE_DIR=$(role_config_dir claude default "$PROBE_DIR")
     [ -z "$PROBE_DIR" ] || export CLAUDE_CONFIG_DIR="$PROBE_DIR"
 fi
 

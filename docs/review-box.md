@@ -65,8 +65,10 @@ fallback). Preserve existing settings and deny entries:
 
 For a custom `REVIEW_AUTH`, `review-auth.sh login claude <account>` prints the
 exact absolute rule. The pre-flight accepts `Read(~/path/**)` or
-`Read(//absolute/path/**)` covering the auth directory or an ancestor, or `Read`
-to deny the tool entirely. A single leading slash is relative to the settings
+`Read(//absolute/path/**)` covering the auth directory or an ancestor. Bare `Read`
+removes that tool but does not deny the path to other readers such as Grep.
+Dot and parent-directory segments are refused: resolving a filesystem path does
+not prove that the CLI's pattern matches it. A single leading slash is relative to the settings
 source, not the filesystem root. Other glob forms are refused if coverage cannot
 be established. These rules are guardrails; arbitrary shell readers can still
 reach credentials under the same uid.
@@ -221,6 +223,8 @@ modes are refused. The runner and `status` share the check of `config.toml`:
 - model providers must be `openai`, and the credential store must be `file`
   if explicitly selected. A keyring can authenticate somebody other than the
   account recorded in the checked `auth.json`;
+- unused custom provider definitions are allowed; selecting one in any config
+  layer or profile is refused. Overrides of the `openai` provider are checked;
 - every table is walked, not only the ones that route inference: `[otel]` takes
   an exporter endpoint and its own authorization header. `mcp_servers` is the
   exception - an MCP server's endpoint and headers authenticate that server, and

@@ -387,18 +387,20 @@ try:
     d=json.load(open(sys.argv[1]))
 except Exception as e:
     print("FATAL: cannot read settings.json: %s" % e); sys.exit(1)
-deny=d.get("permissions",{}).get("deny",[])
+permissions = d.get("permissions") if isinstance(d, dict) else None
+deny = permissions.get("deny") if isinstance(permissions, dict) else None
+if not isinstance(deny, list) or not all(isinstance(r, str) for r in deny):
+    print("FATAL: permissions.deny must be an array of rules"); sys.exit(1)
 need=["Bash(git push)","Bash(git push:*)"]
 missing=[r for r in need if r not in deny]
 if missing:
     print("FATAL: settings.json is missing deny rules: %s" % missing); sys.exit(1)
 # This is a file-tool guardrail, not containment of arbitrary shell readers.
 def denies_auth(rule):
-    if rule == "Read":
-        return True
     if not isinstance(rule, str) or not rule.startswith("Read(") or not rule.endswith("/**)"):
         return False
-    path = rule[5:-4]
+    # The CLI unescapes the rule before compiling the gitignore pattern.
+    path = rule[5:-4].replace("\\\\", "\\")
     # Only accept anchored recursive rules whose coverage we can prove. A
     # current-directory rule changes meaning when a subagent changes directory.
     literal = []
@@ -412,7 +414,14 @@ def denies_auth(rule):
             return False
         literal.append(c)
     path = "".join(literal)
-    if path.startswith("//"):
+    # A filesystem resolver collapses these; a gitignore pattern does not.
+    if any(part in (".", "..") for part in path.split("/")) or any(ord(c) < 32 for c in path):
+        return False
+    if path == "/":
+        pass                              # Read(//**) covers the filesystem
+    elif path == "~":
+        path = os.path.expanduser("~")
+    elif path.startswith("//"):
         path = path[1:]
     elif path.startswith("~/"):
         path = os.path.join(os.path.expanduser("~"), path[2:])
@@ -426,6 +435,7 @@ if auth and not any(denies_auth(r) for r in deny):
     print("FATAL: settings.json does not deny reading %s," % auth)
     print("       which holds every account's credentials.")
     pattern = re.sub(r"([\\*?\[\]])", r"\\\1", os.path.realpath(auth))
+    pattern = pattern.replace("\\\\", "\\\\\\\\")
     print("       Add this deny rule: %s" % json.dumps("Read(/%s/**)" % pattern))
     print("       Use Read(//absolute/path/**), Read(~/path/**), or an ancestor.")
     sys.exit(1)

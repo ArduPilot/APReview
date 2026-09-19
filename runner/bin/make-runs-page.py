@@ -33,7 +33,7 @@ def account_dirs(tool):
     """
     dirs, seen = [], set()
     for d in [os.path.join(HOME, '.' + tool)] + \
-             sorted(glob.glob(os.path.join(AUTH, tool + '-*'))):
+             sorted(glob.glob(os.path.join(glob.escape(AUTH), tool + '-*'))):
         if not os.path.isdir(d):
             continue
         real = os.path.realpath(d)
@@ -73,7 +73,7 @@ def parse_iso(s):
 
 # ---------------------------------------------------------------- runs
 runs = []
-for path in sorted(glob.glob(os.path.join(LOGS, 'reviewprs-*.log'))):
+for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))):
     try:
         txt = open(path, errors='replace').read()
     except Exception:
@@ -155,7 +155,7 @@ runs.sort(key=lambda r: r['start'], reverse=True)
 def read_quota(directory):
     quota, reset_epochs, plan = [], set(), None
     _codex_sessions = {}
-    for _p in glob.glob(os.path.join(directory, 'sessions', '*', '*', '*',
+    for _p in glob.glob(os.path.join(glob.escape(directory), 'sessions', '*', '*', '*',
                                      'rollout-*.jsonl')):
         _codex_sessions.setdefault(os.path.realpath(_p), _p)
     for rp in sorted(_codex_sessions.values()):
@@ -287,7 +287,7 @@ if burn is not None and cur_quota is not None and reset_at:
 # documented proxy for how heavily each token type counts, NOT a quota reading.
 W_IN, W_OUT, W_CW, W_CR = 1.0, 5.0, 1.25, 0.1
 claude = []      # (timestamp, total_tokens, weighted)
-_pats = [os.path.join(r, sub) for r in account_dirs('claude')
+_pats = [os.path.join(glob.escape(r), sub) for r in account_dirs('claude')
          for sub in ('projects/*/*.jsonl', 'projects/*/*/*.jsonl',
                      'projects/*/*/*/*.jsonl')]
 _files = {}

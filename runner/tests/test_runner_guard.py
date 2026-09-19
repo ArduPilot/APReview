@@ -192,13 +192,90 @@ fi''')
                 self.assertIn("status=preflight-failed", out.stdout)
 
     def test_an_ancestor_read_denial_is_sufficient(self):
-        for rule in ("Read(~/review/**)", "Read(~/review/auth/**)", "Read",
+        for rule in ("Read(~/review/**)", "Read(~/review/auth/**)",
                      "Read(/%s/**)" % self.home):
             with self.subTest(rule=rule):
                 self.settings(self.AUTH_DENY[:2] + [rule])
                 out = self.whole_run("followup", "--dry-run")
                 self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
                 self.assertIn("permission pre-flight OK", out.stdout)
+
+    def test_read_denials_can_cover_the_home_or_filesystem_root(self):
+        for rule in ("Read(//**)", "Read(~/**)"):
+            with self.subTest(rule=rule):
+                self.settings(self.AUTH_DENY[:2] + [rule])
+                out = self.whole_run("followup", "--dry-run")
+                self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+                self.assertIn("permission pre-flight OK", out.stdout)
+
+    def test_filesystem_normalization_does_not_prove_a_read_pattern(self):
+        # Git is an independent oracle for the documented gitignore syntax.
+        # The fixture root represents /, without reading any real credentials.
+        oracle = os.path.join(self.home, "patterns")
+        env = {"HOME": self.home, "PATH": "/usr/bin:/bin", "GIT_CONFIG_NOSYSTEM": "1"}
+        subprocess.run(["git", "init", "-q", oracle], env=env, check=True)
+        for suffix in ("", "/.", "/nonexistent/..", "/../auth"):
+            with self.subTest(suffix=suffix):
+                pattern = self.auth + suffix + "/**"
+                with open(os.path.join(oracle, ".gitignore"), "w") as f:
+                    f.write(pattern + "\n")
+                matched = subprocess.run(["git", "check-ignore", "--no-index", "--stdin"],
+                                         input=self.auth.lstrip("/") + "/claude-personal/.credentials.json\n",
+                                         cwd=oracle, env=env, text=True, capture_output=True)
+                self.assertEqual(matched.returncode, 1 if suffix else 0, matched.stderr)
+                self.settings(self.AUTH_DENY[:2] + ["Read(/%s)" % pattern])
+                out = self.whole_run("followup", "--dry-run")
+                self.assertEqual(out.returncode, 1 if suffix else 0, out.stdout + out.stderr)
+                self.assertIn("does not deny reading" if suffix else "permission pre-flight OK", out.stdout)
+
+    def test_disabling_read_alone_does_not_deny_the_path_to_other_readers(self):
+        self.settings(self.AUTH_DENY[:2] + ["Read"])
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("does not deny reading", out.stdout)
+        self.settings(self.AUTH_DENY + ["Read"])
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+
+    def test_a_deny_object_is_not_a_cli_permission_list(self):
+        self.settings(dict.fromkeys(self.AUTH_DENY, True))
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("permissions.deny must be an array", out.stdout)
+        self.assertIn("status=preflight-failed", out.stdout)
+
+    def test_rule_escaping_and_pattern_escaping_are_separate(self):
+        auth = os.path.join(self.home, r"credentials\live")
+        os.rename(self.auth, auth)
+        self.auth = auth
+        with open(os.path.join(self.home, "review", "etc", "local.conf"), "w") as f:
+            f.write("REVIEW_AUTH=%s\n" % shlex.quote(auth))
+        # A raw backslash in printf's JSON would fail the auth check before the
+        # permission check, falsely passing every negative case here.
+        stub(os.path.join(self.stubs, "claude"), '''exec python3 - <<'PYCLI'
+import json, os
+d = os.environ['CLAUDE_CONFIG_DIR']
+email = json.load(open(os.path.join(d, '.claude.json')))['oauthAccount']['emailAddress']
+print(json.dumps(dict(loggedIn=True, email=email, authMethod='claude.ai',
+                     apiProvider='firstParty', configDirectory=d)))
+PYCLI''')
+        rule = "Read(/%s/**)" % auth.replace("\\", "\\\\\\\\")
+        self.settings(self.AUTH_DENY[:2] + [rule])
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("permission pre-flight OK", out.stdout)
+        self.settings(self.AUTH_DENY[:2] + ["Read(/%s/**)" % auth.replace("\\", "\\\\")])
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+        self.assertIn("does not deny reading", out.stdout)
+        m = re.search(r'Add this deny rule: (.+)', out.stdout)
+        self.assertIsNotNone(m, out.stdout)
+        self.assertEqual(json.loads(m.group(1)), rule)
+        out = subprocess.run([os.path.join(BIN, "review-auth.sh"), "login", "claude", "personal"],
+                             env={"HOME": self.home, "PATH": self.stubs + ":/usr/bin:/bin"},
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn(json.dumps(rule), out.stdout)
 
     def test_the_suggested_read_rule_is_absolute_and_satisfies_the_preflight(self):
         out = self.whole_run("followup", "--dry-run")
@@ -319,6 +396,28 @@ fi''')
             body = f.read()
         self.assertIn("FATAL", body)
         self.assertIn("status=wrong-", body)     # so the dashboard shows a row
+
+    def test_a_switch_after_validation_does_not_resolve_the_role_again(self):
+        env = os.path.join(self.home, "review", "bin", "review-env.sh")
+        with open(env, "a") as f:
+            f.write('''
+eval "$(declare -f review_auth | sed '1s/review_auth/original_review_auth/')"
+review_auth() {
+    local value rc
+    value=$(original_review_auth "$@"); rc=$?
+    if [ "$1" = claude ]; then
+        echo resolved >> "$HOME/resolutions"
+        ln -sfn -- claude-personal "$REVIEW_AUTH/claude-default"
+    fi
+    printf '%s\\n' "$value"
+    return "$rc"
+}
+''')
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")), "claude-personal")
+        self.assertIn("claude account: admin@example.org", out.stdout)
+        self.assertEqual(open(os.path.join(self.home, "resolutions")).read().splitlines(), ["resolved"])
 
     # --- what can still decide the account from outside the directory --------
     def cli_env(self):
@@ -704,6 +803,20 @@ fi''')
         out = self.run_mode("followup")
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("other-provider", out.stdout)
+
+    def test_an_unused_provider_definition_does_not_route_requests(self):
+        definition = ('[model_providers.unused]\nname = "unused"\n'
+                      'base_url = "https://elsewhere.example/v1"\nenv_key = "UNUSED_KEY"\n')
+        self.codex_config(definition)
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        row = self.status_row()
+        self.assertIn("11111111-1111-4111-8111-111111111111", row)
+        self.assertNotIn("refuse", row)
+        for selector in ('model_provider = "unused"\n',
+                         '[profiles.p]\nmodel_provider = "unused"\n'):
+            with self.subTest(selector=selector):
+                self.assert_config_refused(selector + definition, "model_provider")
 
     def codex_config(self, body):
         d = os.path.join(self.auth, "codex-personal")
