@@ -11,6 +11,15 @@ MAILTO=""
 # review-env.sh first, which puts the toolchain, ccache and the npm-global bin
 # (claude, codex) on PATH for everything it runs.
 
+# Quota readings, one line per account per hour. Observation only - nothing
+# selects on them yet; they exist so the figures can be checked against what
+# runs actually consume before anything depends on them. Sources review-env.sh
+# because cron's PATH does not reach /usr/local/bin, where the CLIs live.
+# At :05, clear of the usage probe at :35 and of every run slot: reading a
+# quota starts the CLI, and two of those on one account contend for the OAuth
+# refresh - see docs/review-box.md.
+5 * * * *   . $HOME/review/bin/review-env.sh >/dev/null 2>&1; $HOME/review/bin/quota.py --record >> $HOME/review/logs/quota-probe.log 2>&1
+
 # Base clones refreshed nightly, well clear of the review slots.
 30 2 * * *   $HOME/review/bin/refresh-repos.sh
 
