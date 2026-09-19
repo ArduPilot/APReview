@@ -510,6 +510,15 @@ START=$(date +%s)
 # Pin the model explicitly rather than via the 'opus' alias, so a future alias
 # change cannot silently move these runs onto a different model (and a different
 # quota pool). High effort: these reviews are the whole point of the box.
+# Again, immediately before the launch. The clear at the top of the run is five
+# minutes and several claude invocations ago, and one of them is this run's own
+# start probe: `claude -p /usage` takes the OAuth refresh lock, and if the
+# refresh fails it leaves the lock behind and exits 0 with the failure as its
+# output. The agent then starts seconds later, finds the refresh in progress,
+# and dies with "another Claude Code process is refreshing it". That is the
+# 2026-09-19 19:47 followup, and three others in the five days before it.
+clear_stale_oauth_lock "$CLAUDE_DIR"
+
 stdbuf -oL -eL claude -p "$PROMPT" \
     --model claude-opus-5 \
     --effort high \

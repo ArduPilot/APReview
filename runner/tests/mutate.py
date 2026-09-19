@@ -252,6 +252,13 @@ M = [
  # the accounts live outside the directory the agent is handed
  ("authinsideroot", ENV, 'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT.auth}"',
                          'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT/auth}"'),
+ # the run's own usage probe can leave the OAuth lock the agent dies on
+ ("lockbeforelaunch", RUN, 'clear_stale_oauth_lock "$CLAUDE_DIR"\n\nstdbuf -oL -eL claude -p',
+                           '\nstdbuf -oL -eL claude -p'),
+ ("probesilentrc", PRB, 'echo "claude -p /usage exited non-zero - no reading taken" >&2',
+                        'true'),
+ ("probesilentparse", PRB, 'if [ "$LIMITED" -eq 0 ] && ! tail -1 "$OUT" 2>/dev/null',
+                           'if false && ! tail -1 "$OUT" 2>/dev/null'),
  # a run killed mid-flight never writes its own finish line
  ("nostall", PAGE, "        if last and now - last > grace and last > start:",
                    "        if False:"),
@@ -439,6 +446,9 @@ REGRESSION = {
     'migstale': 'AuthRootMove.test_existing_denials_are_preserved',
     'migdry': 'AuthRootMove.test_a_dry_run_changes_nothing_but_names_every_edit',
     'authinsideroot': 'Guard.test_the_accounts_are_not_inside_the_directory_the_agent_is_given',
+    'lockbeforelaunch': 'Guard.test_a_lock_left_by_the_start_probe_is_cleared_before_the_agent',
+    'probesilentrc': 'Guard.test_a_probe_whose_cli_fails_says_so',
+    'probesilentparse': 'Guard.test_a_probe_that_takes_no_reading_says_so',
     'nostall': 'Dashboard.test_a_run_that_stopped_writing_is_not_still_running',
     'stallgrace': 'Dashboard.test_a_run_still_writing_is_left_alone',
     'stalllockwait': 'Dashboard.test_a_run_queued_on_the_lock_is_not_called_dead',

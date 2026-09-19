@@ -302,6 +302,26 @@ interleave, and a switch that turned out to be invalid would revert over one tha
 had already succeeded. If a revert cannot be made, `use` says so and names the
 account the role has been left on rather than reporting success.
 
+### The OAuth refresh lock
+
+`claude` takes a lock in its config directory while it refreshes the OAuth
+token, and leaves it behind if the refresh fails - reporting the failure as its
+output and exiting zero. Anything that starts next finds it and dies with
+"another Claude Code process is refreshing it".
+
+A run clears a stale one before it starts, and again immediately before
+launching the agent. The second clear is the one that matters: between them the
+run takes its own usage reading, and `claude -p /usage` is exactly the sort of
+short invocation that meets an expired token, fails to refresh, and leaves the
+lock a few seconds before the agent needs it. That was the 2026-09-19 19:47
+followup and three others in the five days before it - each one a whole slot
+lost, three hours apart.
+
+The probe says so now when it comes back with nothing, which it did not: a
+non-zero exit was swallowed by `|| exit 0`, and a reply carrying prose rather
+than a meter simply recorded nothing. Either way the run log showed no probe at
+all, so the only sign was a reading missing from the history.
+
 ## Publishing
 
 Reports go out with `rsync`, either to an rsync daemon (`rsync://user@host` plus a

@@ -502,6 +502,84 @@ PYCLI''')
         os.rmdir(os.path.join(self.home, "review", "work"))
         self.check_logged_refusal("no-work-dir", "FATAL: no ")
 
+    # --- the OAuth refresh lock ----------------------------------------------
+    AUTH_STUB = (
+        'python3 -c "\n'
+        'import json, os\n'
+        "d = os.environ.get('CLAUDE_CONFIG_DIR') or os.path.expanduser('~/.claude')\n"
+        "e = json.load(open(os.path.join(d, '.claude.json')))['oauthAccount']['emailAddress']\n"
+        "print(json.dumps(dict(loggedIn=True, email=e, authMethod='claude.ai',\n"
+        "                      apiProvider='firstParty', configDirectory=d)))\"")
+
+    def run_log(self, mode="followup"):
+        """A real run redirects its own output, so read what it wrote."""
+        d = os.path.join(self.home, "review", "logs")
+        logs = sorted(f for f in os.listdir(d) if f.startswith("reviewprs-%s-" % mode))
+        self.assertTrue(logs, "the run wrote no log")
+        with open(os.path.join(d, logs[-1])) as f:
+            return f.read()
+
+    def test_a_lock_left_by_the_start_probe_is_cleared_before_the_agent(self):
+        """The run's own probe can leave the lock the agent then dies on.
+
+        Not --dry-run: the probe and the launch both happen after the point the
+        extracted guard stops, and the whole bug is their order. The fixture
+        stubs the probe out, so the stub has to leave the lock the real one
+        leaves when its token refresh fails - otherwise this passes with the
+        ordering wrong, because nothing ever created a lock.
+        """
+        self.settings(self.AUTH_DENY)
+        lock = os.path.join(self.auth, "claude-ardupilot", ".oauth_refresh.lock")
+        seen = os.path.join(self.home, "lock-at-launch")
+        stub(os.path.join(self.home, "review", "bin", "claude-usage-probe.sh"),
+             'mkdir -p "%s"\nexit 0' % lock)
+        stub(os.path.join(self.stubs, "claude"),
+             'case "$*" in\n'
+             '  *"auth status"*) exec ' + self.AUTH_STUB + ' ;;\n'
+             '  *) if [ -e "%s" ]; then echo held > "%s"; else echo clear > "%s"; fi ;;\n'
+             'esac' % (lock, seen, seen))
+        self.whole_run("followup")
+        self.assertTrue(os.path.exists(seen),
+                        "the agent never ran: %s" % (self.run_log()[-700:],))
+        with open(seen) as f:
+            self.assertEqual(f.read().strip(), "clear",
+                             "the agent started with the probe's lock still there")
+
+    def probe(self, usage_reply, tag="start"):
+        """The real claude-usage-probe.sh, with claude answering as told."""
+        stub(os.path.join(self.stubs, "claude"),
+             'case "$*" in\n'
+             '  *"auth status"*) exec ' + self.AUTH_STUB + ' ;;\n'
+             '  *"/usage"*) ' + usage_reply + ' ;;\n'
+             'esac')
+        shutil.copy(os.path.join(BIN, "claude-usage-probe.sh"),
+                    os.path.join(self.home, "review", "bin"))
+        return subprocess.run(
+            [os.path.join(self.home, "review", "bin", "claude-usage-probe.sh"), tag],
+            capture_output=True, text=True,
+            env={"HOME": self.home, "PATH": self.stubs + ":/usr/bin:/bin",
+                 "SHELL": "/bin/bash", "LANG": "C.UTF-8", "REVIEW_ROLE": "default",
+                 "CLAUDE_CONFIG_DIR": os.path.join(self.auth, "claude-ardupilot")})
+
+    def test_a_probe_that_takes_no_reading_says_so(self):
+        # the refresh failure arrives as prose with a zero exit, so nothing is
+        # parsed and nothing is recorded; it used to pass in silence
+        out = self.probe('echo "Failed to refresh OAuth token"')
+        self.assertEqual(out.returncode, 0, "it must never fail the run")
+        self.assertIn("no usage figures", out.stderr)
+
+    def test_a_probe_whose_cli_fails_says_so(self):
+        out = self.probe('exit 1')
+        self.assertEqual(out.returncode, 0, "it must never fail the run")
+        self.assertIn("exited non-zero", out.stderr)
+
+    def test_a_probe_that_reads_the_meter_stays_quiet(self):
+        out = self.probe('printf "Current session: 4%%\\nCurrent week (all models): 11%%\\n"')
+        self.assertEqual(out.returncode, 0)
+        self.assertNotIn("no usage figures", out.stderr)
+        with open(os.path.join(self.home, "review", "logs", "claude-usage.jsonl")) as f:
+            self.assertIn('"week_pct": 11', f.read())
+
     # --- a refusal has to be visible ----------------------------------------
     def test_a_refusal_is_written_to_the_run_log(self):
         """Not --dry-run: the refusal must land in the log a human reads.

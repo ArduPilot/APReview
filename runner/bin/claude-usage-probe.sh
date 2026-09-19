@@ -42,8 +42,14 @@ print(d.get("email","") if d.get("loggedIn") else "")
 ' 2>/dev/null)
 
 # /usage just prints the meter; no need to spend a big model on it.
-RAW=$(timeout 180 claude -p "/usage" --model claude-haiku-4-5-20251001 \
-        --permission-mode auto 2>/dev/null) || exit 0
+# Never fail the run that invoked this, but never hide it either: a probe that
+# comes back with nothing is usually the OAuth refresh, and the agent is about
+# to meet the same thing. `|| exit 0` used to swallow it without a word.
+if ! RAW=$(timeout 180 claude -p "/usage" --model claude-haiku-4-5-20251001 \
+             --permission-mode auto 2>/dev/null); then
+    echo "claude -p /usage exited non-zero - no reading taken" >&2
+    exit 0
+fi
 if [ -z "$RAW" ]; then
     echo "no output from claude -p /usage (auth or network problem?)" >&2
     exit 0
@@ -86,6 +92,14 @@ if m:
 if rec.get("limited") or "week_pct" in rec or "session_pct" in rec:
     print(json.dumps(rec))
 ' "$TAG" >> "$OUT" 2>/dev/null
+
+# It can also answer with prose and exit 0 - the refresh failure arrives that
+# way - in which case nothing was parsed and nothing was recorded. Say so
+# rather than leaving the run log with no trace of a probe at all.
+if [ "$LIMITED" -eq 0 ] && ! tail -1 "$OUT" 2>/dev/null | grep -q '"tag": *"'"$TAG"'"'; then
+    echo "no usage figures in the reply to /usage - $(printf %s "$RAW" \
+        | tr '\n' ' ' | cut -c1-90)" >&2
+fi
 
 if [ "$LIMITED" -eq 1 ]; then
     printf '%s' "$RAW" | grep -oE "hit your (weekly|usage|session) limit[^\n]*" | head -1
