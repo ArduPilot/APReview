@@ -6,6 +6,7 @@ homes. An earlier version checked path suffixes and ignored return codes, and a
 mutation that deleted the runner's whole account-selection logic passed it.
 """
 import os
+import json
 import shutil
 import stat
 import subprocess
@@ -464,21 +465,20 @@ class AuthRootMove(unittest.TestCase):
     def account(self, name, deny=("Bash(git push)", "Bash(git push:*)",
                                   "Read(~/review/auth/**)")):
         d = os.path.join(self.old, name)
-        os.makedirs(d, exist_ok=True)
-        import json as _json
-        _json.dump({"permissions": {"defaultMode": "auto", "deny": list(deny)}},
-                   open(os.path.join(d, "settings.json"), "w"))
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        with open(os.path.join(d, "settings.json"), "w") as f:
+            json.dump({"permissions": {"defaultMode": "auto", "deny": list(deny)}}, f)
         return d
 
-    def migrate(self, *args):
+    def migrate(self, *args, **extra):
         return subprocess.run(
             [os.path.join(self.home, "review", "bin", "migrate-auth-root.sh"), *args],
             capture_output=True, text=True,
-            env={"HOME": self.home, "PATH": "/usr/bin:/bin"})
+            env={"HOME": self.home, "PATH": "/usr/bin:/bin", **extra})
 
     def deny(self, path):
-        import json as _json
-        return _json.load(open(path))["permissions"]["deny"]
+        with open(path) as f:
+            return json.load(f)["permissions"]["deny"]
 
     def test_it_moves_the_accounts_and_repoints_the_rule(self):
         self.account("claude-ardupilot")
@@ -493,17 +493,21 @@ class AuthRootMove(unittest.TestCase):
         self.assertEqual(os.readlink(os.path.join(self.new, "claude-default")),
                          "claude-ardupilot")
 
-    def test_an_ancestor_rule_that_no_longer_covers_them_is_replaced(self):
+    def test_existing_denials_are_preserved(self):
         self.account("claude-personal", deny=("Bash(git push)", "Bash(git push:*)",
-                                              "Read(~/review/**)"))
+                                              "Read(~/review/**)", "Edit(//elsewhere/review/auth/**)"))
         self.migrate()
         rules = self.deny(os.path.join(self.new, "claude-personal", "settings.json"))
         self.assertIn("Read(~/review.auth/**)", rules)
-        self.assertNotIn("Read(~/review/**)", rules)
+        self.assertIn("Read(~/review/**)", rules)
+        self.assertIn("Edit(//elsewhere/review/auth/**)", rules)
 
     def test_a_dry_run_changes_nothing_but_names_every_edit(self):
         self.account("claude-ardupilot")
+        before = self.snapshot()
         out = self.migrate("--dry-run")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.snapshot(), before)
         self.assertIn("claude-ardupilot", out.stdout)   # the edit it would make
         self.assertTrue(os.path.isdir(self.old))
         self.assertFalse(os.path.exists(self.new))
@@ -521,12 +525,279 @@ class AuthRootMove(unittest.TestCase):
     def test_running_it_twice_is_harmless(self):
         self.account("claude-ardupilot")
         self.assertEqual(self.migrate().returncode, 0)
+        before = self.snapshot()
         again = self.migrate()
+        self.assertEqual(self.snapshot(), before)
         self.assertEqual(again.returncode, 0, again.stdout)
         self.assertIn("already at", again.stdout)
         self.assertIn("Read(~/review.auth/**)",
                       self.deny(os.path.join(self.new, "claude-ardupilot",
                                              "settings.json")))
+
+    def snapshot(self):
+        result = {}
+        for directory, dirs, files in os.walk(self.home):
+            for name in dirs + files:
+                p = os.path.join(directory, name)
+                st = os.lstat(p)
+                value = os.readlink(p) if stat.S_ISLNK(st.st_mode) else None
+                if stat.S_ISREG(st.st_mode):
+                    with open(p, "rb") as f:
+                        value = f.read()
+                result[os.path.relpath(p, self.home)] = (st.st_mode, st.st_mtime_ns,
+                                                        st.st_ctime_ns, value)
+        return result
+
+    def fault(self, code):
+        # Faults are injected into the interpreter, never production switches.
+        d = os.path.join(self.home, "faults")
+        os.makedirs(d, exist_ok=True)
+        p = os.path.join(d, "python3")
+        with open(p, "w") as f:
+            f.write('#!/usr/bin/python3\nimport os, sys, errno\n'
+                    + code + '\nsys.argv = sys.argv[1:]\n'
+                    'exec(compile(sys.stdin.read(), "migration", "exec"))\n')
+        os.chmod(p, 0o700)
+        return d + ":/usr/bin:/bin"
+
+    def test_all_settings_are_validated_before_any_write(self):
+        self.account("claude-a")
+        bad = self.account("claude-z")
+        with open(os.path.join(bad, "settings.json"), "w") as f:
+            f.write('{"permissions": {"deny": {}}}')
+        before = self.snapshot()
+        out = self.migrate()
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("invalid settings", out.stderr)
+        self.assertIn("claude-z", out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_an_unreadable_inventory_is_not_an_empty_root(self):
+        self.account("claude-a")
+        path = self.fault('''def scandir(path):
+    raise PermissionError(errno.EACCES, "injected unreadable inventory", path)
+os.scandir = scandir''')
+        before = self.snapshot()
+        out = self.migrate(PATH=path)
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("unreadable inventory", out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_failed_write_is_reported_and_a_rerun_finishes(self):
+        self.account("claude-a")
+        self.account("claude-z")
+        path = self.fault('''real_replace = os.replace
+def replace(src, dst):
+    if dst.endswith("claude-z/settings.json"):
+        raise OSError(errno.EIO, "injected settings failure")
+    return real_replace(src, dst)
+os.replace = replace''')
+        out = self.migrate(PATH=path)
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("injected settings failure", out.stderr)
+        self.assertNotIn("done.", out.stdout)
+        self.assertFalse(os.path.exists(self.old))
+        a = os.path.join(self.new, "claude-a", "settings.json")
+        z = os.path.join(self.new, "claude-z", "settings.json")
+        self.assertIn("Read(~/review.auth/**)", self.deny(a))
+        self.assertNotIn("Read(~/review.auth/**)", self.deny(z))
+        backup = open(a + ".pre-authmove", "rb").read()
+        again = self.migrate()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("Read(~/review.auth/**)", self.deny(z))
+        self.assertEqual(open(a + ".pre-authmove", "rb").read(), backup)
+
+    def test_an_already_migrated_box_needs_no_writes(self):
+        self.account("claude-a", deny=("Bash(git push)", "Bash(git push:*)",
+                                       "Read(~/review.auth/**)"))
+        os.rename(self.old, self.new)
+        before = self.snapshot()
+        out = self.migrate()
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_an_interruption_leaves_complete_settings_and_can_resume(self):
+        a = self.account("claude-a")
+        with open(os.path.join(a, "settings.json"), "rb") as f:
+            original = f.read()
+        path = self.fault('''real_replace = os.replace
+def replace(src, dst):
+    if dst.endswith("/settings.json"):
+        os._exit(91)
+    return real_replace(src, dst)
+os.replace = replace''')
+        out = self.migrate(PATH=path)
+        self.assertEqual(out.returncode, 91, out.stdout + out.stderr)
+        self.assertNotIn("done.", out.stdout)
+        a = os.path.join(self.new, "claude-a", "settings.json")
+        with open(a, "rb") as f:
+            self.assertEqual(f.read(), original)
+        with open(a + ".pre-authmove", "rb") as f:
+            self.assertEqual(f.read(), original)
+        again = self.migrate()
+        self.assertEqual(again.returncode, 0, again.stderr)
+        self.assertIn("Read(~/review.auth/**)", self.deny(a))
+
+    def test_custom_roots_are_not_globs(self):
+        self.account("claude-a")
+        new = os.path.join(self.home, "review.[auth]")
+        # A resumed migration scans the new root, not the old plain pathname.
+        os.rename(self.old, new)
+        out = self.migrate("--auth-root", new)
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn(r"Read(~/review.\[auth\]/**)",
+                      self.deny(os.path.join(new, "claude-a", "settings.json")))
+
+    def test_symlink_roots_are_refused_without_moving(self):
+        self.account("claude-a")
+        secret = os.path.join(self.home, "review", "secret")
+        os.rename(self.old, secret)
+        os.symlink(secret, self.old)
+        before = self.snapshot()
+        out = self.migrate()
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("not symlinks", out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_destination_alias_into_review_is_refused(self):
+        self.account("claude-a")
+        alias = os.path.join(self.home, "alias")
+        os.symlink(os.path.join(self.home, "review"), alias)
+        before = self.snapshot()
+        out = self.migrate("--auth-root", os.path.join(alias, "secret"))
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("inside the granted", out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_resuming_cannot_treat_home_as_the_account_root(self):
+        self.account("claude-a")
+        os.rename(self.old, self.new)
+        before = self.snapshot()
+        out = self.migrate("--auth-root", self.home)
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("destination contains the review root", out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_an_unrepresentable_destination_is_refused_before_moving(self):
+        self.account("claude-a")
+        before = self.snapshot()
+        out = self.migrate("--auth-root", os.path.join(self.home, "auth\nroot"))
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("supported permission rule", out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_cross_filesystem_rename_failure_never_copies(self):
+        self.account("claude-a")
+        path = self.fault('''def rename(src, dst):
+    raise OSError(errno.EXDEV, "injected cross-filesystem rename")
+os.rename = rename''')
+        before = self.snapshot()
+        out = self.migrate(PATH=path)
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("cross-filesystem", out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_dry_run_refuses_different_filesystems(self):
+        self.account("claude-a")
+        path = self.fault('''real_stat = os.stat
+def device_stat(path, *args, **kwargs):
+    value = real_stat(path, *args, **kwargs)
+    if path == os.path.join(os.environ["HOME"], "review", "auth"):
+        fields = list(value)
+        fields[2] += 1
+        return os.stat_result(fields)
+    return value
+os.stat = device_stat''')
+        before = self.snapshot()
+        out = self.migrate("--dry-run", PATH=path)
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("cross-filesystem move refused", out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_the_moved_root_is_checked_again_before_writes(self):
+        self.account("claude-a")
+        path = self.fault('''real_rename = os.rename
+def rename(src, dst):
+    target = os.path.join(os.environ["HOME"], "review", "secret")
+    real_rename(src, target)
+    os.symlink(target, dst)
+os.rename = rename''')
+        out = self.migrate(PATH=path)
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("moved root is inside", out.stderr)
+        self.assertNotIn("Read(~/review.auth/**)", self.deny(
+            os.path.join(self.home, "review", "secret", "claude-a", "settings.json")))
+
+    def test_links_whose_meaning_changes_are_refused_before_the_move(self):
+        a = self.account("claude-a")
+        own = os.path.join(self.home, ".codex")
+        os.makedirs(own, mode=0o700)
+        bridge = os.path.join(self.home, "bridge")
+        os.symlink(a, bridge)
+        cases = [(os.path.join(self.old, "claude-default"), a, "absolute symlink"),
+                 (os.path.join(self.old, "claude-default"), bridge, "absolute symlink"),
+                 (os.path.join(self.home, ".claude"), a, "tool home symlink"),
+                 (os.path.join(self.old, "codex-personal"), "../../.codex", "relative symlink")]
+        for link, target, diagnostic in cases:
+            with self.subTest(link=link):
+                os.symlink(target, link)
+                before = self.snapshot()
+                out = self.migrate()
+                self.assertNotEqual(out.returncode, 0, out.stdout)
+                self.assertIn(diagnostic, out.stderr)
+                self.assertEqual(self.snapshot(), before)
+                os.unlink(link)
+
+    def test_a_dangling_link_is_refused_before_the_move(self):
+        self.account("claude-a")
+        os.symlink("missing", os.path.join(self.old, "codex-default"))
+        before = self.snapshot()
+        out = self.migrate()
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("dangling symlink", out.stderr)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_planted_write_destinations_cannot_overwrite_credentials(self):
+        a = self.account("claude-a")
+        credential = os.path.join(a, ".credentials.json")
+        with open(credential, "w") as f:
+            f.write("synthetic credential")
+        for suffix in (".new", ".pre-authmove"):
+            with self.subTest(suffix=suffix):
+                link = os.path.join(a, "settings.json" + suffix)
+                os.symlink(".credentials.json", link)
+                before = self.snapshot()
+                out = self.migrate()
+                self.assertNotEqual(out.returncode, 0, out.stdout)
+                self.assertIn("not a plain file", out.stderr)
+                self.assertEqual(self.snapshot(), before)
+                os.unlink(link)
+
+    def test_deployed_environment_is_not_needed(self):
+        self.account("claude-a")
+        p = os.path.join(self.home, "review", "bin", "review-env.sh")
+        os.unlink(p)
+        with open(p, "w") as f:
+            f.write('export REVIEW_AUTH="$HOME/review/auth"\n')
+        out = self.migrate()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertTrue(os.path.isdir(self.new))
+
+    def test_a_name_planted_after_validation_cannot_redirect_a_write(self):
+        a = self.account("claude-a")
+        with open(os.path.join(a, ".credentials.json"), "w") as f:
+            f.write("synthetic credential")
+        path = self.fault('''real_rename = os.rename
+def rename(src, dst):
+    real_rename(src, dst)
+    os.symlink(".credentials.json", os.path.join(dst, "claude-a", "settings.json.new"))
+os.rename = rename''')
+        out = self.migrate(PATH=path)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        a = os.path.join(self.new, "claude-a")
+        self.assertEqual(open(os.path.join(a, ".credentials.json")).read(), "synthetic credential")
+        self.assertIn("Read(~/review.auth/**)", self.deny(os.path.join(a, "settings.json")))
+        self.assertEqual(os.stat(os.path.join(a, "settings.json.pre-authmove")).st_mode & 0o777, 0o600)
 
 
 class UsageProbe(Base):

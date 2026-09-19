@@ -10,7 +10,7 @@ per-PR agents, several of which build and fly SITL.
 
 ## Layout
 
-Everything lives under `~/review`, which is `$REVIEW_ROOT`:
+Run data and scripts live under `~/review`, which is `$REVIEW_ROOT`:
 
 | path | what |
 |---|---|
@@ -18,16 +18,25 @@ Everything lives under `~/review`, which is `$REVIEW_ROOT`:
 | `~/review/etc/` | `local.conf`, the run lock, the crontab |
 | `~/review/data/` | all scratch: checkouts, clones, build trees. `$REVIEW_DATA` |
 | `~/review/repositories/` | maintained base clones of every reviewed repo. `$REVIEW_REPOS` |
+| `~/review/work/` | working dir for a run; reports land here, base checkouts stay clean |
+| `~/review/logs/` | run logs, 30-day retention. `$REVIEW_LOGS` |
 
 `$REVIEW_AUTH` is `~/review.auth/` - one directory per account and a symlink per
 role, never in git. It is a **sibling** of `~/review/` rather than a directory
 inside it, because the reviewing agent is started with `--add-dir $REVIEW_ROOT`.
 A box set up before that changed moves across with
 `runner/bin/migrate-auth-root.sh` (`--dry-run` first), which renames the
-directory and repoints the deny rule each account carries. Run it under the run
-lock, before deploying the code that expects the new location.
-| `~/review/work/` | working dir for a run; reports land here, base checkouts stay clean |
-| `~/review/logs/` | run logs, 30-day retention. `$REVIEW_LOGS` |
+directory and adds the new deny rule without removing existing protections.
+Hold the run lock across the migration and deployment. The migrator has its own
+`$HOME/review.auth` default and does not source the deployed environment; for a
+custom location pass `--auth-root /absolute/path` explicitly. It validates every
+account before moving, refuses links whose meaning would change, and resumes
+unfinished settings updates if the directory has already moved. A completed
+migration can be run again safely. Inspect a refusal before releasing the lock.
+
+Historical Codex quota deltas recorded under the old home paths stay blank after
+the move. Run logs are preserved: a vanished home does not prove ownership of
+another directory's usage history.
 
 `review-env.sh` points `TMPDIR` into `$REVIEW_DATA/tmp`. On a box where `/tmp` is
 a tmpfs, a bare `mktemp -d` there fills RAM and takes the machine down with it —
@@ -258,15 +267,16 @@ only when the validation pool failed, well into a run.
 
 The reviewing agent is started with `--add-dir $REVIEW_ROOT` and reads other
 people's pull requests. The accounts used to live inside that directory, which
-is why they no longer do: `$REVIEW_AUTH` is a sibling of the review root, so no
-relative path from the work the agent is doing reaches a credential. That is a
-smaller exposure rather than containment - the agent runs as the same user, so
+is why they no longer do: `$REVIEW_AUTH` is outside the granted review tree.
+Relative paths such as `../review.auth` can still reach it. This reduces exposure
+without providing containment - the agent runs as the same user, so
 file modes stop nothing and a shell reader is not bound by a tool rule. The
 permission pre-flight therefore still requires a deny rule covering
 `$REVIEW_AUTH`, alongside the `git push` denials, and refuses to start without
 one; the Install block above gives the exact settings. Note that a rule written
 for the old layout - `Read(~/review/**)` - no longer covers the accounts, and is
-refused rather than accepted on the strength of once having been right. A refusal is written to the run log and shows on the
+refused. The migrator preserves that rule and adds protection for the new root.
+A refusal is written to the run log and shows on the
 dashboard: these checks used to run before the log was opened, so under cron a
 refused run said nothing anywhere and the slot simply went quiet.
 

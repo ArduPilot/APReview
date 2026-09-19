@@ -14,10 +14,9 @@ export REVIEW_REPOS="$REVIEW_ROOT/repositories"
 # Deliberately a sibling of $REVIEW_ROOT rather than a directory inside it. The
 # reviewing agent is started with --add-dir "$REVIEW_ROOT" and reads other
 # people's pull requests, so every account's credentials used to sit inside the
-# tree it was handed. Outside it they are not reachable by a relative path from
-# the work it is doing. That is a smaller exposure, not containment: the agent
-# runs as the same user, so a deny rule is still required and real isolation is
-# still a separate question.
+# tree it was handed. The sibling is outside the granted tree, but this is not
+# containment: the agent runs as the same user, so a deny rule is still required
+# and real isolation is still a separate question.
 export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT.auth}"
 
 # read_account_file <path> - the address or id a directory records, validated.
@@ -232,6 +231,16 @@ role_config_dir() {        # tool role [resolved-dir] -> the directory, or empty
     printf '%s\n' "$d"
 }
 
+# An override or a tool-home alias must not put credentials back in the grant.
+account_outside_review() {
+    local root review_root
+    root=$(readlink -m "$1") || return 1
+    review_root=$(readlink -m "$REVIEW_ROOT") || return 1
+    case "$root/" in
+        "$review_root/"*) echo "$root is inside the granted review root" >&2; return 1 ;;
+    esac
+}
+
 # The root holds the role links. Private leaves protect nothing if anyone can
 # repoint the symlink that chooses between them. Separate from review_auth so
 # that writing into the root can check it without resolving a role - a role that
@@ -239,6 +248,7 @@ role_config_dir() {        # tool role [resolved-dir] -> the directory, or empty
 auth_root_ok() {
     local root
     root=$(readlink -f "$REVIEW_AUTH" 2>/dev/null) || root="$REVIEW_AUTH"
+    account_outside_review "$root" || return 1
     if [ -d "$root" ] && [ -n "$(find "$root" -maxdepth 0 \
                                       \( -perm /o+w -o ! -user "$(id -u)" \) 2>/dev/null)" ]; then
         echo "$root is writable by other users or not yours" >&2
@@ -261,9 +271,11 @@ review_auth() {
             echo "review_auth: no account configured for $tool-$role" >&2
             return 2
         }
+        account_outside_review "$HOME/.$tool" || return 2
         return 1
     fi
     target=$(readlink -f "$link") || return 2
+    account_outside_review "$target" || return 2
     [ -d "$target" ] || {
         echo "review_auth: $tool-$role does not resolve to a directory" >&2
         return 2

@@ -414,6 +414,11 @@ def denies_auth(rule):
             return False
         literal.append(c)
     path = "".join(literal)
+    # Extra separators can change which root the CLI anchors the pattern to.
+    anchored = path[2:] if path.startswith(("//", "~/")) else path
+    if path not in ("/", "~") and (not anchored or anchored.startswith("/") or
+                                   anchored.endswith("/") or "//" in anchored):
+        return False
     # A filesystem resolver collapses these; a gitignore pattern does not.
     if any(part in (".", "..") for part in path.split("/")) or any(ord(c) < 32 for c in path):
         return False

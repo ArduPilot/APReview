@@ -226,6 +226,109 @@ fi''')
                 self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
                 self.assertIn("permission pre-flight OK", out.stdout)
 
+    def test_ambiguous_rule_roots_are_refused(self):
+        self.settings(self.AUTH_DENY)
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        for rule in ("Read(//%s/**)" % self.auth, "Read(~/%s/**)" % self.auth,
+                     "Read(///**)", "Read(~//**)", "Read(~/review.auth//**)"):
+            with self.subTest(rule=rule):
+                self.settings(self.AUTH_DENY[:2] + [rule])
+                out = self.whole_run("followup", "--dry-run")
+                self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+                self.assertIn("does not deny reading", out.stdout)
+                self.assertIn("status=preflight-failed", out.stdout)
+
+    def test_an_auth_root_inside_review_is_refused_even_through_an_alias(self):
+        self.settings(self.AUTH_DENY)
+        self.assertEqual(self.whole_run("followup", "--dry-run").returncode, 0)
+        internal = os.path.join(self.home, "review", "secret")
+        os.rename(self.auth, internal)
+        os.symlink(internal, self.auth)
+        for path in (internal, self.auth):
+            with self.subTest(path=path):
+                out = self.whole_run("followup", "--dry-run", REVIEW_AUTH=path)
+                self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+                self.assertIn("cannot use the claude account", out.stdout)
+                self.assertIn("inside the granted review root", out.stdout + out.stderr)
+                self.assertIn("status=wrong-claude-account", out.stdout)
+        self.assertIn("REFUSE", self.status_row("claude"))
+
+    def test_migration_preserves_credentials_and_passes_the_real_preflight(self):
+        self.settings(self.AUTH_DENY[:2] + ["Read(~/review/auth/**)"])
+        files = [(name, file) for name, file in (
+            ("claude-ardupilot", ".credentials.json"),
+            ("claude-personal", ".credentials.json"), ("codex-personal", "auth.json"))]
+        before = {(name, file): open(os.path.join(self.auth, name, file), "rb").read()
+                  for name, file in files}
+        old = os.path.join(self.home, "review", "auth")
+        os.rename(self.auth, old)
+        out = subprocess.run([os.path.join(BIN, "migrate-auth-root.sh")],
+                             env={"HOME": self.home, "PATH": "/usr/bin:/bin"},
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertFalse(os.path.lexists(old))
+        for (name, file), content in before.items():
+            path = os.path.join(self.auth, name, file)
+            self.assertTrue(os.path.isfile(path), "migration removed " + path)
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), content)
+        for mode in ("followup", "rsync"):
+            out = self.whole_run(mode, "--dry-run")
+            self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+            self.assertIn("permission pre-flight OK", out.stdout)
+
+    def test_a_tool_home_cannot_put_credentials_back_inside_review(self):
+        self.settings(self.AUTH_DENY)
+        internal = os.path.join(self.home, "review", "claude-home")
+        os.rename(os.path.join(self.auth, "claude-ardupilot"), internal)
+        os.symlink(internal, os.path.join(self.home, ".claude"))
+        link = os.path.join(self.auth, "claude-default")
+        os.unlink(link)
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback):
+                if not fallback:
+                    os.symlink(os.path.join(self.home, ".claude"), link)
+                out = self.whole_run("followup", "--dry-run")
+                self.assertEqual(out.returncode, 1, out.stdout + out.stderr)
+                self.assertIn("inside the granted review root", out.stdout + out.stderr)
+                self.assertIn("status=wrong-claude-account", out.stdout)
+                self.assertIn("REFUSE", self.status_row("claude"))
+                if not fallback:
+                    os.unlink(link)
+
+    def test_migration_rules_work_outside_home_and_with_pattern_characters(self):
+        # The parent exists only in this fixture, but is outside its HOME.
+        parent = tempfile.mkdtemp(prefix="auth-outside-")
+        self.addCleanup(shutil.rmtree, parent, True)
+        destination = os.path.join(parent, r"accounts[12]\live")
+        self.settings(self.AUTH_DENY[:2] + ["Read(~/review/auth/**)"])
+        os.rename(self.auth, os.path.join(self.home, "review", "auth"))
+        out = subprocess.run([os.path.join(BIN, "migrate-auth-root.sh"), "--auth-root", destination],
+                             env={"HOME": self.home, "PATH": "/usr/bin:/bin"},
+                             capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        # JSON from a shell printf would mis-escape the path before permissions.
+        stub(os.path.join(self.stubs, "claude"), '''exec python3 - <<'PYCLI'
+import json, os
+d = os.environ['CLAUDE_CONFIG_DIR']
+email = json.load(open(os.path.join(d, '.claude.json')))['oauthAccount']['emailAddress']
+print(json.dumps(dict(loggedIn=True, email=email, authMethod='claude.ai',
+                     apiProvider='firstParty', configDirectory=d)))
+PYCLI''')
+        out = self.whole_run("followup", "--dry-run", REVIEW_AUTH=destination)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("permission pre-flight OK", out.stdout)
+
+    def test_layout_documentation_keeps_the_table_and_explains_the_boundary(self):
+        path = os.path.join(HERE, "..", "..", "docs", "review-box.md")
+        text = open(path).read()
+        table = text.split("| path | what |\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("~/review/work/", table)
+        self.assertIn("~/review/logs/", table)
+        self.assertIn("Relative paths such as `../review.auth` can still reach it.", text)
+        self.assertIn("Historical Codex quota deltas recorded under the old home paths stay blank", text)
+
     def test_read_denials_can_cover_the_home_or_filesystem_root(self):
         for rule in ("Read(//**)", "Read(~/**)"):
             with self.subTest(rule=rule):
