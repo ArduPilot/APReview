@@ -19,6 +19,10 @@ OUT = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HOME, 'review', 'work',
 
 now = datetime.datetime.now().astimezone()
 cutoff = now - datetime.timedelta(days=DAYS)
+# How long a log with no end can go unwritten before the run is taken to have
+# died. Long enough to cover a quiet stretch - a slow build produces no output -
+# and a lock wait is handled separately, by the timeout the run itself states.
+STALL_GRACE = datetime.timedelta(minutes=30)
 
 AUTH = os.environ.get('REVIEW_AUTH') or os.path.join(HOME, 'review', 'auth')
 
@@ -145,6 +149,29 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
 
     fn = re.search(r'(\d+)\s+re-reviewed', txt)
     if fn: r['prs'] = int(fn.group(1))
+
+    # A run killed mid-flight never reaches its own finish line, and no amount
+    # of printing one covers that - the shell does not get there. Without an end
+    # the row reads as running for ever and, worse, its token and quota window
+    # is [start, now], so it takes credit for everything every later run spends:
+    # a two-minute run that died on 2026-09-16 was still claiming 4.3B tokens
+    # and 65% of a week three days later. A log nobody has written to is not a
+    # run in progress; its last write is when it stopped.
+    if r['finish'] is None:
+        try:
+            last = datetime.datetime.fromtimestamp(os.path.getmtime(path)).astimezone()
+        except OSError:
+            last = None
+        # Waiting for the lock is silent, so a queued run looks identical to a
+        # dead one until its own stated timeout has passed.
+        grace = STALL_GRACE
+        w = re.search(r'waiting up to (\d+)s for the run lock', txt)
+        if w and 'lock acquired' not in txt:
+            grace = datetime.timedelta(seconds=int(w.group(1))) + STALL_GRACE
+        if last and now - last > grace and last > start:
+            r['finish'] = last
+            r['status'] = 'died'
+            r['elapsed'] = int((last - start).total_seconds() // 60)
 
     runs.append(r)
 
@@ -497,7 +524,8 @@ for lab, gen, fup, npr, a, c, rc in labels:
 
 BADGE = {'ok': 'b-ok', 'skipped': 'b-skip', 'running': 'b-run', 'quota': 'b-quota',
          'failed': 'b-fail', 'lock-timeout': 'b-fail', 'no-gh-auth': 'b-fail',
-         'wrong-account': 'b-fail', 'preflight-failed': 'b-fail', 'no-work-dir': 'b-fail'}
+         'wrong-account': 'b-fail', 'preflight-failed': 'b-fail', 'no-work-dir': 'b-fail',
+         'died': 'b-fail'}
 
 rows = []
 for r in runs:

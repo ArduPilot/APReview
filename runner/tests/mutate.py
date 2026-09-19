@@ -182,6 +182,13 @@ M = [
                      'if False:'),
  ("credrealpath", PAGE, '_files.setdefault(os.path.realpath(_f), _f)',
                         '_files.setdefault(_f, _f)'),
+ # a run killed mid-flight never writes its own finish line
+ ("nostall", PAGE, "        if last and now - last > grace and last > start:",
+                   "        if False:"),
+ ("stallgrace", PAGE, "STALL_GRACE = datetime.timedelta(minutes=30)",
+                      "STALL_GRACE = datetime.timedelta(minutes=0)"),
+ ("stalllockwait", PAGE, "        if w and 'lock acquired' not in txt:",
+                         "        if False:"),
  # a refusal that nobody can see is a slot that goes quiet
  ("refusalbeforelog", RUN, 'export REVIEW_ROLE="$ROLE"\nif ! clear_inherited_credentials',
                            'export REVIEW_ROLE="$ROLE"\nexec >/dev/null\nif ! clear_inherited_credentials'),
@@ -324,6 +331,9 @@ REGRESSION = {
     'otelscan': 'Guard.test_a_telemetry_exporter_pointing_elsewhere_stops_the_run',
     'nocreddeny': 'Guard.test_credentials_inside_the_granted_directory_must_be_denied',
     'credrealpath': 'Dashboard.test_it_does_not_count_one_transcript_reached_two_ways',
+    'nostall': 'Dashboard.test_a_run_that_stopped_writing_is_not_still_running',
+    'stallgrace': 'Dashboard.test_a_run_still_writing_is_left_alone',
+    'stalllockwait': 'Dashboard.test_a_run_queued_on_the_lock_is_not_called_dead',
     'refusalbeforelog': 'Guard.test_a_refusal_is_written_to_the_run_log',
     'pageaccounts': 'Dashboard.test_it_counts_the_account_a_role_selects',
     'pageown': 'Dashboard.test_it_counts_the_tools_own_directory',

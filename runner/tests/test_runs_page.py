@@ -279,6 +279,51 @@ class Dashboard(unittest.TestCase):
         self.assertIn("wrong-account", page)
         self.assertNotIn(">running<", page)
 
+    def stalled_log(self, tail="", age_minutes=180, started=240):
+        """A log with no finish line, last written age_minutes ago."""
+        start = (datetime.datetime.now().astimezone()
+                 - datetime.timedelta(minutes=started)).strftime("%Y-%m-%dT%H:%M:%S%z")
+        p = self.log("followup",
+                     "reviewprs mode=followup  host=t  start=%s\n%s" % (start, tail))
+        when = (datetime.datetime.now() - datetime.timedelta(minutes=age_minutes)).timestamp()
+        os.utime(p, (when, when))
+        return p
+
+    def test_a_run_that_stopped_writing_is_not_still_running(self):
+        # it was killed mid-flight, so it never reached its own finish line
+        self.stalled_log()
+        page = self.build()
+        self.assertIn("died", page)
+        self.assertNotIn("running", page)
+
+    def test_a_dead_run_does_not_take_credit_for_later_tokens(self):
+        # the real damage: with no end the window is [start, now], so a run that
+        # lived two minutes claimed every token spent for the next three days
+        self.stalled_log(age_minutes=180, started=240)
+        self.transcript("claude-personal", 8000000)   # spent well after it died
+        self.build()
+        row = [r for r in self.state["runs"] if r["mode"] == "followup"][0]
+        self.assertEqual(row["status"], "died")
+        self.assertLess(row["elapsed"], 120)
+        # ctok is the transcript figure, attributed over [start, finish or now]
+        self.assertEqual(row["ctok"], 0)
+
+    def test_a_run_still_writing_is_left_alone(self):
+        self.stalled_log(age_minutes=0, started=30)
+        self.assertIn("running", self.build())
+
+    def test_a_run_queued_on_the_lock_is_not_called_dead(self):
+        # waiting for the lock is silent: a queued run looks exactly like a dead
+        # one until the timeout it stated has passed
+        self.stalled_log("waiting up to 7200s for the run lock...\n",
+                         age_minutes=90, started=95)
+        self.assertIn("running", self.build())
+
+    def test_a_run_past_its_own_lock_timeout_is_called_dead(self):
+        self.stalled_log("waiting up to 600s for the run lock...\n",
+                         age_minutes=180, started=185)
+        self.assertIn("died", self.build())
+
     def test_a_run_with_no_finish_line_is_still_shown_as_running(self):
         self.log("followup", self.run_log())
         self.assertIn("running", self.build())
