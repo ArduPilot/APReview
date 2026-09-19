@@ -20,6 +20,7 @@ ENV = "runner/bin/review-env.sh"
 BOTH = (RUN, AUT)
 PAGE = "runner/bin/make-runs-page.py"
 PRB = "runner/bin/claude-usage-probe.sh"
+MIG = "runner/bin/migrate-auth-root.sh"
 
 # name -> (file(s), old, new)   old must appear exactly once in each file
 M = [
@@ -55,7 +56,7 @@ M = [
                   "LOGS, 'reviewprs-*.log'"),
  ('quotadeleted', PAGE, '    samples = []',
                   '    samples = quota if directory and not os.path.isdir(directory) else []'),
- ('denysubstring', RUN, 'any(denies_auth(r) for r in deny)', 'any(auth in r or "review/auth" in r for r in deny)'),
+ ('denysubstring', RUN, 'any(denies_auth(r) for r in deny)', 'any(auth in r or "review.auth" in r for r in deny)'),
  ('denyescaping', RUN, 'pattern = re.sub(r"([\\\\*?\\[\\]])", r"\\\\\\1", os.path.realpath(auth))', 'pattern = os.path.realpath(auth)'),
  ('loginescaping', AUT, 'auth = re.sub(r"([\\\\*?\\[\\]])", r"\\\\\\1", os.path.realpath(sys.argv[1]))', 'auth = os.path.realpath(sys.argv[1])'),
  ('permissionfinish', RUN, '    echo "finish=$(date -Is) status=preflight-failed"\n', ''),
@@ -67,8 +68,8 @@ M = [
  ('denyancestor', RUN, 'os.path.commonpath([root, os.path.realpath(auth)]) == root', 'root == os.path.realpath(auth)'),
  ('denysuggestion', RUN, 'json.dumps("Read(/%s/**)" % pattern)', 'json.dumps("Read(%s/**)" % pattern)'),
  ('loginsettings', AUT, '"Bash(git push)", "Bash(git push:*)", "Read(/%s/**)" % auth', '"Bash(git push)", "Bash(git push:*)", "Read(%s/**)" % auth'),
- ('installsettings', "docs/review-box.md", '"Read(~/review/auth/**)"', '"Edit(~/review/auth/**)"'),
- ('readmesettings', "README.md", '"Read(~/review/auth/**)"', '"Edit(~/review/auth/**)"'),
+ ('installsettings', "docs/review-box.md", '"Read(~/review.auth/**)"', '"Edit(~/review.auth/**)"'),
+ ('readmesettings', "README.md", '"Read(~/review.auth/**)"', '"Edit(~/review.auth/**)"'),
  ('usetool', AUT, '    tool="$2"; role="$3"; acct="$4"\n    case "$tool" in claude|codex) ;; *) echo "unknown tool: $tool"; exit 2 ;; esac', '    tool="$2"; role="$3"; acct="$4"'),
  ('logintool', AUT, '    tool="$2"; acct="$3"\n    case "$tool" in claude|codex) ;; *) echo "unknown tool: $tool"; exit 2 ;; esac', '    tool="$2"; acct="$3"'),
  ('plainname', AUT, 'plain_name() {', 'plain_name() { return 0; }\nunused_plain_name() {'),
@@ -182,6 +183,13 @@ M = [
                      'if False:'),
  ("credrealpath", PAGE, '_files.setdefault(os.path.realpath(_f), _f)',
                         '_files.setdefault(_f, _f)'),
+ # the one-time move of the accounts
+ ("migmerge", MIG, 'if [ -e "$NEW" ]; then', 'if false; then'),
+ ("migstale", MIG, "or r == \"Read(~/review/**)\")", "or False)"),
+ ("migdry", MIG, "    if dry:\n        continue", "    if False:\n        continue"),
+ # the accounts live outside the directory the agent is handed
+ ("authinsideroot", ENV, 'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT.auth}"',
+                         'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT/auth}"'),
  # a run killed mid-flight never writes its own finish line
  ("nostall", PAGE, "        if last and now - last > grace and last > start:",
                    "        if False:"),
@@ -331,6 +339,10 @@ REGRESSION = {
     'otelscan': 'Guard.test_a_telemetry_exporter_pointing_elsewhere_stops_the_run',
     'nocreddeny': 'Guard.test_credentials_inside_the_granted_directory_must_be_denied',
     'credrealpath': 'Dashboard.test_it_does_not_count_one_transcript_reached_two_ways',
+    'migmerge': 'AuthRootMove.test_it_refuses_to_merge_two_account_roots',
+    'migstale': 'AuthRootMove.test_an_ancestor_rule_that_no_longer_covers_them_is_replaced',
+    'migdry': 'AuthRootMove.test_a_dry_run_changes_nothing_but_names_every_edit',
+    'authinsideroot': 'Guard.test_the_accounts_are_not_inside_the_directory_the_agent_is_given',
     'nostall': 'Dashboard.test_a_run_that_stopped_writing_is_not_still_running',
     'stallgrace': 'Dashboard.test_a_run_still_writing_is_left_alone',
     'stalllockwait': 'Dashboard.test_a_run_queued_on_the_lock_is_not_called_dead',

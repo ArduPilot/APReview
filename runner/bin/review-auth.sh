@@ -7,7 +7,7 @@
 #   review-auth.sh use claude default personal    point a role at an account
 #   review-auth.sh login claude personal     how to sign that account in
 #
-# Accounts live in $REVIEW_ROOT/auth, one directory each, never in git:
+# Accounts live in $REVIEW_AUTH, one directory each, never in git:
 #
 #   auth/claude-ardupilot/   a CLAUDE_CONFIG_DIR - credentials, settings, projects
 #   auth/claude-personal/

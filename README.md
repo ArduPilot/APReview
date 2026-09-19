@@ -104,7 +104,7 @@ never committed:
 | `REVIEW_PUBLIC_URL` | public base URL those reports appear at |
 | `REVIEW_BOX_NAME` | name shown on the runs dashboard |
 
-Accounts are not configured here — they live under `~/review/auth/`, one
+Accounts are not configured here — they live under `~/review.auth/`, one
 directory each, with a symlink per role saying which account that role uses.
 `runner/bin/review-auth.sh status` shows what every role resolves to.
 
@@ -139,7 +139,7 @@ Before enabling cron, merge this into each selectable Claude account's
     "deny": [
       "Bash(git push)",
       "Bash(git push:*)",
-      "Read(~/review/auth/**)"
+      "Read(~/review.auth/**)"
     ]
   }
 }

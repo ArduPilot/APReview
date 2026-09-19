@@ -16,9 +16,16 @@ Everything lives under `~/review`, which is `$REVIEW_ROOT`:
 |---|---|
 | `~/review/bin/` | the scripts from `runner/bin/` in this repo |
 | `~/review/etc/` | `local.conf`, the run lock, the crontab |
-| `~/review/auth/` | one directory per account, and a symlink per role. Never in git |
 | `~/review/data/` | all scratch: checkouts, clones, build trees. `$REVIEW_DATA` |
 | `~/review/repositories/` | maintained base clones of every reviewed repo. `$REVIEW_REPOS` |
+
+`$REVIEW_AUTH` is `~/review.auth/` - one directory per account and a symlink per
+role, never in git. It is a **sibling** of `~/review/` rather than a directory
+inside it, because the reviewing agent is started with `--add-dir $REVIEW_ROOT`.
+A box set up before that changed moves across with
+`runner/bin/migrate-auth-root.sh` (`--dry-run` first), which renames the
+directory and repoints the deny rule each account carries. Run it under the run
+lock, before deploying the code that expects the new location.
 | `~/review/work/` | working dir for a run; reports land here, base checkouts stay clean |
 | `~/review/logs/` | run logs, 30-day retention. `$REVIEW_LOGS` |
 
@@ -57,7 +64,7 @@ fallback). Preserve existing settings and deny entries:
     "deny": [
       "Bash(git push)",
       "Bash(git push:*)",
-      "Read(~/review/auth/**)"
+      "Read(~/review.auth/**)"
     ]
   }
 }
@@ -83,7 +90,7 @@ crontab ~/review/etc/crontab.reviewprs
 
 `local.conf` is where the site-specific settings go: the rsync destination, its
 credentials and the public URL reports appear at. It is never committed. Accounts
-are not in it - they are the directories and role links under `~/review/auth/`,
+are not in it - they are the directories and role links under `~/review.auth/`,
 described below.
 
 ## Scripts
@@ -138,7 +145,7 @@ costs seconds and transfers no objects.
 
 ## Accounts
 
-Each account is a directory under `~/review/auth`, and a symlink per role says
+Each account is a directory under `~/review.auth`, and a symlink per role says
 which account that role uses. Nothing here is in git — these hold credentials.
 
 ```
@@ -250,11 +257,16 @@ Both tools are checked, not just Claude: a missing `auth.json` used to surface
 only when the validation pool failed, well into a run.
 
 The reviewing agent is started with `--add-dir $REVIEW_ROOT` and reads other
-people's pull requests, and `~/review/auth/` is inside that directory - same uid,
-so file modes stop nothing. The permission pre-flight therefore requires a deny
-rule covering it, alongside the `git push` denials, and refuses to start without
-one; the Install block above gives the exact settings. This does not contain
-arbitrary shell readers. A refusal is written to the run log and shows on the
+people's pull requests. The accounts used to live inside that directory, which
+is why they no longer do: `$REVIEW_AUTH` is a sibling of the review root, so no
+relative path from the work the agent is doing reaches a credential. That is a
+smaller exposure rather than containment - the agent runs as the same user, so
+file modes stop nothing and a shell reader is not bound by a tool rule. The
+permission pre-flight therefore still requires a deny rule covering
+`$REVIEW_AUTH`, alongside the `git push` denials, and refuses to start without
+one; the Install block above gives the exact settings. Note that a rule written
+for the old layout - `Read(~/review/**)` - no longer covers the accounts, and is
+refused rather than accepted on the strength of once having been right. A refusal is written to the run log and shows on the
 dashboard: these checks used to run before the log was opened, so under cron a
 refused run said nothing anywhere and the slot simply went quiet.
 

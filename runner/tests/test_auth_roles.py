@@ -34,7 +34,7 @@ class Base(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.home, True)
-        self.auth = os.path.join(self.home, "review", "auth")
+        self.auth = os.path.join(self.home, "review.auth")
         os.makedirs(self.auth, mode=0o700)
         for d in ("claude-ardupilot", "claude-personal", "codex-personal"):
             os.makedirs(os.path.join(self.auth, d), mode=0o700)
@@ -441,6 +441,92 @@ class StatusView(Base):
         out = self.status()
         line = [l for l in out.stdout.splitlines() if l.startswith("claude-rsync")][0]
         self.assertIn("REFUSE", line)
+
+
+class AuthRootMove(unittest.TestCase):
+    """The one-time move of the accounts out of $REVIEW_ROOT.
+
+    It renames a directory holding live credentials and rewrites the deny rule
+    every account carries, so it gets the same treatment as anything else here.
+    """
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.old = os.path.join(self.home, "review", "auth")
+        self.new = os.path.join(self.home, "review.auth")
+        os.makedirs(os.path.join(self.home, "review", "bin"))
+        for b in ("review-env.sh", "migrate-auth-root.sh"):
+            os.symlink(os.path.join(BIN, b),
+                       os.path.join(self.home, "review", "bin", b))
+        os.makedirs(self.old, mode=0o700)
+
+    def account(self, name, deny=("Bash(git push)", "Bash(git push:*)",
+                                  "Read(~/review/auth/**)")):
+        d = os.path.join(self.old, name)
+        os.makedirs(d, exist_ok=True)
+        import json as _json
+        _json.dump({"permissions": {"defaultMode": "auto", "deny": list(deny)}},
+                   open(os.path.join(d, "settings.json"), "w"))
+        return d
+
+    def migrate(self, *args):
+        return subprocess.run(
+            [os.path.join(self.home, "review", "bin", "migrate-auth-root.sh"), *args],
+            capture_output=True, text=True,
+            env={"HOME": self.home, "PATH": "/usr/bin:/bin"})
+
+    def deny(self, path):
+        import json as _json
+        return _json.load(open(path))["permissions"]["deny"]
+
+    def test_it_moves_the_accounts_and_repoints_the_rule(self):
+        self.account("claude-ardupilot")
+        os.symlink("claude-ardupilot", os.path.join(self.old, "claude-default"))
+        out = self.migrate()
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertFalse(os.path.exists(self.old))
+        self.assertIn("Read(~/review.auth/**)",
+                      self.deny(os.path.join(self.new, "claude-ardupilot",
+                                             "settings.json")))
+        # a relative role link survives the rename
+        self.assertEqual(os.readlink(os.path.join(self.new, "claude-default")),
+                         "claude-ardupilot")
+
+    def test_an_ancestor_rule_that_no_longer_covers_them_is_replaced(self):
+        self.account("claude-personal", deny=("Bash(git push)", "Bash(git push:*)",
+                                              "Read(~/review/**)"))
+        self.migrate()
+        rules = self.deny(os.path.join(self.new, "claude-personal", "settings.json"))
+        self.assertIn("Read(~/review.auth/**)", rules)
+        self.assertNotIn("Read(~/review/**)", rules)
+
+    def test_a_dry_run_changes_nothing_but_names_every_edit(self):
+        self.account("claude-ardupilot")
+        out = self.migrate("--dry-run")
+        self.assertIn("claude-ardupilot", out.stdout)   # the edit it would make
+        self.assertTrue(os.path.isdir(self.old))
+        self.assertFalse(os.path.exists(self.new))
+        self.assertIn("Read(~/review/auth/**)",
+                      self.deny(os.path.join(self.old, "claude-ardupilot",
+                                             "settings.json")))
+
+    def test_it_refuses_to_merge_two_account_roots(self):
+        self.account("claude-ardupilot")
+        os.makedirs(self.new, mode=0o700)
+        out = self.migrate()
+        self.assertNotEqual(out.returncode, 0)
+        self.assertTrue(os.path.isdir(self.old), "it moved anyway")
+
+    def test_running_it_twice_is_harmless(self):
+        self.account("claude-ardupilot")
+        self.assertEqual(self.migrate().returncode, 0)
+        again = self.migrate()
+        self.assertEqual(again.returncode, 0, again.stdout)
+        self.assertIn("already at", again.stdout)
+        self.assertIn("Read(~/review.auth/**)",
+                      self.deny(os.path.join(self.new, "claude-ardupilot",
+                                             "settings.json")))
 
 
 class UsageProbe(Base):

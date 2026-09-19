@@ -6,11 +6,19 @@ export REVIEW_LOGS="$REVIEW_ROOT/logs"
 export REVIEW_REPOS="$REVIEW_ROOT/repositories"
 
 # --- accounts ------------------------------------------------------------------
-# One directory per account under auth/, and a symlink per role saying which
-# account that role uses - see review-auth.sh. Never in git: these hold
-# credentials. A task resolves its own directories rather than inheriting
-# whatever the box happens to be signed in as.
-export REVIEW_AUTH="$REVIEW_ROOT/auth"
+# One directory per account, and a symlink per role saying which account that
+# role uses - see review-auth.sh. Never in git: these hold credentials. A task
+# resolves its own directories rather than inheriting whatever the box happens
+# to be signed in as.
+#
+# Deliberately a sibling of $REVIEW_ROOT rather than a directory inside it. The
+# reviewing agent is started with --add-dir "$REVIEW_ROOT" and reads other
+# people's pull requests, so every account's credentials used to sit inside the
+# tree it was handed. Outside it they are not reachable by a relative path from
+# the work it is doing. That is a smaller exposure, not containment: the agent
+# runs as the same user, so a deny rule is still required and real isolation is
+# still a separate question.
+export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT.auth}"
 
 # read_account_file <path> - the address or id a directory records, validated.
 #

@@ -51,7 +51,9 @@ class Guard(unittest.TestCase):
         self.assertTrue(marker, "account preflight boundary missing")
         self.guard = os.path.join(self.home, "account-preflight.sh")
         stub(self.guard, guard + "\nexit 0")
-        self.auth = os.path.join(r, "auth")
+        # a sibling of the review root, not inside it: the agent is handed
+        # --add-dir "$REVIEW_ROOT" and reads other people's pull requests
+        self.auth = r + ".auth"
         os.makedirs(self.auth, mode=0o700)
 
         # two Claude accounts and one Codex account, with credentials
@@ -166,6 +168,31 @@ fi''')
         self.assertEqual(out.returncode, 1, out.stdout)
         self.assertIn("does not deny reading", out.stdout)
 
+    def test_a_rule_covering_the_review_root_no_longer_covers_the_accounts(self):
+        # the accounts moved out of $REVIEW_ROOT, so a rule written for the old
+        # layout stops protecting them - and must be refused rather than
+        # accepted on the strength of once having been right
+        self.settings(self.AUTH_DENY[:2] + ["Read(~/review/**)"])
+        out = self.whole_run("followup", "--dry-run")
+        self.assertEqual(out.returncode, 1, out.stdout)
+        self.assertIn("does not deny reading", out.stdout)
+
+    def test_the_accounts_are_not_inside_the_directory_the_agent_is_given(self):
+        # the invariant this layout exists for: --add-dir "$REVIEW_ROOT" must
+        # not hand over the credentials by a relative path. Ask review-env.sh
+        # what it exports - asserting on the fixture's own path would pass
+        # whatever the script decided.
+        out = subprocess.run(
+            ["bash", "-c", '. "$1" >/dev/null 2>&1; printf "%s\n%s\n" '
+                           '"$REVIEW_ROOT" "$REVIEW_AUTH"',
+             "_", os.path.join(BIN, "review-env.sh")],
+            capture_output=True, text=True,
+            env={"HOME": self.home, "PATH": "/usr/bin:/bin"})
+        root, auth = out.stdout.split()
+        self.assertTrue(auth, out.stdout + out.stderr)
+        self.assertFalse(auth.startswith(root.rstrip("/") + "/"),
+                         "%s is inside %s" % (auth, root))
+
     def test_a_deny_rule_for_the_auth_directory_satisfies_it(self):
         self.settings(self.AUTH_DENY)
         out = self.whole_run("followup", "--dry-run")
@@ -192,8 +219,7 @@ fi''')
                 self.assertIn("status=preflight-failed", out.stdout)
 
     def test_an_ancestor_read_denial_is_sufficient(self):
-        for rule in ("Read(~/review/**)", "Read(~/review/auth/**)",
-                     "Read(/%s/**)" % self.home):
+        for rule in ("Read(~/review.auth/**)", "Read(/%s/**)" % self.home):
             with self.subTest(rule=rule):
                 self.settings(self.AUTH_DENY[:2] + [rule])
                 out = self.whole_run("followup", "--dry-run")

@@ -19,7 +19,7 @@ REVIEW_PUBLIC_URL="https://reviews.example.org"
 #REVIEW_BOX_NAME="runner1"
 
 # Accounts are not configured here. Each one is a directory under
-# $HOME/review/auth, and a symlink says which account each role uses:
+# $HOME/review.auth, and a symlink says which account each role uses:
 #
 #   review-auth.sh status                        what every role resolves to
 #   review-auth.sh login claude personal         how to sign an account in

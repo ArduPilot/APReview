@@ -46,7 +46,7 @@ class Dashboard(unittest.TestCase):
         self.home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.home, True)
         self.logs = os.path.join(self.home, "review", "logs")
-        self.auth = os.path.join(self.home, "review", "auth")
+        self.auth = os.path.join(self.home, "review.auth")
         os.makedirs(self.logs)
         os.makedirs(self.auth, mode=0o700)
         self.out = os.path.join(self.home, "runs.html")

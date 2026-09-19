@@ -24,7 +24,7 @@ cutoff = now - datetime.timedelta(days=DAYS)
 # and a lock wait is handled separately, by the timeout the run itself states.
 STALL_GRACE = datetime.timedelta(minutes=30)
 
-AUTH = os.environ.get('REVIEW_AUTH') or os.path.join(HOME, 'review', 'auth')
+AUTH = os.environ.get('REVIEW_AUTH') or os.path.join(HOME, 'review.auth')
 
 
 def account_dirs(tool):
