@@ -302,6 +302,38 @@ interleave, and a switch that turned out to be invalid would revert over one tha
 had already succeeded. If a revert cannot be made, `use` says so and names the
 account the role has been left on rather than reporting success.
 
+### Reading what an account has left
+
+`runner/bin/quota.py` asks each account what quota it has, and records it.
+Observation only - nothing selects an account on it yet, which is the point:
+the readings get checked against reality before anything depends on them.
+
+```
+quota.py            a table of every account
+quota.py --json     the same as records
+quota.py --record   append them to $REVIEW_LOGS/quota.jsonl
+```
+
+Both CLIs publish structured figures, which is worth knowing because the
+hourly probe still reads Claude's by regex over English prose:
+
+| tool | where | windows |
+|---|---|---|
+| claude | `claude -p /usage --output-format stream-json`, `usage_report.rate_limits` | session (5h) and weekly, plus per-model |
+| codex | `codex app-server`, `account/rateLimits/read` | whatever the plan has - a Pro account reports weekly only |
+
+Two things the structured answers settle that the old sources could not. Codex's
+is a live query rather than the last figure a session rollout happened to
+record, and it carries `ordinaryUsageAllowed` and a credit balance - which is
+what decides whether running out means stopping or starting to cost money.
+Claude's arrives as a window list with reset times rather than a sentence.
+
+`free_pct` is what is left of the worst window that gates ordinary work.
+Per-model windows are recorded but do not count towards it: a spent model is not
+an account that cannot start. The app-server shuts down when its stdin closes,
+so the query has to hold the pipe open - writing the request and closing it
+loses the reply.
+
 ### The OAuth refresh lock
 
 `claude` takes a lock in its config directory while it refreshes the OAuth

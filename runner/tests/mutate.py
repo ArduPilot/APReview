@@ -19,6 +19,7 @@ AUT = "runner/bin/review-auth.sh"
 ENV = "runner/bin/review-env.sh"
 BOTH = (RUN, AUT)
 PAGE = "runner/bin/make-runs-page.py"
+QUO = "runner/bin/quota.py"
 PRB = "runner/bin/claude-usage-probe.sh"
 MIG = "runner/bin/migrate-auth-root.sh"
 
@@ -57,7 +58,7 @@ M = [
                   ''),
  ('quotaglob', PAGE, "glob.escape(directory), 'sessions'",
                   "directory, 'sessions'"),
- ('authglob', PAGE, "glob.escape(AUTH), tool + '-*'",
+ ('authglob', QUO, 'glob.escape(AUTH), tool + "-*"',
                   "AUTH, tool + '-*'"),
  ('claudeglob', PAGE, "os.path.join(glob.escape(r), sub) for r in account_dirs('claude')",
                   "os.path.join(r, sub) for r in account_dirs('claude')"),
@@ -252,6 +253,18 @@ M = [
  # the accounts live outside the directory the agent is handed
  ("authinsideroot", ENV, 'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT.auth}"',
                          'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT/auth}"'),
+ # reading what each account has left, without acting on it
+ ("quotaworst", QUO, 'return round(100.0 - max(w["used_pct"] for w in usable), 1)',
+                     'return round(100.0 - min(w["used_pct"] for w in usable), 1)'),
+ ("quotascoped", QUO, 'usable = [w for w in windows if not w.get("scoped")',
+                      'usable = [w for w in windows if True or not w.get("scoped")'),
+ ("quotaraises", QUO, '    except Exception as e:                       # observation must not raise\n        rec["error"] = "%s: %s" % (type(e).__name__, e)',
+                      '    except ValueError as e:\n        rec["error"] = "%s: %s" % (type(e).__name__, e)'),
+ ("quotanorecord", QUO, '    if record:', '    if False:'),
+ ("quotaalwaysrecord", QUO, '    if record:', '    if True:'),
+ ("quotadedup", QUO, '        if real in seen:', '        if False:'),
+ ("quotastdin", QUO, "        proc.stdin.write(req)\n        proc.stdin.flush()",
+                     "        proc.stdin.write(req)\n        proc.stdin.close()"),
  # the run's own usage probe can leave the OAuth lock the agent dies on
  ("lockbeforelaunch", RUN, 'clear_stale_oauth_lock "$CLAUDE_DIR"\n\nstdbuf -oL -eL claude -p',
                            '\nstdbuf -oL -eL claude -p'),
@@ -270,8 +283,8 @@ M = [
  ("refusalbeforelog", RUN, 'export REVIEW_ROLE="$ROLE"\nif ! clear_inherited_credentials',
                            'export REVIEW_ROLE="$ROLE"\nexec >/dev/null\nif ! clear_inherited_credentials'),
  # the dashboard: it describes the accounts the roles select
- ("pageaccounts", PAGE, "sorted(glob.glob(os.path.join(glob.escape(AUTH), tool + '-*')))", "[]"),
- ("pageown", PAGE, "for d in [os.path.join(HOME, '.' + tool)] + \\", "for d in [] + \\"),
+ ("pageaccounts", QUO, 'sorted(glob.glob(os.path.join(glob.escape(AUTH), tool + "-*")))', "[]"),
+ ("pageown", QUO, 'for d in [os.path.join(HOME, "." + tool)] + \\', 'for d in [] + \\'),
  ("pagestatus", PAGE, "elif re.search(r'status=wrong-\\w+-account', txt):",
                       "elif 'status=wrong-claude-account' in txt:"),
  ("probefollow", PRB, 'PROBE_DIR=$(role_config_dir claude default "$PROBE_DIR")',
@@ -446,6 +459,13 @@ REGRESSION = {
     'migstale': 'AuthRootMove.test_existing_denials_are_preserved',
     'migdry': 'AuthRootMove.test_a_dry_run_changes_nothing_but_names_every_edit',
     'authinsideroot': 'Guard.test_the_accounts_are_not_inside_the_directory_the_agent_is_given',
+    'quotaworst': 'Quota.test_free_is_what_is_left_of_the_worst_window',
+    'quotascoped': 'Quota.test_a_per_model_window_is_recorded_but_does_not_decide',
+    'quotaraises': 'Quota.test_a_missing_cli_is_recorded_not_raised',
+    'quotanorecord': 'Quota.test_record_appends_one_line_per_account',
+    'quotaalwaysrecord': 'Quota.test_it_writes_nothing_unless_asked',
+    'quotadedup': 'Quota.test_every_account_is_read_once',
+    'quotastdin': 'Quota.test_it_reads_codexs_live_meter_not_the_rollout_files',
     'lockbeforelaunch': 'Guard.test_a_lock_left_by_the_start_probe_is_cleared_before_the_agent',
     'probesilentrc': 'Guard.test_a_probe_whose_cli_fails_says_so',
     'probesilentparse': 'Guard.test_a_probe_that_takes_no_reading_says_so',

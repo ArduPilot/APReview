@@ -27,29 +27,11 @@ STALL_GRACE = datetime.timedelta(minutes=30)
 AUTH = os.environ.get('REVIEW_AUTH') or os.path.join(HOME, 'review.auth')
 
 
-def account_dirs(tool):
-    """Every directory a role could select for this tool, the tool's own first.
-
-    A role is a symlink into this set, so following the links would count the
-    same transcripts twice and miss the accounts no role points at today. The
-    account that pays changes by repointing a link, and a meter that only knows
-    the old one goes quiet exactly when someone is watching it.
-    """
-    dirs, seen = [], set()
-    for d in [os.path.join(HOME, '.' + tool)] + \
-             sorted(glob.glob(os.path.join(glob.escape(AUTH), tool + '-*'))):
-        if not os.path.isdir(d):
-            continue
-        real = os.path.realpath(d)
-        if real in seen:
-            # By real path, so the role links resolve onto the accounts they
-            # point at rather than counting them a second time - and so does a
-            # ~/.claude that is itself a symlink into auth/, which the runner
-            # supports and which would otherwise double every figure.
-            continue
-        seen.add(real)
-        dirs.append(real)
-    return dirs
+# Account discovery lives in quota.py, which also reads what each account has
+# left. Two copies of the rule would drift, and this page is where a drift shows
+# up as a meter pointing at the wrong subscription.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from quota import account_dirs                                   # noqa: E402
 
 
 def role_dir(tool, role='default'):
