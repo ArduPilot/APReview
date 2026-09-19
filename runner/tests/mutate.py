@@ -253,6 +253,10 @@ M = [
  # the accounts live outside the directory the agent is handed
  ("authinsideroot", ENV, 'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT.auth}"',
                          'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT/auth}"'),
+ # the page is published; identities are masked on it
+ ("nomask", PAGE, "_mask(html.escape(q.get('account')))", "html.escape(q.get('account'))"),
+ ("maskall", PAGE, '        return "%s&hellip;%s@%s" % (local[0], local[-1], domain) if len(local) > 2 \\\n            else "&hellip;@%s" % domain',
+                   '        return "&hellip;"'),
  # the Quotas section: recorded readings, never a live one
  ("quotarownewest", PAGE, '    if not key[0] or key in _seen_account:',
                           '    if not key[0] or False:'),
@@ -473,6 +477,8 @@ REGRESSION = {
     'migstale': 'AuthRootMove.test_existing_denials_are_preserved',
     'migdry': 'AuthRootMove.test_a_dry_run_changes_nothing_but_names_every_edit',
     'authinsideroot': 'Guard.test_the_accounts_are_not_inside_the_directory_the_agent_is_given',
+    'nomask': 'Dashboard.test_the_page_is_published_so_identities_are_masked',
+    'maskall': 'Dashboard.test_a_masked_address_keeps_its_domain',
     'quotarownewest': 'Dashboard.test_the_newest_reading_wins',
     'quotarowerror': 'Dashboard.test_a_reading_that_failed_shows_why_rather_than_a_figure',
     'quotarollscoped': 'Dashboard.test_a_per_model_window_is_shown_but_does_not_set_the_rollover',

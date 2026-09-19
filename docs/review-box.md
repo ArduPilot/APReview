@@ -314,6 +314,11 @@ quota.py --json     the same as records
 quota.py --record   append them to $REVIEW_LOGS/quota.jsonl
 ```
 
+The dashboard is published, so the identities in it are masked - an address
+keeps its domain and an account id its first eight characters, which is enough
+to tell the right account from the wrong one and not enough to reuse. The whole
+value is on the box, from `review-auth.sh status` or `quota.py`.
+
 Cron records a reading for every account hourly, at :05, and the runs dashboard
 has a **Quotas** section showing the newest one per account: what is left, the
 windows behind that figure, when the soonest rolls over, and how old the reading

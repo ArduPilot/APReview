@@ -227,13 +227,35 @@ class Dashboard(unittest.TestCase):
         self.assertIn("<h2>Quotas</h2>", page)
         return page.split("<h2>Quotas</h2>", 1)[1].split("</table>", 1)[0]
 
+    def test_the_page_is_published_so_identities_are_masked(self):
+        # not credentials, but stable identifiers, and this page is public
+        self.quota_record("claude", "claude-personal", account="someone@example.org")
+        self.quota_record("codex", "codex-work",
+                          account="efb1e83d-95c5-4919-8bde-fe1c094e1ebf")
+        page = self.build()
+        self.assertNotIn("someone@example.org", page)
+        self.assertNotIn("efb1e83d-95c5-4919-8bde-fe1c094e1ebf", page)
+
+    def test_a_masked_identity_still_says_which_account_it_is(self):
+        # useless if you cannot tell the right account from the wrong one
+        self.quota_record("codex", "codex-work",
+                          account="efb1e83d-95c5-4919-8bde-fe1c094e1ebf")
+        sec = self.quota_section(self.build())
+        self.assertIn("efb1e83d", sec)          # enough to recognise
+
+    def test_a_masked_address_keeps_its_domain(self):
+        self.quota_record("claude", "claude-personal", account="someone@example.org")
+        sec = self.quota_section(self.build())
+        self.assertIn("@example.org", sec)
+        self.assertNotIn("someone@", sec)
+
     def test_it_shows_a_row_for_every_account_it_has_a_reading_for(self):
-        self.quota_record("claude", "claude-personal", account="p@example.org")
+        self.quota_record("claude", "claude-personal", account="person@example.org")
         self.quota_record("codex", "codex-work", account="efb1e83d")
         sec = self.quota_section(self.build())
         self.assertIn("claude-personal", sec)
         self.assertIn("codex-work", sec)
-        self.assertIn("p@example.org", sec)
+        self.assertIn("@example.org", sec)      # masked, but still identifiable
 
     def test_the_newest_reading_wins(self):
         self.quota_record("codex", "codex-work", free=90.0, age_min=300)

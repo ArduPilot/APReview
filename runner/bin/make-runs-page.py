@@ -516,6 +516,24 @@ for lab in ('DevCallTopic', 'DevCallEU', 'AIReview'):
     rc = len(re.findall(r'Verdict: <span class="v-request"', body))
     labels.append((lab, gen, fup, npr, a, c, rc))
 
+def _mask(ident):
+    """Enough to confirm which account a row is, not enough to reuse.
+
+    This page is published. An account id or an address is not a credential,
+    but it is a stable identifier, and printing one beside the hour its quota
+    returns is more than a dashboard needs to say. The directory name in the
+    Account column already says which account this is; `review-auth.sh status`
+    on the box gives the whole thing when something needs diagnosing.
+    """
+    if not ident:
+        return None
+    if "@" in ident:
+        local, _, domain = ident.partition("@")
+        return "%s&hellip;%s@%s" % (local[0], local[-1], domain) if len(local) > 2 \
+            else "&hellip;@%s" % domain
+    return "%s&hellip;" % ident[:8] if len(ident) > 8 else ident
+
+
 def _rollover(q):
     """Soonest reset among the windows that gate work, as a local time."""
     when = []
@@ -552,7 +570,7 @@ for q in quotas:
         '<td data-sort="%s">%s</td></tr>' % (
             html.escape(q.get('tool') or '?'),
             html.escape(os.path.basename(q.get('dir') or '?')),
-            html.escape(q.get('account') or '&mdash;') if q.get('account') else '&mdash;',
+            _mask(html.escape(q.get('account'))) if q.get('account') else '&mdash;',
             -1 if free is None else free,
             '' if free is None or free > 5 else 'bad',
             '&mdash;' if free is None else '%.0f%%' % free,
