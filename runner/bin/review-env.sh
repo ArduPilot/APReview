@@ -174,6 +174,10 @@ def walk(node, where="", provider=False):
                 bad.append(setting)
                 continue
             for name, entry in v.items():
+                # Only openai can be selected: every model_provider selector is
+                # checked, including profiles and the other config layers.
+                if key == "model_providers" and name != "openai":
+                    continue
                 walk(entry, setting + "." + name + ".", key == "model_providers")
         elif provider and isinstance(v, (dict, list)):
             # A new provider auth mechanism must not silently evade this check.

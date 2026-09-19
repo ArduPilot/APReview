@@ -107,6 +107,58 @@ class Dashboard(unittest.TestCase):
         self.assertIn("default: codex-a", page)
         self.assertIn('class="v">13%', page)
 
+    def test_glob_characters_in_an_account_name_cannot_select_another_account(self):
+        a = self.codex_quota("codex-[ab]", 10, 13)
+        self.codex_quota("codex-a", 70, 89)
+        os.symlink(a, os.path.join(self.auth, "codex-default"))
+        self.codex_run("followup", "codex-[ab]", a)
+        page = self.build()
+        self.assertEqual(self.state["cur_quota"], 13)
+        self.assertEqual(self.state["runs"][0]["q_delta"], 3)
+        self.assertIn("+3.0%", page)
+        self.assertNotIn("+19.0%", page)
+
+    def test_glob_characters_in_the_auth_root_do_not_hide_accounts(self):
+        auth = self.auth + "[one]"
+        os.rename(self.auth, auth)
+        self.auth = auth
+        a = self.codex_quota("codex-a", 10, 13)
+        os.symlink(a, os.path.join(self.auth, "codex-default"))
+        self.transcript("claude-a", 2000000)
+        page = self.build(REVIEW_AUTH=auth)
+        self.assertEqual(self.state["cur_quota"], 13)
+        self.assertIn("2.0M", page)
+
+    def test_glob_characters_in_a_claude_directory_do_not_hide_transcripts(self):
+        self.transcript("claude-[ab]", 2000000)
+        self.transcript("claude-a", 7000000)
+        self.assertIn("9.0M", self.build())
+
+    def test_glob_characters_in_home_do_not_hide_run_logs(self):
+        old = self.home
+        self.home += "[one]"
+        os.rename(old, self.home)
+        self.addCleanup(shutil.rmtree, self.home, True)
+        self.logs, self.auth, self.out = [p.replace(old, self.home, 1)
+                                        for p in (self.logs, self.auth, self.out)]
+        self.codex_run("followup")
+        self.build()
+        self.assertEqual(len(self.state["runs"]), 1)
+        self.assertEqual(self.state["runs"][0]["status"], "ok")
+
+    def test_a_deleted_recorded_home_does_not_borrow_another_accounts_samples(self):
+        a = self.codex_quota("codex-a", 10, 13)
+        b = self.codex_quota("codex-b", 70, 89)
+        self.codex_run("followup", "codex-a", a)
+        shutil.rmtree(a)
+        os.symlink(b, os.path.join(self.auth, "codex-default"))
+        page = self.build()
+        self.assertEqual(self.state["cur_quota"], 89)
+        self.assertEqual(len(self.state["runs"]), 1)
+        self.assertIsNone(self.state["runs"][0]["q_delta"])
+        self.assertIsNone(self.state["runs"][0]["q_end"])
+        self.assertNotIn("+19.0%", page)
+
     def test_codex_deltas_follow_each_logged_account_even_after_a_switch(self):
         a = self.codex_quota("codex-a with space", 10, 13)
         b = self.codex_quota("codex-b", 70, 89)

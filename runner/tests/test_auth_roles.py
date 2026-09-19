@@ -484,6 +484,7 @@ class UsageProbe(Base):
         f = os.path.join(d, "claude")
         with open(f, "w") as fh:
             fh.write('#!/bin/sh\n'
+                     'echo "$1 $2" >> "$HOME/probe-cli-calls"\n'
                      'e="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"\n'
                      'case "$1 $2" in\n'
                      '  "auth status") printf \'{"loggedIn": true, "email": "%s@x.y"}\\n\''
@@ -498,7 +499,7 @@ class UsageProbe(Base):
             link = os.path.join(self.home, "review", "bin", n)
             if not os.path.exists(link):
                 os.symlink(os.path.join(BIN, n), link)
-        sh('"$1" hourly', self.home,
+        self.probe_result = sh('"$1" hourly', self.home,
            os.path.join(self.home, "review", "bin", "claude-usage-probe.sh"),
            path=d, **env)
         p = os.path.join(self.home, "review", "logs", "claude-usage.jsonl")
@@ -515,6 +516,28 @@ class UsageProbe(Base):
         recs = self.probe()
         self.assertTrue(recs, "the probe recorded nothing")
         self.assertEqual(recs[-1].get("account"), "claude-personal@x.y")
+
+    def test_a_broken_hourly_role_does_not_probe_the_fallback(self):
+        os.makedirs(os.path.join(self.home, ".claude"), mode=0o700)
+        self.link("claude-default", "missing")
+        self.assertEqual(self.probe(), [])
+        self.assertEqual(self.probe_result.returncode, 1)
+        self.assertIn("cannot use the claude account", self.probe_result.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "probe-cli-calls")))
+
+    def test_an_unconfigured_hourly_default_still_probes_the_tools_home(self):
+        os.makedirs(os.path.join(self.home, ".claude"), mode=0o700)
+        recs = self.probe()
+        self.assertEqual(self.probe_result.returncode, 0, self.probe_result.stderr)
+        self.assertTrue(recs)
+        self.assertEqual(recs[-1].get("account"), ".claude@x.y")
+
+    def test_a_run_using_the_tools_home_does_not_follow_a_later_switch(self):
+        os.makedirs(os.path.join(self.home, ".claude"), mode=0o700)
+        self.link("claude-default", "claude-personal")
+        recs = self.probe(REVIEW_ROLE="default")
+        self.assertTrue(recs)
+        self.assertEqual(recs[-1].get("account"), ".claude@x.y")
 
     def test_a_run_probe_keeps_the_account_the_run_selected(self):
         # inside a run there is nothing to decide: the run already chose, and

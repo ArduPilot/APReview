@@ -341,6 +341,7 @@ login)
                 python3 - "$AUTH" <<'PYSET'
 import json, os, re, sys
 auth = re.sub(r"([\\*?\[\]])", r"\\\1", os.path.realpath(sys.argv[1]))
+auth = auth.replace("\\\\", "\\\\\\\\")
 print(json.dumps({"permissions": {"defaultMode": "auto", "deny": [
     "Bash(git push)", "Bash(git push:*)", "Read(/%s/**)" % auth]}}, indent=2))
 PYSET
