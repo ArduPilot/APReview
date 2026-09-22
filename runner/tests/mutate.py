@@ -253,6 +253,9 @@ M = [
  # the accounts live outside the directory the agent is handed
  ("authinsideroot", ENV, 'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT.auth}"',
                          'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT/auth}"'),
+ # times on the page are the box's own, not the CLIs' UTC
+ ("rolloverutc", PAGE, "        soonest.astimezone().strftime('%a %d %b %H:%M'),",
+                       "        soonest.strftime('%a %d %b %H:%M'),"),
  # the page is published; identities are masked on it
  ("nomask", PAGE, "_mask(html.escape(q.get('account')))", "html.escape(q.get('account'))"),
  ("maskall", PAGE, '        return "%s&hellip;%s@%s" % (local[0], local[-1], domain) if len(local) > 2 \\\n            else "&hellip;@%s" % domain',
@@ -477,6 +480,7 @@ REGRESSION = {
     'migstale': 'AuthRootMove.test_existing_denials_are_preserved',
     'migdry': 'AuthRootMove.test_a_dry_run_changes_nothing_but_names_every_edit',
     'authinsideroot': 'Guard.test_the_accounts_are_not_inside_the_directory_the_agent_is_given',
+    'rolloverutc': 'Dashboard.test_rollover_is_shown_in_the_boxs_own_time_not_the_clis',
     'nomask': 'Dashboard.test_the_page_is_published_so_identities_are_masked',
     'maskall': 'Dashboard.test_a_masked_address_keeps_its_domain',
     'quotarownewest': 'Dashboard.test_the_newest_reading_wins',

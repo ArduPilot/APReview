@@ -547,8 +547,11 @@ def _rollover(q):
         return '&mdash;'
     soonest = min(when)
     hours = (soonest - now).total_seconds() / 3600.0
+    # The CLIs report these in UTC while every other time on this page is the
+    # box's own, written by `date -Is`. Rendering one column in another zone
+    # reads as a wrong answer rather than a different one.
     return '%s <span class="sub">(%s)</span>' % (
-        soonest.strftime('%a %d %b %H:%M'),
+        soonest.astimezone().strftime('%a %d %b %H:%M'),
         'now' if hours < 0 else ('%.0fh' % hours if hours < 48 else '%.0fd' % (hours / 24)))
 
 

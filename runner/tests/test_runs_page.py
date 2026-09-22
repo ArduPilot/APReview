@@ -271,6 +271,24 @@ class Dashboard(unittest.TestCase):
         self.assertIn("no answer from the app-server", sec)
         self.assertNotIn("100%", sec)
 
+    def test_rollover_is_shown_in_the_boxs_own_time_not_the_clis(self):
+        """The CLIs report resets in UTC; the rest of the page is local.
+
+        TZ is pinned rather than inherited: under a UTC clock - which is what
+        CI has - local and UTC agree and this would pass without converting
+        anything.
+        """
+        tz = "Etc/GMT-10"                       # UTC+10, no daylight saving
+        utc = datetime.timezone.utc
+        when = datetime.datetime.now(utc) + datetime.timedelta(hours=30)
+        self.quota_record("codex", "codex-a", free=50.0, windows=[
+            {"kind": "primary", "used_pct": 50, "scoped": False,
+             "resets_at": when.isoformat()}])
+        sec = self.quota_section(self.build(TZ=tz))
+        local = (when + datetime.timedelta(hours=10)).strftime("%a %d %b %H:%M")
+        self.assertIn(local, sec)
+        self.assertNotIn(when.strftime("%a %d %b %H:%M"), sec)
+
     def test_rollover_is_the_soonest_window_that_gates_work(self):
         soon = datetime.datetime.now().astimezone() + datetime.timedelta(hours=2)
         late = datetime.datetime.now().astimezone() + datetime.timedelta(days=5)
