@@ -1013,6 +1013,31 @@ class Switching(Base):
         out = self.use("claude", "default", "nosuch")
         self.assertNotEqual(out.returncode, 0)
 
+    def test_repeating_a_switch_already_in_place_is_not_a_cycle(self):
+        # both sides resolve to the same directory when the role already points
+        # at the account, which read as a cycle and refused a harmless no-op.
+        # The account has to be a symlink, as the box's is: the cycle check
+        # only looks at one that is, so a plain directory cannot show this.
+        own = os.path.join(self.home, ".claude")
+        os.makedirs(own, mode=0o700)
+        shutil.rmtree(os.path.join(self.auth, "claude-ardupilot"))
+        os.symlink(own, os.path.join(self.auth, "claude-ardupilot"))
+        self.link("claude-default", "claude-ardupilot")
+        out = self.use("claude", "default", "ardupilot")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertNotIn("role itself", out.stdout)
+        self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
+                         "claude-ardupilot")
+
+    def test_repeating_a_switch_still_checks_the_account_resolves(self):
+        # a no-op that skipped the check would be worse than the refusal it
+        # replaced: the role would report success while unusable
+        acct = self.leaves_root()
+        self.link("claude-default", "claude-out")
+        out = self.use("claude", "default", acct)
+        self.assertNotEqual(out.returncode, 0, out.stdout)
+        self.assertIn("does not resolve", out.stdout)
+
     def test_a_role_pointed_at_itself_is_refused(self):
         self.link("claude-default", "claude-ardupilot")
         out = self.use("claude", "default", "default")

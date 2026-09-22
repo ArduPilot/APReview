@@ -84,7 +84,7 @@ M = [
  ('usetool', AUT, '    tool="$2"; role="$3"; acct="$4"\n    case "$tool" in claude|codex) ;; *) echo "unknown tool: $tool"; exit 2 ;; esac', '    tool="$2"; role="$3"; acct="$4"'),
  ('logintool', AUT, '    tool="$2"; acct="$3"\n    case "$tool" in claude|codex) ;; *) echo "unknown tool: $tool"; exit 2 ;; esac', '    tool="$2"; acct="$3"'),
  ('plainname', AUT, 'plain_name() {', 'plain_name() { return 0; }\nunused_plain_name() {'),
- ('rolealias', AUT, '{ [ -L "$dir" ] && [ "$(readlink -f "$dir")" = "$(readlink -f "$link")" ]; }', 'false'),
+ ('rolealias', AUT, '{ [ "$already" = 0 ] && [ -L "$dir" ] && \\\n         [ "$(readlink -f "$dir")" = "$(readlink -f "$link")" ]; }', 'false'),
  ('quotaenv', PAGE, "_codex_pick = role_dir('codex')", "_codex_pick = os.environ.get('CODEX_HOME') or role_dir('codex')"),
  ('quotamixed', PAGE, 'samples = codex_quotas[directory][0]', 'samples = quota'),
  ('quotaunknown', PAGE, '    samples = []', '    samples = quota'),
@@ -291,6 +291,9 @@ M = [
  ("quotalowmark", PAGE, "            '' if free is None or free > 5 else 'bad',",
                         "            '',"),
  ("quotanoreadings", PAGE, "if not qrows:", "if False:"),
+ # repeating a switch is a no-op, not a cycle
+ ("noalready", AUT, '[ "$(readlink "$link" 2>/dev/null)" = "$tool-$acct" ] && already=1',
+                    'already=0'),
  # signing an account in on a box with no browser
  ("nodeviceauth", AUT, 'codex login --device-auth', 'codex login'),
  ("noapikeywarning", AUT, 'echo "machine instead. Do not use --with-api-key: a key bills"',
@@ -524,6 +527,7 @@ REGRESSION = {
     'quotarollsoonest': 'Dashboard.test_rollover_is_the_soonest_window_that_gates_work',
     'quotalowmark': 'Dashboard.test_an_account_at_the_threshold_is_marked',
     'quotanoreadings': 'Dashboard.test_with_no_readings_it_says_so_rather_than_showing_nothing',
+    'noalready': 'Switching.test_repeating_a_switch_already_in_place_is_not_a_cycle',
     'nodeviceauth': 'Switching.test_codex_login_says_how_to_sign_in_without_a_browser',
     'noapikeywarning': 'Switching.test_codex_login_warns_off_an_api_key',
     'quotaworst': 'Quota.test_free_is_what_is_left_of_the_worst_window',

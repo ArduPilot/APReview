@@ -265,7 +265,16 @@ use)
     # `use claude default default` would point the role at itself: exit 0, and a
     # role nothing can resolve. The account must be a real account directory,
     # not another role link.
-    if [ "$acct" = "$role" ] || { [ -L "$dir" ] && [ "$(readlink -f "$dir")" = "$(readlink -f "$link")" ]; }; then
+    #
+    # Comparing where the two resolve to catches that, and also catches a role
+    # that already points at the account being asked for - both then resolve to
+    # the same directory, and repeating a switch was refused as a cycle. Exempt
+    # that case by its immediate target: repeating a switch is a no-op, and it
+    # still goes through the validation below rather than returning early.
+    already=0
+    [ "$(readlink "$link" 2>/dev/null)" = "$tool-$acct" ] && already=1
+    if [ "$acct" = "$role" ] || { [ "$already" = 0 ] && [ -L "$dir" ] && \
+         [ "$(readlink -f "$dir")" = "$(readlink -f "$link")" ]; }; then
         echo "$tool-$acct is the role itself - that would leave $tool-$role unresolvable"
         exit 1
     fi
