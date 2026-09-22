@@ -21,6 +21,7 @@ BOTH = (RUN, AUT)
 PAGE = "runner/bin/make-runs-page.py"
 QUO = "runner/bin/quota.py"
 PRB = "runner/bin/claude-usage-probe.sh"
+ACC = "runner/bin/accounts.py"
 MIG = "runner/bin/migrate-auth-root.sh"
 
 # name -> (file(s), old, new)   old must appear exactly once in each file
@@ -253,6 +254,26 @@ M = [
  # the accounts live outside the directory the agent is handed
  ("authinsideroot", ENV, 'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT.auth}"',
                          'export REVIEW_AUTH="${REVIEW_AUTH:-$REVIEW_ROOT/auth}"'),
+ # choosing an account from the policy, without acting on it
+ ("selorder", ACC, "    for name in names:", "    for name in reversed(names):"),
+ ("selthreshold", ACC, 'elif rec["free_pct"] <= min_free:', 'elif rec["free_pct"] < 0:'),
+ ("selunknown", ACC, '        if rec.get("error"):', '        if False:'),
+ ("selnofree", ACC, '        elif rec.get("free_pct") is None:', '        elif False:'),
+ ("selpathname", ACC, '    if os.sep in name or name in (os.curdir, os.pardir):',
+                      '    if False:'),
+ ("selcontain", ACC, "    if not real.startswith(root + os.sep) and real not in own:",
+                     "    if False:"),
+ ("selnopolicy", ACC, '        raise PolicyError("cannot read %s: %s" % (path, e))',
+                      '        return {"roles": {}}'),
+ ("seldupe", ACC, "            if len(set(names)) != len(names):", "            if False:"),
+ ("selunknowntool", ACC, "            if tool not in quota.TOOLS:", "            if False:"),
+ ("selemptylist", ACC, "            if not isinstance(names, list) or not names or \\",
+                       "            if False and (not isinstance(names, list) or not names) or \\"),
+ ("selfresh", ACC, "            if age is not None and 0 <= age <= fresh_minutes:",
+                   "            if age is not None:"),
+ ("selstale", ACC, "        rec = quota.recorded().get(key)", "        rec = None"),
+ ("selnorecord", ACC, "    if record:", "    if False:"),
+ ("selalwaysrecord", ACC, "    if record:", "    if True:"),
  # times on the page are the box's own, not the CLIs' UTC
  ("rolloverutc", PAGE, "        soonest.astimezone().strftime('%a %d %b %H:%M'),",
                        "        soonest.strftime('%a %d %b %H:%M'),"),
@@ -261,8 +282,8 @@ M = [
  ("maskall", PAGE, '        return "%s&hellip;%s@%s" % (local[0], local[-1], domain) if len(local) > 2 \\\n            else "&hellip;@%s" % domain',
                    '        return "&hellip;"'),
  # the Quotas section: recorded readings, never a live one
- ("quotarownewest", PAGE, '    if not key[0] or key in _seen_account:',
-                          '    if not key[0] or False:'),
+ ("quotarownewest", QUO, '        if key[0] and key not in newest:',
+                         '        if key[0]:'),
  ("quotarowerror", PAGE, "    if q.get('error'):", '    if False:'),
  ("quotarollscoped", PAGE, "        if w.get('scoped') or not w.get('resets_at'):",
                            "        if not w.get('resets_at'):"),
@@ -480,6 +501,20 @@ REGRESSION = {
     'migstale': 'AuthRootMove.test_existing_denials_are_preserved',
     'migdry': 'AuthRootMove.test_a_dry_run_changes_nothing_but_names_every_edit',
     'authinsideroot': 'Guard.test_the_accounts_are_not_inside_the_directory_the_agent_is_given',
+    'selorder': 'Accounts.test_the_first_account_with_quota_wins',
+    'selthreshold': 'Accounts.test_the_threshold_is_a_floor_an_account_must_clear',
+    'selunknown': 'Accounts.test_a_failed_reading_is_not_treated_as_quota',
+    'selnofree': 'Accounts.test_a_reading_with_no_figure_and_no_error_is_not_quota_either',
+    'selpathname': 'Accounts.test_a_name_with_a_separator_is_refused_even_inside_the_root',
+    'selcontain': 'Accounts.test_an_account_symlinked_out_of_the_root_is_refused',
+    'selnopolicy': 'Accounts.test_without_a_policy_it_refuses_rather_than_guessing',
+    'seldupe': 'Accounts.test_a_policy_repeating_an_account_is_refused',
+    'selunknowntool': 'Accounts.test_a_policy_naming_an_unknown_tool_is_refused',
+    'selemptylist': 'Accounts.test_a_policy_with_an_empty_list_is_refused',
+    'selfresh': 'Accounts.test_a_stale_reading_is_not_used',
+    'selstale': 'Accounts.test_a_recent_reading_is_used_rather_than_asking_the_account',
+    'selnorecord': 'Accounts.test_record_writes_one_line_per_decision',
+    'selalwaysrecord': 'Accounts.test_it_writes_nothing_unless_asked',
     'rolloverutc': 'Dashboard.test_rollover_is_shown_in_the_boxs_own_time_not_the_clis',
     'nomask': 'Dashboard.test_the_page_is_published_so_identities_are_masked',
     'maskall': 'Dashboard.test_a_masked_address_keeps_its_domain',

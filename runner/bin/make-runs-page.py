@@ -164,22 +164,10 @@ runs.sort(key=lambda r: r['start'], reverse=True)
 # This page is rebuilt every ten minutes, and asking an account for its quota
 # starts the CLI: three of those per rebuild would contend with a run for the
 # OAuth refresh, which is a failure this system has already had.
+from quota import recorded                                     # noqa: E402
+
 quotas = []
-_seen_account = set()
-try:
-    with open(os.path.join(LOGS, 'quota.jsonl'), errors='replace') as fh:
-        lines = fh.readlines()
-except OSError:
-    lines = []
-for line in reversed(lines):          # newest first, one row per account
-    try:
-        q = json.loads(line)
-    except Exception:
-        continue
-    key = (q.get('tool'), q.get('dir'))
-    if not key[0] or key in _seen_account:
-        continue
-    _seen_account.add(key)
+for q in recorded(LOGS).values():
     at = parse_iso(q.get('at') or '')
     q['age_min'] = int((now - at).total_seconds() // 60) if at else None
     quotas.append(q)

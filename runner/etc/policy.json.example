@@ -1,0 +1,28 @@
+{
+  "_comment": [
+    "Which accounts each role may use, in priority order. Copy to",
+    "$REVIEW_AUTH/policy.json and edit; it names accounts, so it is never in git.",
+    "",
+    "Order is priority: the first account with more than min_free_pct left is the",
+    "one a run would use. The list is also the whole of what that role may reach,",
+    "which is the point - rsync reviews a project the ArduPilot subscription does",
+    "not pay for, so its lists name only the accounts that may pay for it. A role",
+    "cannot fall through to an account outside its own list by running out.",
+    "",
+    "Names are directory names under $REVIEW_AUTH, not paths.",
+    "min_free_pct   what must be left for an account to be used at all.",
+    "fresh_minutes  how old a recorded reading may be before asking the account."
+  ],
+  "min_free_pct": 5,
+  "fresh_minutes": 15,
+  "roles": {
+    "default": {
+      "claude": ["claude-ardupilot", "claude-personal"],
+      "codex": ["codex-work", "codex-personal"]
+    },
+    "rsync": {
+      "claude": ["claude-personal"],
+      "codex": ["codex-personal"]
+    }
+  }
+}

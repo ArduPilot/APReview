@@ -346,6 +346,34 @@ an account that cannot start. The app-server shuts down when its stdin closes,
 so the query has to hold the pipe open - writing the request and closing it
 loses the reply.
 
+### Choosing an account
+
+`runner/bin/accounts.py` says which account each role would use, given what the
+accounts have left. **Shadow mode**: it reports the choice and the walk that
+produced it, and changes nothing - no role link, no run. Nothing calls it yet.
+
+```
+accounts.py                what every role would select, and why
+accounts.py --role rsync   one role
+accounts.py --record       append the decisions to $REVIEW_LOGS/select.jsonl
+accounts.py --live         ask the accounts rather than using a recent reading
+```
+
+The policy is `$REVIEW_AUTH/policy.json`, copied from
+`runner/etc/policy.json.example` - an ordered list of account names per tool and
+role. Order is priority, and the list is also the whole of what that role may
+reach. That second part is the one that matters: `rsync` reviews a project the
+ArduPilot subscription does not pay for, so its lists name only the accounts
+that may pay for it, and running out of its own cannot fall through to one that
+may not. A missing or invalid policy is refused rather than defaulted.
+
+An account is used when more than `min_free_pct` is left. Unknown is not spare -
+a reading that failed, or one carrying no figure, is skipped rather than tried,
+because an unattended run cannot check the guess. Figures come from the hourly
+recording while it is younger than `fresh_minutes`, and from the account itself
+otherwise: asking starts the CLI, and that is what makes two processes contend
+for the OAuth refresh below.
+
 ### The OAuth refresh lock
 
 `claude` takes a lock in its config directory while it refreshes the OAuth

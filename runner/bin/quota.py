@@ -229,6 +229,33 @@ def read(tool, directory):
     return rec
 
 
+def recorded(logs=None):
+    """The newest recorded reading for each account, by (tool, real path).
+
+    From the file quota.py --record writes. Callers that need a figure without
+    starting a CLI read this: the dashboard is rebuilt every ten minutes and a
+    run starts on a schedule, and asking an account directly is what makes two
+    processes contend for its OAuth refresh.
+    """
+    path = os.path.join(logs or os.environ.get("REVIEW_LOGS") or
+                        os.path.join(HOME, "review", "logs"), "quota.jsonl")
+    try:
+        with open(path, errors="replace") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return {}
+    newest = {}
+    for line in reversed(lines):              # newest first
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        key = (rec.get("tool"), os.path.realpath(rec.get("dir") or ""))
+        if key[0] and key not in newest:
+            newest[key] = rec
+    return newest
+
+
 def main(argv):
     want = [a for a in argv if not a.startswith("-")] or list(TOOLS)
     as_json = "--json" in argv
