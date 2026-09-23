@@ -348,15 +348,17 @@ loses the reply.
 
 ### Choosing an account
 
-`runner/bin/accounts.py` says which account each role would use, given what the
-accounts have left. **Shadow mode**: it reports the choice and the walk that
-produced it, and changes nothing - no role link, no run. Nothing calls it yet.
+`runner/bin/accounts.py` decides which account a role runs on, from what the
+accounts have left.
 
 ```
 accounts.py                what every role would select, and why
 accounts.py --role rsync   one role
 accounts.py --record       append the decisions to $REVIEW_LOGS/select.jsonl
 accounts.py --live         ask the accounts rather than using a recent reading
+accounts.py --select --role R   the answer a run acts on: "tool<TAB>name<TAB>dir"
+                                per line, the walk on stderr, exit 3 for nothing
+                                usable
 ```
 
 The policy is `$REVIEW_AUTH/policy.json`, copied from
@@ -369,10 +371,45 @@ may not. A missing or invalid policy is refused rather than defaulted.
 
 An account is used when more than `min_free_pct` is left. Unknown is not spare -
 a reading that failed, or one carrying no figure, is skipped rather than tried,
-because an unattended run cannot check the guess. Figures come from the hourly
-recording while it is younger than `fresh_minutes`, and from the account itself
-otherwise: asking starts the CLI, and that is what makes two processes contend
-for the OAuth refresh below.
+because an unattended run cannot check the guess. Nor is credit: an account past
+its included allowance (`ordinaryUsageAllowed` false) is passed over however
+healthy its window looks, because these runs may stop but may not start billing.
+Figures come from the hourly recording while it is younger than `fresh_minutes`,
+and from the account itself otherwise: asking starts the CLI, and that is what
+makes two processes contend for the OAuth refresh below.
+
+### What a run does with it
+
+`run-reviewprs.sh` selects **after taking the run lock**, not before. A run that
+waited two hours for the lock would otherwise choose on a reading taken before
+the wait, and a run that never gets the lock would pin - and be charged for - an
+account it never spends.
+
+Every check that follows - signed in, subscription login, first-party provider,
+the directory the CLI actually read, the `ACCOUNT` record, Codex's `config.toml`
+- runs against whatever was selected, so nothing is validated any less than when
+the role links decided alone. The runner also re-checks the chosen directory
+against the same containment and ownership rules a role link must satisfy
+(`account_dir_ok`), rather than taking `accounts.py`'s word for the path.
+
+With every listed account spent, the run **defers**: it prints
+`status=deferred-no-quota`, starts nothing, and leaves the slot to the next
+scheduled run. That is deliberate - running the review without the Codex
+validation pass was the alternative, and a review is not worth having without
+it. The dashboard shows those runs as `deferred`, counted under *Blocked on
+quota* rather than as failures.
+
+Three ways out of the selector, and they are different:
+
+| situation | what happens |
+| --- | --- |
+| no `policy.json` | the feature is not configured; the role links decide, as before |
+| `policy.json` unreadable or invalid | `status=account-policy-error`, the run stops |
+| policy fine, every account spent | `status=deferred-no-quota`, the run defers |
+
+The second is not the first. A policy that is meant to be in force and is not
+would leave a run choosing its own account, which is the one thing this must
+never do.
 
 ### The OAuth refresh lock
 
