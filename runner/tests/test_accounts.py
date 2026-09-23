@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Choosing an account from the policy, without acting on the choice.
 
-The module is shadow mode, so these care as much about what it refuses to do -
-choose outside the list, choose on an unknown figure, choose at all without a
-policy - as about which account it picks.
+The module decides but never acts, so these care as much about what it refuses
+to do - choose outside the list, choose on an unknown figure, choose at all
+without a policy, touch anything - as about which account it picks.
 """
 import datetime
 import json
@@ -41,11 +41,13 @@ class Accounts(unittest.TestCase):
             json.dump(obj, f) if not isinstance(obj, str) else f.write(obj)
         return p
 
-    def reading(self, tool, name, free=50.0, error=None, age_min=5):
+    def reading(self, tool, name, free=50.0, error=None, age_min=5, ordinary=None):
         rec = {"at": (datetime.datetime.now().astimezone()
                       - datetime.timedelta(minutes=age_min)).isoformat(),
                "tool": tool, "dir": os.path.join(self.auth, name),
                "account": name + "@example.org", "free_pct": free, "windows": []}
+        if ordinary is not None:
+            rec["ordinary_usage_allowed"] = ordinary
         if error:
             rec["error"] = error
             rec["free_pct"] = None
@@ -203,7 +205,7 @@ class Accounts(unittest.TestCase):
         self.assertEqual(out.returncode, 1)
         self.assertIn("no role", out.stderr)
 
-    # --- shadow mode ---------------------------------------------------------
+    # --- deciding is not acting ----------------------------------------------
     def test_it_changes_nothing(self):
         os.symlink("claude-a", os.path.join(self.auth, "claude-default"))
         before = {p: os.path.getmtime(os.path.join(self.auth, p))
@@ -240,6 +242,96 @@ class Accounts(unittest.TestCase):
         self.assertEqual([s["account"] for s in d["considered"]],
                          ["claude-a", "claude-b"])
         self.assertIn("skipped", d["considered"][0])
+
+
+    # --- money ---------------------------------------------------------------
+    def test_an_account_past_its_included_allowance_is_passed_over(self):
+        # the window can still look healthy while ordinary usage is barred:
+        # what is left is paid overage, and these runs may not spend money
+        self.reading("codex", "codex-a", free=90.0, ordinary=False)
+        self.reading("codex", "codex-b", free=70.0)
+        d = self.decisions("--role", "default")[("default", "codex")]
+        self.assertEqual(d["chosen"], "codex-b")
+        # the reason, not merely the skip: 90% free cannot be the threshold
+        # branch, so only the overage branch can produce this
+        self.assertIn("would spend credits", d["considered"][0]["skipped"])
+
+    def test_overage_is_refused_even_as_the_last_account(self):
+        self.reading("codex", "codex-a", free=90.0, ordinary=False)
+        self.reading("codex", "codex-b", free=90.0, ordinary=False)
+        d = self.decisions("--role", "default")[("default", "codex")]
+        self.assertIsNone(d["chosen"])
+
+    def test_a_tool_that_reports_no_allowance_field_is_not_refused(self):
+        # Claude has no such field. Absent must not read as exhausted, or no
+        # Claude account would ever be chosen.
+        self.reading("claude", "claude-a", free=60.0)
+        d = self.decisions("--role", "default")[("default", "claude")]
+        self.assertEqual(d["chosen"], "claude-a")
+
+    def test_allowed_ordinary_usage_is_not_a_reason_to_skip(self):
+        self.reading("codex", "codex-a", free=60.0, ordinary=True)
+        d = self.decisions("--role", "default")[("default", "codex")]
+        self.assertEqual(d["chosen"], "codex-a")
+
+    # --- answering a caller --------------------------------------------------
+    def test_select_prints_one_line_a_tool_for_the_caller(self):
+        self.reading("claude", "claude-a", free=60.0)
+        self.reading("codex", "codex-a", free=60.0)
+        out = self.cli("--select", "--role", "default")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        rows = [l.split("\t") for l in out.stdout.splitlines() if l.strip()]
+        self.assertEqual({r[0] for r in rows}, {"claude", "codex"})
+        by = {r[0]: r for r in rows}
+        self.assertEqual(by["claude"][1], "claude-a")
+        self.assertEqual(by["claude"][2], os.path.join(self.auth, "claude-a"))
+
+    def test_select_says_nothing_usable_with_an_exit_code_of_its_own(self):
+        # 3 is not 1: a caller has to tell "defer, try again later" from
+        # "this policy is broken", and they are opposite responses
+        self.reading("claude", "claude-a", free=1.0)
+        self.reading("claude", "claude-b", free=1.0)
+        self.reading("codex", "codex-a", free=60.0)
+        out = self.cli("--select", "--role", "default")
+        self.assertEqual(out.returncode, 3, out.stdout + out.stderr)
+        self.assertIn("no claude account usable", out.stderr)
+
+    def test_select_answers_with_nothing_at_all_when_one_tool_is_short(self):
+        # codex has quota and claude has none. Printing the half that worked
+        # would let a caller run on it and skip the validation pass.
+        self.reading("claude", "claude-a", free=1.0)
+        self.reading("claude", "claude-b", free=1.0)
+        self.reading("codex", "codex-a", free=60.0)
+        out = self.cli("--select", "--role", "default")
+        self.assertEqual(out.returncode, 3)
+        self.assertEqual(out.stdout.strip(), "", out.stdout)
+
+    def test_select_keeps_the_walk_off_the_answer(self):
+        # stdout is parsed; a reason landing there would be read as an account
+        self.reading("claude", "claude-a", free=1.0)
+        self.reading("claude", "claude-b", free=60.0)
+        self.reading("codex", "codex-a", free=60.0)
+        out = self.cli("--select", "--role", "default")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertNotIn("at or below", out.stdout)
+        self.assertIn("at or below", out.stderr)
+        self.assertEqual(len([l for l in out.stdout.splitlines() if l.strip()]), 2)
+
+    def test_select_records_the_decision_it_deferred_on(self):
+        # the run that did not happen is the one worth being able to explain
+        self.reading("claude", "claude-a", free=1.0)
+        self.reading("claude", "claude-b", free=1.0)
+        self.assertEqual(self.cli("--select", "--record", "--role", "default").returncode, 3)
+        with open(os.path.join(self.logs, "select.jsonl")) as f:
+            lines = [json.loads(l) for l in f if l.strip()]
+        self.assertTrue(any(l["tool"] == "claude" and l["chosen"] is None for l in lines), lines)
+
+    def test_select_needs_exactly_one_role(self):
+        for args in (("--select",), ("--select", "--role", "default", "--role", "rsync")):
+            with self.subTest(args=args):
+                out = self.cli(*args)
+                self.assertEqual(out.returncode, 2, out.stdout + out.stderr)
+                self.assertIn("exactly one --role", out.stderr)
 
 
 if __name__ == "__main__":

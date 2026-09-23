@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
-"""Which account each role would use, given what the accounts have left.
+"""Which account each role runs on, given what the accounts have left.
 
-Shadow mode. Nothing here changes a role link or a run: it reports the choice
-it would make and why, so the reasoning can be checked against real runs before
-anything depends on it.
+This decides; it does not act. Nothing here repoints a role link or starts
+anything - run-reviewprs.sh asks with --select once it holds the run lock, and
+applies the answer after re-checking the directory for itself.
 
     accounts.py                  what every role would select
     accounts.py --role rsync     one role
     accounts.py --json           the same as records
     accounts.py --record         append the decisions to $REVIEW_LOGS/select.jsonl
     accounts.py --live           read quota now rather than using a recent recording
+    accounts.py --select --role R  one role, for a caller: "tool<TAB>name<TAB>dir"
+                                   per line on stdout, the walk on stderr, and
+                                   exit 3 if any tool has nothing usable
 
 The policy is $REVIEW_AUTH/policy.json - an ordered list of account directory
 names per tool and role. Order is priority; the list is also the whole of what
@@ -29,6 +32,10 @@ the project's subscription cannot reach it by running out of its own.
 
 A missing or unreadable policy is refused rather than defaulted: guessing which
 account may pay is the one thing this must never do.
+
+Nothing here spends money. An account whose included allowance is gone is passed
+over even where the tool would happily carry on against credits: an unattended
+run may stop, but it may not start billing.
 """
 import datetime
 import json
@@ -43,6 +50,9 @@ AUTH = quota.AUTH
 POLICY = os.path.join(AUTH, "policy.json")
 DEFAULT_MIN_FREE = 5.0
 DEFAULT_FRESH_MINUTES = 15
+
+
+NOTHING_USABLE = 3      # a run may defer on this; a policy error it may not
 
 
 class PolicyError(Exception):
@@ -158,6 +168,12 @@ def choose(tool, role, policy, live=False, cache=None):
             step["skipped"] = "quota unknown: %s" % str(rec["error"])[:80]
         elif rec.get("free_pct") is None:
             step["skipped"] = "quota unknown"
+        elif rec.get("ordinary_usage_allowed") is False:
+            # the included allowance is gone. Whatever the window says, work
+            # from here is paid overage, and these runs may not spend money.
+            # Only an explicit False refuses: the field is a Codex one, and a
+            # tool that does not report it has no overage to refuse.
+            step["skipped"] = "included allowance exhausted, would spend credits"
         elif rec["free_pct"] <= min_free:
             step["skipped"] = "%.1f%% left, at or below %.1f%%" % (rec["free_pct"], min_free)
         else:
@@ -174,9 +190,23 @@ def choose(tool, role, policy, live=False, cache=None):
     return decision
 
 
+def _write(record, decisions):
+    if not record:
+        return
+    logs = os.environ.get("REVIEW_LOGS") or os.path.join(HOME, "review", "logs")
+    os.makedirs(logs, exist_ok=True)
+    with open(os.path.join(logs, "select.jsonl"), "a") as f:
+        for d in decisions:
+            f.write(json.dumps(d) + "\n")
+
+
 def main(argv):
     roles = [a for i, a in enumerate(argv) if argv[i - 1] == "--role"] or None
     as_json, record, live = ("--json" in argv), ("--record" in argv), ("--live" in argv)
+    select = "--select" in argv
+    if select and (not roles or len(roles) != 1):
+        print("--select needs exactly one --role", file=sys.stderr)
+        return 2
     path = None
     if "--policy" in argv:
         i = argv.index("--policy")
@@ -199,6 +229,27 @@ def main(argv):
     for role in wanted:
         for tool in sorted(policy["roles"][role]):
             decisions.append(choose(tool, role, policy, live=live, cache=cache))
+    if select:
+        # stdout is for the caller and carries only what it must act on; the
+        # walk goes to stderr, where a run log shows why an account was passed
+        # over without the caller having to parse it.
+        for d in decisions:
+            for step in d["considered"]:
+                print("  %-7s %-20s %s" % (
+                    d["tool"], step["account"],
+                    "CHOSEN" if step.get("chosen") else step.get("skipped")),
+                    file=sys.stderr)
+        short = [d for d in decisions if not d["chosen"]]
+        if short:
+            for d in short:
+                print("no %s account usable for role %s: %s"
+                      % (d["tool"], d["role"], d["reason"]), file=sys.stderr)
+            _write(record, decisions)
+            return NOTHING_USABLE
+        for d in decisions:
+            print("%s\t%s\t%s" % (d["tool"], d["chosen"], d["dir"]))
+        _write(record, decisions)
+        return 0
     if as_json:
         print(json.dumps(decisions, indent=2))
     else:
@@ -211,12 +262,7 @@ def main(argv):
                 if step.get("chosen"):
                     continue
                 print("             %-20s %s" % (step["account"], step.get("skipped")))
-    if record:
-        logs = os.environ.get("REVIEW_LOGS") or os.path.join(HOME, "review", "logs")
-        os.makedirs(logs, exist_ok=True)
-        with open(os.path.join(logs, "select.jsonl"), "a") as f:
-            for d in decisions:
-                f.write(json.dumps(d) + "\n")
+    _write(record, decisions)
     return 0
 
 

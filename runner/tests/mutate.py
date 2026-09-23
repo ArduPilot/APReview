@@ -272,8 +272,8 @@ M = [
  ("selfresh", ACC, "            if age is not None and 0 <= age <= fresh_minutes:",
                    "            if age is not None:"),
  ("selstale", ACC, "        rec = quota.recorded().get(key)", "        rec = None"),
- ("selnorecord", ACC, "    if record:", "    if False:"),
- ("selalwaysrecord", ACC, "    if record:", "    if True:"),
+ ("selnorecord", ACC, "    if not record:\n        return", "    if True:\n        return"),
+ ("selalwaysrecord", ACC, "    if not record:\n        return", "    if False:\n        return"),
  # times on the page are the box's own, not the CLIs' UTC
  ("rolloverutc", PAGE, "        soonest.astimezone().strftime('%a %d %b %H:%M'),",
                        "        soonest.strftime('%a %d %b %H:%M'),"),
@@ -346,6 +346,18 @@ M = [
                       'if true; then'),
  ("earlyprobe", AUT, '    lockf="$AUTH/.$tool-$role.lock"',
                      '    got=$(account_of "$tool" "$dir")\n    lockf="$AUTH/.$tool-$role.lock"'),
+
+ # --- the quota policy, and the money it must not spend ------------------------
+ ('selovererage', ACC, '        elif rec.get("ordinary_usage_allowed") is False:',
+                       '        elif False:'),
+ ('selovereager', ACC, '        elif rec.get("ordinary_usage_allowed") is False:',
+                       '        elif rec.get("ordinary_usage_allowed") is not True:'),
+ ('selpartial', ACC, '        short = [d for d in decisions if not d["chosen"]]',
+                     '        short = []'),
+ ('selexitcode', ACC, '            return NOTHING_USABLE\n', '            return 1\n'),
+ ('selwalkstdout', ACC,
+  '                    "CHOSEN" if step.get("chosen") else step.get("skipped")),\n                    file=sys.stderr)',
+  '                    "CHOSEN" if step.get("chosen") else step.get("skipped")))'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -563,6 +575,12 @@ REGRESSION = {
     'nofallbackpin': 'Guard.test_a_symlinked_tool_home_is_pinned_even_with_no_role_link',
     'proberunenv': 'UsageProbe.test_a_run_probe_keeps_the_account_the_run_selected',
     'earlyprobe': 'Switching.test_an_unsafe_account_is_refused_before_the_cli_reads_it',
+
+    'selovererage': 'Accounts.test_an_account_past_its_included_allowance_is_passed_over',
+    'selovereager': 'Accounts.test_a_tool_that_reports_no_allowance_field_is_not_refused',
+    'selpartial': 'Accounts.test_select_answers_with_nothing_at_all_when_one_tool_is_short',
+    'selexitcode': 'Accounts.test_select_says_nothing_usable_with_an_exit_code_of_its_own',
+    'selwalkstdout': 'Accounts.test_select_keeps_the_walk_off_the_answer',
 }
 
 def main():
