@@ -358,6 +358,21 @@ M = [
  ('selwalkstdout', ACC,
   '                    "CHOSEN" if step.get("chosen") else step.get("skipped")),\n                    file=sys.stderr)',
   '                    "CHOSEN" if step.get("chosen") else step.get("skipped")))'),
+ ('polignored', RUN, '    [ -e "$REVIEW_AUTH/policy.json" ] || {',
+                     '    [ -e "/nonexistent/policy.json" ] || {'),
+ ('poldefercarries', RUN,
+  '           echo "finish=$(date -Is) status=deferred-no-quota"\n           exit 0 ;;',
+  '           return 0 ;;'),
+ ('polbrokencarries', RUN,
+  '        *) echo "FATAL: the account policy could not be applied (accounts.py exit $rc)"\n           echo "finish=$(date -Is) status=account-policy-error"\n           exit 1 ;;',
+  '        *) return 0 ;;'),
+ ('poltrustspath', RUN,
+  '        account_dir_ok "$tool" "$dir" "the $tool account $name" || {\n            echo "FATAL: the account policy chose $name for $tool, which is not"\n            echo "       usable as an account directory"\n            echo "finish=$(date -Is) status=account-policy-error"\n            exit 1; }',
+  '        :'),
+ ('polnolocksweep', RUN, '    clear_stale_oauth_locks\n', ''),
+ ('lockskipruns', RUN,
+  '        echo "finish=$(date -Is) status=skipped-locked"\n        exit 0',
+  '        echo "finish=$(date -Is) status=skipped-locked"'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -581,6 +596,12 @@ REGRESSION = {
     'selpartial': 'Accounts.test_select_answers_with_nothing_at_all_when_one_tool_is_short',
     'selexitcode': 'Accounts.test_select_says_nothing_usable_with_an_exit_code_of_its_own',
     'selwalkstdout': 'Accounts.test_select_keeps_the_walk_off_the_answer',
+    'polignored': 'Guard.test_the_policy_moves_a_run_off_a_spent_account',
+    'poldefercarries': 'Guard.test_a_run_defers_when_every_listed_account_is_spent',
+    'polbrokencarries': 'Guard.test_a_policy_that_cannot_be_applied_stops_the_run',
+    'poltrustspath': 'Guard.test_the_runner_does_not_take_the_selectors_word_for_the_path',
+    'polnolocksweep': 'Guard.test_a_lock_left_in_another_account_is_cleared_before_it_is_read',
+    'lockskipruns': 'Guard.test_a_run_that_loses_the_lock_selects_nothing',
 }
 
 def main():

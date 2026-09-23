@@ -188,6 +188,90 @@ echo $$ >&9
 LOCKED=1
 fi
 
+# Quota-directed selection, after the lock and not before it. A run that waited
+# two hours for the lock would otherwise have chosen on a reading taken before
+# the wait, and a run that never gets the lock would pin - and be charged for -
+# an account it never spends.
+#
+# The role links still say which account a role uses; the policy says what that
+# role may fall back to and in what order, and a role can only ever reach the
+# accounts its own list names. Everything after this point - the sign-in check,
+# the ACCOUNT records, the billing-provider checks - runs against whatever was
+# selected here, so nothing is validated any less than before.
+#
+# No policy file means the feature is not configured and the role links decide,
+# as they always did. A policy that exists but cannot be applied is fatal: that
+# is a policy meant to be in force which is not, and guessing which account may
+# pay is the one thing this must never do.
+select_by_quota() {
+    local out err rc tool name dir var n=0
+    [ -x "$REVIEW_ROOT/bin/accounts.py" ] || {
+        echo "account policy: accounts.py not installed; using the role links"
+        return 0; }
+    [ -e "$REVIEW_AUTH/policy.json" ] || {
+        echo "account policy: none at $REVIEW_AUTH/policy.json; using the role links"
+        return 0; }
+    # Reading a quota starts the CLI, and a refresh lock left behind by an
+    # earlier death makes that reading fail - which reads as "no quota left"
+    # and would defer a run that had plenty.
+    clear_stale_oauth_locks
+    err="$REVIEW_LOGS/.select.$$"
+    # a dry run reports; it does not put a decision on the record
+    [ "$DRY" = 1 ] && set -- --select --role "$ROLE" || set -- --select --record --role "$ROLE"
+    out=$("$REVIEW_ROOT/bin/accounts.py" "$@" 2>"$err")
+    rc=$?
+    sed 's/^/  /' "$err" 2>/dev/null; rm -f "$err"
+    case "$rc" in
+        0) ;;
+        3) echo "DEFERRED: no account with quota to spare for role $ROLE"
+           echo "          nothing was started and nothing was spent; the next"
+           echo "          scheduled run of this mode will try again"
+           echo "finish=$(date -Is) status=deferred-no-quota"
+           exit 0 ;;
+        *) echo "FATAL: the account policy could not be applied (accounts.py exit $rc)"
+           echo "finish=$(date -Is) status=account-policy-error"
+           exit 1 ;;
+    esac
+    while IFS=$'\t' read -r tool name dir; do
+        [ -n "$tool" ] || continue
+        case "$tool" in
+            claude) var=CLAUDE_CONFIG_DIR ;;
+            codex)  var=CODEX_HOME ;;
+            *) echo "FATAL: the account policy named an unknown tool: $tool"
+               echo "finish=$(date -Is) status=account-policy-error"
+               exit 1 ;;
+        esac
+        # Not on accounts.py's word. Containment, ownership and the granted
+        # review root are what the layout rests on, and they are enforced on a
+        # selected directory exactly as on a role link.
+        account_dir_ok "$tool" "$dir" "the $tool account $name" || {
+            echo "FATAL: the account policy chose $name for $tool, which is not"
+            echo "       usable as an account directory"
+            echo "finish=$(date -Is) status=account-policy-error"
+            exit 1; }
+        dir=$(role_config_dir "$tool" "$ROLE" "$dir")
+        if [ -n "$dir" ]; then export "$var=$dir"; else unset "$var"; fi
+        echo "account policy: $tool -> $name"
+        n=$((n + 1))
+    done <<EOS
+$out
+EOS
+    [ "$n" -gt 0 ] || {
+        echo "FATAL: the account policy selected nothing for role $ROLE"
+        echo "finish=$(date -Is) status=account-policy-error"
+        exit 1; }
+}
+
+if [ "$DRY" = 1 ]; then
+    # say what it would pick, pin nothing, and never cut the dry run short: the
+    # exits inside leave the subshell, not the script
+    ( select_by_quota ) || true
+else
+    select_by_quota
+    CLAUDE_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+    CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+fi
+
 case "$MODE" in
     all) PROMPT="/reviewprs" ;;
     *)   PROMPT="/reviewprs $MODE" ;;

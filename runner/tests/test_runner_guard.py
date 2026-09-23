@@ -5,6 +5,8 @@ The account preflight is extracted into a bounded fixture, with a throwaway home
 and stub CLIs. The fixture contains no review-launch code. Deleting the runner's
 account-selection block must still turn these tests red.
 """
+import datetime
+import fcntl
 import json
 import os
 import re
@@ -41,6 +43,11 @@ class Guard(unittest.TestCase):
         # inspect processes, spend quota or publish from the developer's box.
         for name in ("reap-orphans.sh", "claude-usage-probe.sh", "publish-runs-page.sh"):
             stub(os.path.join(r, "bin", name), 'exit 0')
+        # the quota selector, where the runner looks for it. No policy file is
+        # written here, so by default these tests see the behaviour of a box
+        # that has not configured one: the role links decide.
+        for name in ("accounts.py", "quota.py"):
+            shutil.copy(os.path.join(BIN, name), os.path.join(r, "bin"))
         # The account pre-flight is extracted and run on its own, so these tests
         # stay fast and start nothing. The cost is that everything AFTER the
         # marker - the permission and gh pre-flights, the quota probe, the
@@ -160,6 +167,171 @@ fi''')
     @property
     def AUTH_DENY(self):
         return ["Bash(git push)", "Bash(git push:*)", "Read(/%s/**)" % self.auth]
+
+    # --- the quota policy ----------------------------------------------------
+    def policy(self, roles, **kw):
+        kw["roles"] = roles
+        with open(os.path.join(self.auth, "policy.json"), "w") as f:
+            json.dump(kw, f)
+
+    def quota_reading(self, tool, name, free=60.0, **extra):
+        """A recording as quota.py --record leaves one, fresh enough to be used.
+
+        If the freshness rule broke, the selector would ask the account instead,
+        and the stub CLIs here answer nothing usable - so these tests fail
+        rather than quietly exercising a different path.
+        """
+        rec = {"at": datetime.datetime.now().astimezone().isoformat(),
+               "tool": tool, "dir": os.path.join(self.auth, name),
+               "account": name, "free_pct": free, "windows": []}
+        rec.update(extra)
+        with open(os.path.join(self.logs, "quota.jsonl"), "a") as f:
+            f.write(json.dumps(rec) + "\n")
+
+    @property
+    def logs(self):
+        return os.path.join(self.home, "review", "logs")
+
+    def guard_live(self, mode, **env):
+        """The account pre-flight as a real run reaches it: lock taken, log written.
+
+        Not --dry-run. A dry run neither takes the lock nor pins an account, so
+        it cannot show what a run would actually have been charged to.
+        """
+        e = {"HOME": self.home, "PATH": self.stubs + ":/usr/bin:/bin",
+             "SHELL": "/bin/bash", "LANG": "C.UTF-8"}
+        e.update(env)
+        out = subprocess.run([self.guard, mode], capture_output=True, text=True, env=e)
+        path = os.path.join(self.logs, "latest-%s.log" % mode)
+        log = open(path).read() if os.path.exists(path) else ""
+        return out.returncode, log + out.stdout + out.stderr
+
+    def test_no_policy_leaves_the_role_links_deciding(self):
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("using the role links", log)
+        self.assertIn("admin@example.org", log)      # what claude-default points at
+
+    def test_the_policy_moves_a_run_off_a_spent_account(self):
+        self.policy({"default": {"claude": ["claude-ardupilot", "claude-personal"]}},
+                    min_free_pct=5, fresh_minutes=60)
+        self.quota_reading("claude", "claude-ardupilot", free=2.0)
+        self.quota_reading("claude", "claude-personal", free=80.0)
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 0, log)
+        # the link still says ardupilot, so only the policy can have moved it -
+        # and the address is the CLI's, not the announcement's
+        self.assertEqual(os.readlink(os.path.join(self.auth, "claude-default")),
+                         "claude-ardupilot")
+        self.assertIn("account policy: claude -> claude-personal", log)
+        self.assertIn("claude account: someone@example.com", log)
+
+    def test_a_healthy_first_account_keeps_the_run(self):
+        self.policy({"default": {"claude": ["claude-ardupilot", "claude-personal"]}},
+                    min_free_pct=5, fresh_minutes=60)
+        self.quota_reading("claude", "claude-ardupilot", free=80.0)
+        self.quota_reading("claude", "claude-personal", free=99.0)
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("claude account: admin@example.org", log)   # order, not most free
+
+    def test_a_run_defers_when_every_listed_account_is_spent(self):
+        self.policy({"default": {"claude": ["claude-ardupilot", "claude-personal"]}},
+                    min_free_pct=5, fresh_minutes=60)
+        self.quota_reading("claude", "claude-ardupilot", free=2.0)
+        self.quota_reading("claude", "claude-personal", free=0.0)
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 0, log)              # a slot held, not a failure
+        self.assertIn("status=deferred-no-quota", log)
+        self.assertNotIn("claude account:", log)  # it never settled on one
+        self.assertFalse(os.path.exists(os.path.join(self.home, "launched")), log)
+
+    def test_a_run_defers_rather_than_spending_past_the_included_allowance(self):
+        # the window says 95% left. Ordinary usage is barred, so going on would
+        # be paid overage, and these runs may not spend money.
+        self.policy({"default": {"codex": ["codex-personal"]}},
+                    min_free_pct=5, fresh_minutes=60)
+        self.quota_reading("codex", "codex-personal", free=95.0,
+                           ordinary_usage_allowed=False)
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("status=deferred-no-quota", log)
+        self.assertIn("would spend credits", log)
+
+    def test_a_policy_that_cannot_be_applied_stops_the_run(self):
+        # not the same as having no policy: this one is meant to be in force,
+        # and a run that carried on would be choosing its own account
+        with open(os.path.join(self.auth, "policy.json"), "w") as f:
+            f.write("{ not json")
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 1, log)
+        self.assertIn("status=account-policy-error", log)
+        self.assertNotIn("claude account:", log)
+
+    def test_the_sign_in_checks_still_run_on_what_the_policy_chose(self):
+        # the policy picks the account; it excuses it from nothing. Were
+        # selection to happen after these checks, the wrong account would pass.
+        self.policy({"default": {"claude": ["claude-personal"]}},
+                    min_free_pct=5, fresh_minutes=60)
+        self.quota_reading("claude", "claude-personal", free=80.0)
+        with open(os.path.join(self.auth, "claude-personal", "ACCOUNT"), "w") as f:
+            f.write("other@example.org\n")
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 1, log)
+        self.assertIn("status=wrong-claude-account", log)
+        self.assertIn("records other@example.org", log)
+
+    def test_the_runner_does_not_take_the_selectors_word_for_the_path(self):
+        # accounts.py contains the choice to the auth root, and so does the
+        # runner. Two copies, because a directory outside it reaching a run is
+        # how credentials end up inside the tree the agent is handed.
+        self.policy({"default": {"claude": ["claude-personal"]}}, min_free_pct=5)
+        outside = os.path.join(self.home, "elsewhere")
+        os.makedirs(outside)
+        stub(os.path.join(self.home, "review", "bin", "accounts.py"),
+             "printf 'claude\\tclaude-personal\\t%s\\n' " + shlex.quote(outside))
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 1, log)
+        self.assertIn("status=account-policy-error", log)
+
+    def test_a_run_that_loses_the_lock_selects_nothing(self):
+        # it is not going to spend anything, so it must not pin an account, ask
+        # for a reading, or leave a decision on the record. A queued run that
+        # chose before the wait would also be choosing on a stale figure.
+        self.policy({"default": {"claude": ["claude-ardupilot"]}},
+                    min_free_pct=5, fresh_minutes=60)
+        self.quota_reading("claude", "claude-ardupilot", free=80.0)
+        fd = os.open(os.path.join(self.home, "review", "etc", "reviewprs.lock"),
+                     os.O_CREAT | os.O_RDWR, 0o600)
+        self.addCleanup(os.close, fd)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 0, log)
+        self.assertIn("status=skipped-locked", log)
+        self.assertNotIn("account policy:", log)
+        self.assertFalse(os.path.exists(os.path.join(self.logs, "select.jsonl")), log)
+
+    def test_a_lock_left_in_another_account_is_cleared_before_it_is_read(self):
+        # the reading starts the CLI in each account's own directory, and a
+        # refresh lock left there by an earlier death makes it fail - which
+        # reads as "no quota" and would defer a run that had plenty
+        self.policy({"default": {"claude": ["claude-ardupilot", "claude-personal"]}},
+                    min_free_pct=5, fresh_minutes=60)
+        self.quota_reading("claude", "claude-ardupilot", free=80.0)
+        stale = os.path.join(self.auth, "claude-personal", ".oauth_refresh.lock")
+        os.makedirs(stale)
+        rc, log = self.guard_live("followup")
+        self.assertEqual(rc, 0, log)
+        self.assertFalse(os.path.exists(stale), log)
+
+    def test_a_dry_run_reports_a_choice_without_recording_it(self):
+        self.policy({"default": {"claude": ["claude-ardupilot"]}},
+                    min_free_pct=5, fresh_minutes=60)
+        self.quota_reading("claude", "claude-ardupilot", free=80.0)
+        out = self.run_mode("followup")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("account policy: claude -> claude-ardupilot", out.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.logs, "select.jsonl")))
 
     def test_credentials_inside_the_granted_directory_must_be_denied(self):
         # the agent gets --add-dir $REVIEW_ROOT and reads other people's pull
