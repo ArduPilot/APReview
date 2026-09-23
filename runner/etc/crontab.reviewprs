@@ -20,6 +20,13 @@ MAILTO=""
 # refresh - see docs/review-box.md.
 5 * * * *   . $HOME/review/bin/review-env.sh >/dev/null 2>&1; $HOME/review/bin/quota.py --record >> $HOME/review/logs/quota-probe.log 2>&1
 
+# What each role would select, given those readings. Shadow mode: accounts.py
+# changes no role link and no run, so this records the reasoning to be compared
+# against what the runs actually used. At :15, clear of the quota reading at :05
+# and the usage probe at :35 - each of these starts a CLI, and two on one
+# account contend for its OAuth refresh.
+15 * * * *   . $HOME/review/bin/review-env.sh >/dev/null 2>&1; $HOME/review/bin/accounts.py --record >> $HOME/review/logs/select-probe.log 2>&1
+
 # Base clones refreshed nightly, well clear of the review slots.
 30 2 * * *   $HOME/review/bin/refresh-repos.sh
 
