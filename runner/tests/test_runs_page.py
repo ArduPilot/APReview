@@ -9,6 +9,7 @@ longer exists and to one hardcoded directory each.
 import datetime
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -481,6 +482,30 @@ class Dashboard(unittest.TestCase):
         # run still going, with an elapsed time that climbs for ever
         page = self.refusal("wrong-codex-account")
         self.assertIn("wrong-account", page)
+        self.assertNotIn(">running<", page)
+
+    def test_a_deferred_run_is_shown_as_held_by_quota_not_as_running(self):
+        # it printed a finish line and stopped. An unrecognised status displays
+        # as a run still going, with an elapsed time that climbs for ever.
+        page = self.refusal("deferred-no-quota")
+        self.assertIn("deferred", page)
+        self.assertNotIn(">running<", page)
+
+    def test_a_deferred_run_counts_against_quota_and_not_against_failures(self):
+        # nothing broke: every account the role may use was spent
+        page = self.refusal("deferred-no-quota")
+        self.assertIn('class="badge b-quota">deferred<', page)
+        self.assertIn('<div class="k">Failed</div><div class="v">0</div>', page)
+        self.assertIn('<div class="k">Blocked on quota</div><div class="v">1</div>', page)
+        # and not in the per-mode Failed column either
+        row = re.search(r"<tr><td>followup</td>(.*?)</tr>", page).group(1)
+        self.assertEqual(re.findall(r"<td>(\d+)</td>", row)[:4], ["1", "0", "0", "0"])
+
+    def test_a_policy_that_could_not_be_applied_is_shown_as_a_failure(self):
+        # the opposite case: a policy meant to be in force which is not
+        page = self.refusal("account-policy-error")
+        self.assertIn('class="badge b-fail">account-policy<', page)
+        self.assertIn('<div class="k">Failed</div><div class="v">1</div>', page)
         self.assertNotIn(">running<", page)
 
     def stalled_log(self, tail="", age_minutes=180, started=240):

@@ -73,7 +73,7 @@ M = [
  ('permissionfinish', RUN, '    echo "finish=$(date -Is) status=preflight-failed"\n', ''),
  ('workfinish', RUN, '    echo "finish=$(date -Is) status=no-work-dir"\n', ''),
  ('pageterminal', PAGE, "elif re.search(r'status=(preflight-failed|no-work-dir)\\b', txt):", 'elif False:'),
- ('pagefailcount', PAGE, "'wrong-account', 'preflight-failed', 'no-work-dir'))", "'wrong-account'))"),
+ ('pagefailcount', PAGE, "'wrong-account', 'preflight-failed',\n                                               'no-work-dir', 'account-policy'))", "'wrong-account'))"),
  ('denytool', RUN, 'not rule.startswith("Read(")', 'False'),
  ('denycoverage', RUN, 'os.path.commonpath([root, os.path.realpath(auth)]) == root', 'True'),
  ('denyancestor', RUN, 'os.path.commonpath([root, os.path.realpath(auth)]) == root', 'root == os.path.realpath(auth)'),
@@ -373,6 +373,10 @@ M = [
  ('lockskipruns', RUN,
   '        echo "finish=$(date -Is) status=skipped-locked"\n        exit 0',
   '        echo "finish=$(date -Is) status=skipped-locked"'),
+ ('pagedeferred', PAGE, "    elif 'status=deferred-no-quota' in txt:", "    elif False:"),
+ ('pagepolicyerr', PAGE, "    elif 'status=account-policy-error' in txt:", "    elif False:"),
+ ('pagedeferfail', PAGE, "    elif r['status'] not in ('running', 'queued', 'deferred'): m['fail'] += 1",
+                         "    elif r['status'] not in ('running',): m['fail'] += 1"),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -602,6 +606,9 @@ REGRESSION = {
     'poltrustspath': 'Guard.test_the_runner_does_not_take_the_selectors_word_for_the_path',
     'polnolocksweep': 'Guard.test_a_lock_left_in_another_account_is_cleared_before_it_is_read',
     'lockskipruns': 'Guard.test_a_run_that_loses_the_lock_selects_nothing',
+    'pagedeferred': 'Dashboard.test_a_deferred_run_is_shown_as_held_by_quota_not_as_running',
+    'pagepolicyerr': 'Dashboard.test_a_policy_that_could_not_be_applied_is_shown_as_a_failure',
+    'pagedeferfail': 'Dashboard.test_a_deferred_run_counts_against_quota_and_not_against_failures',
 }
 
 def main():

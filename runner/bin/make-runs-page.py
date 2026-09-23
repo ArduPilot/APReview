@@ -109,6 +109,15 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
         # as a run still going, with an elapsed time that climbs for ever.
         r['status'] = 'wrong-account'
         r['elapsed'] = 0
+    elif 'status=deferred-no-quota' in txt:
+        # every account the role may use was spent, so the run held its slot and
+        # started nothing. Not a failure and not a lock skip: the work is still
+        # waiting, and it is quota that is holding it up.
+        r['status'] = 'deferred'
+        r['elapsed'] = 0
+    elif 'status=account-policy-error' in txt:
+        r['status'] = 'account-policy'
+        r['elapsed'] = 0
     elif 'status=quota-exhausted' in txt:
         r['status'] = 'quota'
         r['elapsed'] = 0
@@ -477,7 +486,9 @@ for r in runs:
         m['ok'] += 1
         if r['elapsed'] is not None: m['mins'].append(r['elapsed'])
     elif r['status'] == 'skipped': m['skip'] += 1
-    elif r['status'] not in ('running',): m['fail'] += 1
+    # a run still going, one still behind the lock, and one held off because
+    # its accounts are spent have all failed at nothing
+    elif r['status'] not in ('running', 'queued', 'deferred'): m['fail'] += 1
     m['tok'] += r['tin'] + r['tout'] + r['tcr'] + r['tcw']
 
 
@@ -608,7 +619,8 @@ for lab, gen, fup, npr, a, c, rc in labels:
 BADGE = {'ok': 'b-ok', 'skipped': 'b-skip', 'running': 'b-run', 'quota': 'b-quota',
          'failed': 'b-fail', 'lock-timeout': 'b-fail', 'no-gh-auth': 'b-fail',
          'wrong-account': 'b-fail', 'preflight-failed': 'b-fail', 'no-work-dir': 'b-fail',
-         'died': 'b-fail', 'queued': 'b-skip'}
+         'died': 'b-fail', 'queued': 'b-skip', 'deferred': 'b-quota',
+         'account-policy': 'b-fail'}
 
 rows = []
 for r in runs:
@@ -792,8 +804,9 @@ document.querySelectorAll('table.sortable').forEach(function(t){
 nok = sum(1 for r in runs if r['status'] == 'ok')
 nskip = sum(1 for r in runs if r['status'] == 'skipped')
 nfail = sum(1 for r in runs if r['status'] in ('failed', 'lock-timeout', 'no-gh-auth',
-                                               'wrong-account', 'preflight-failed', 'no-work-dir'))
-nquota = sum(1 for r in runs if r['status'] == 'quota')
+                                               'wrong-account', 'preflight-failed',
+                                               'no-work-dir', 'account-policy'))
+nquota = sum(1 for r in runs if r['status'] in ('quota', 'deferred'))
 
 doc = (doc.replace('__DAYS__', str(DAYS))
           .replace('__GEN__', now.strftime('%a %d %b %Y %H:%M %Z'))
