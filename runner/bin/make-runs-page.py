@@ -120,7 +120,15 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
     acq = re.search(r'lock acquired at (\S+)', txt)
     if acq:
         a = parse_iso(acq.group(1))
-        if a: r['waited'] = int((a - start).total_seconds() // 60)
+        if a:
+            r['acquired'] = a
+            r['waited'] = int((a - start).total_seconds() // 60)
+    elif r['finish'] is None and 'waiting up to' in txt:
+        # Still behind the lock: it has run nothing. Saying "running" here, with
+        # a duration counting from when the process started, describes a wait as
+        # work - and the wait is what the next column is for.
+        r['status'] = 'queued'
+        r['waited'] = int((now - start).total_seconds() // 60)
 
     # result line, both old and new formats
     res = re.search(r'\|\s*----\s*\|\s*(\w+).*?turns=(\d+)', txt)
@@ -257,7 +265,9 @@ for r in runs:
     # its old readings. Missing attribution stays blank rather than guessing.
     if directory in codex_quotas and codex_identity(directory) == r.get('codex_account'):
         samples = codex_quotas[directory][0]
-    a, b = quota_at(r['start'], samples), quota_at(end, samples)
+    began = r.get('acquired') or r['start']
+    a, b = ((None, None) if r['status'] == 'queued'
+            else (quota_at(began, samples), quota_at(end, samples)))
     r['q_end'] = b
     r['q_delta'] = (b - a) if (a is not None and b is not None and b >= a) else None
 
@@ -360,7 +370,15 @@ def claude_between(a, b):
     return tot, wt
 
 for r in runs:
-    r['ctok'], r['cwt'] = claude_between(r['start'], r['finish'] or now)
+    # From the lock, not from the process. Runs are serialised by that lock, so
+    # their working windows do not overlap - but a queued run's [start, now]
+    # does overlap the run it is waiting for, and it was being credited with
+    # that run's tokens: 15.7M against an rsync run that had executed nothing.
+    if r['status'] == 'queued':
+        r['ctok'], r['cwt'] = 0, 0
+    else:
+        r['ctok'], r['cwt'] = claude_between(r.get('acquired') or r['start'],
+                                             r['finish'] or now)
 
 week_ago = now - datetime.timedelta(days=7)
 cl_week, cl_week_w = claude_between(week_ago, now)
@@ -590,7 +608,7 @@ for lab, gen, fup, npr, a, c, rc in labels:
 BADGE = {'ok': 'b-ok', 'skipped': 'b-skip', 'running': 'b-run', 'quota': 'b-quota',
          'failed': 'b-fail', 'lock-timeout': 'b-fail', 'no-gh-auth': 'b-fail',
          'wrong-account': 'b-fail', 'preflight-failed': 'b-fail', 'no-work-dir': 'b-fail',
-         'died': 'b-fail'}
+         'died': 'b-fail', 'queued': 'b-skip'}
 
 rows = []
 for r in runs:

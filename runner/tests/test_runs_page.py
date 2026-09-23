@@ -51,7 +51,7 @@ class Dashboard(unittest.TestCase):
         os.makedirs(self.auth, mode=0o700)
         self.out = os.path.join(self.home, "runs.html")
 
-    def transcript(self, account, tokens, name="s.jsonl"):
+    def transcript(self, account, tokens, name="s.jsonl", at=None):
         """A session transcript under an account directory, recent enough to count."""
         if account == "own":
             d = os.path.join(self.home, ".claude", "projects", "-p")
@@ -60,7 +60,7 @@ class Dashboard(unittest.TestCase):
         os.makedirs(d, exist_ok=True)
         now = datetime.datetime.now().astimezone()
         with open(os.path.join(d, name), "w") as f:
-            f.write(usage_line(now - datetime.timedelta(minutes=5), tokens) + "\n")
+            f.write(usage_line(at or (now - datetime.timedelta(minutes=5)), tokens) + "\n")
 
     def log(self, mode, body):
         stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -391,6 +391,74 @@ class Dashboard(unittest.TestCase):
         self.assertIn("9.0M", page)
         self.assertNotIn("18.0M", page)
 
+    # --- a run still behind the lock ----------------------------------------
+    def run_row(self, page, mode):
+        """The row for this mode in the Runs table.
+
+        Not a substring search over the page: the mode names appear in the
+        prose above the tables too, and matching those passes for the wrong
+        reason.
+        """
+        table = page.split("<h2>Runs</h2>", 1)[1]
+        rows = [r for r in table.split("<tr>") if "<td>%s</td>" % mode in r]
+        self.assertTrue(rows, "no %s row in the Runs table" % mode)
+        return rows[0]
+
+
+    def queued_log(self, started=20, mode="rsync"):
+        """A run that printed the lock wait and nothing since."""
+        start = (datetime.datetime.now().astimezone()
+                 - datetime.timedelta(minutes=started))
+        return self.log(mode, "reviewprs mode=%s  host=t  start=%s\n"
+                              "waiting up to 7200s for the run lock...\n"
+                              % (mode, start.strftime("%Y-%m-%dT%H:%M:%S%z")))
+
+    def test_a_run_behind_the_lock_is_not_shown_as_running(self):
+        self.queued_log()
+        row = self.run_row(self.build(), "rsync")
+        self.assertIn("queued", row)
+        self.assertNotIn("so far", row)          # it has run nothing to time
+
+    def test_a_queued_run_shows_its_wait_where_the_wait_belongs(self):
+        self.queued_log(started=22)
+        row = self.run_row(self.build(), "rsync")
+        self.assertIn("22m", row)
+
+    def test_a_queued_run_is_credited_with_no_tokens(self):
+        """It is waiting behind a run that is spending them.
+
+        Runs are serialised by the lock so their working windows do not
+        overlap - but a queued run's window from its own start does overlap
+        the run it is waiting for, and it was being given that run's usage.
+        """
+        self.queued_log(started=20)
+        self.transcript("claude-personal", 15_700_000)     # the other run's
+        self.build()
+        row = [r for r in self.state["runs"] if r["mode"] == "rsync"][0]
+        self.assertEqual(row["status"], "queued")
+        self.assertEqual(row["ctok"], 0)
+
+    def test_a_run_that_waited_counts_only_from_when_it_got_the_lock(self):
+        now = datetime.datetime.now().astimezone()
+        start = now - datetime.timedelta(minutes=60)
+        got = now - datetime.timedelta(minutes=10)
+        self.log("followup",
+                 "reviewprs mode=followup  host=t  start=%s\n"
+                 "waiting up to 7200s for the run lock...\n"
+                 "lock acquired at %s\n"
+                 "reviewprs mode=followup rc=0 elapsed=10m finish=%s\n"
+                 % (start.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    got.strftime("%Y-%m-%dT%H:%M:%S%z"),
+                    now.strftime("%Y-%m-%dT%H:%M:%S%z")))
+        # one transcript entry while it waited, one while it worked
+        self.transcript("claude-personal", 9_000_000, name="waiting.jsonl",
+                        at=now - datetime.timedelta(minutes=30))
+        self.transcript("claude-personal", 1_000_000, name="working.jsonl",
+                        at=now - datetime.timedelta(minutes=5))
+        self.build()
+        row = [r for r in self.state["runs"] if r["mode"] == "followup"][0]
+        self.assertEqual(row["ctok"], 1_000_000)   # not 10,000,000
+
     # --- how a refused run is shown -----------------------------------------
     def run_log(self, tail=""):
         # relative to now: the page discards anything outside its window, so a
@@ -453,7 +521,9 @@ class Dashboard(unittest.TestCase):
         # one until the timeout it stated has passed
         self.stalled_log("waiting up to 7200s for the run lock...\n",
                          age_minutes=90, started=95)
-        self.assertIn("running", self.build())
+        page = self.build()
+        self.assertIn("queued", self.run_row(page, "followup"))
+        self.assertNotIn("died", self.run_row(page, "followup"))
 
     def test_a_run_past_its_own_lock_timeout_is_called_dead(self):
         self.stalled_log("waiting up to 600s for the run lock...\n",
