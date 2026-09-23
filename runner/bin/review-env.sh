@@ -275,9 +275,19 @@ review_auth() {
         return 1
     fi
     target=$(readlink -f "$link") || return 2
+    account_dir_ok "$tool" "$target" "$tool-$role" || return 2
+    printf '%s\n' "$target"
+}
+
+# What an account directory must be, wherever the choice of it came from - a
+# role link or the quota policy. One copy of the rule: the two paths disagreeing
+# about what is acceptable is how a credential ends up somewhere it should not.
+account_dir_ok() {         # tool dir [what to call it] -> 0, or 2 with a reason
+    local tool="$1" target="$2" what="${3:-$2}" root
+    root=$(readlink -f "$REVIEW_AUTH" 2>/dev/null) || root="$REVIEW_AUTH"
     account_outside_review "$target" || return 2
     [ -d "$target" ] || {
-        echo "review_auth: $tool-$role does not resolve to a directory" >&2
+        echo "review_auth: $what does not resolve to a directory" >&2
         return 2
     }
     # Containment: an account directory lives under the auth root, or is the
@@ -285,7 +295,7 @@ review_auth() {
     case "$target/" in
         "$root"/*) ;;
         "$(readlink -f "$HOME/.$tool" 2>/dev/null)"/) ;;
-        *) echo "review_auth: $tool-$role resolves outside $REVIEW_AUTH" >&2
+        *) echo "review_auth: $what resolves outside $REVIEW_AUTH" >&2
            return 2 ;;
     esac
     # Credentials must not be reachable by other users. Enforced for the
@@ -301,7 +311,7 @@ review_auth() {
             *) echo "review_auth: note - $target is accessible by other users" >&2 ;;
         esac
     fi
-    printf '%s\n' "$target"
+    return 0
 }
 
 # Isolated git config: no https->ssh rewrite, so HTTPS clones work without a key.
@@ -352,6 +362,17 @@ clear_stale_oauth_lock() {
     else
         echo "NOTE: OAuth refresh lock held in $dir by a running claude"
     fi
+}
+
+# Before a round of quota readings: each one starts the CLI in a different
+# config directory, and any of them can be holding a lock from an earlier death.
+clear_stale_oauth_locks() {
+    local d
+    for d in "$HOME/.claude" "$REVIEW_AUTH"/claude-*; do
+        [ -d "$d" ] || continue
+        [ -L "$d" ] && continue        # a role link; its target is in the list
+        clear_stale_oauth_lock "$d"
+    done
 }
 
 # Which GitHub accounts' comments count as ours: the account posting now, plus
