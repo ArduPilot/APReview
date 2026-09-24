@@ -453,7 +453,9 @@ python3 -m pymavlink.tools.mavgen --lang=<L> --wire-protocol=2.0 -o <out> $D/<di
 | language | compiler | builds |
 | --- | --- | --- |
 | C, C++11 | gcc, g++ | yes |
-| Python, JavaScript, TypeScript, Lua, WLua | interpreters | yes |
+| Python, JavaScript | interpreters | yes |
+| Lua, WLua | `luac5.4 -p` | yes |
+| TypeScript | `tsc --noEmit` | no (see below) |
 | Java | `javac` | v1 and v2 |
 | Ada | `gprbuild`, then run `obj/test` | v1 and v2, `minimal` and `standard` |
 | CS | `dotnet build -f netstandard2.0` | v1 and v2 |
@@ -507,9 +509,20 @@ include path or nothing resolves:
 flexspin -2 -L /opt/flexspin/Lib -o /tmp/out.binary <out>.spin2
 ```
 
-### Four defects this found
+**TypeScript** writes into `<out>/enums` and `<out>/messages` without creating
+them, so generation exits 1 with no message unless they exist already. Typecheck
+with its own `tsconfig.json` and no file arguments - naming files on the command
+line makes `tsc` stop at `TS5112` before checking anything, which looks exactly
+like success:
 
-All four are in master, none is new, and none is reachable without a compiler.
+```
+mkdir -p <out>/enums <out>/messages
+cd <out> && tsc --noEmit --skipLibCheck
+```
+
+### Six defects this found
+
+All six are in master, none is new, and none is reachable without a compiler.
 
 - **ObjC, any field with a multi-line description.** `mavgen_objc.py:269` emits
   `//! ${description}` - a one-line comment for text that is not one line, so
@@ -532,6 +545,14 @@ All four are in master, none is new, and none is reachable without a compiler.
   `wire_protocol_version` at all: the generator is v1-only and says nothing when
   asked for v2. `test_generate_all.sh` runs `--lang='Swift' --wire-protocol=2.0`
   and passes, because it only generates.
+- **TypeScript has the same multi-line description leak as ObjC.** The comment
+  is `// ${description}` on one line, so everything after the first line of
+  `MAV_CMD_DO_FIGURE_EIGHT`'s description becomes TypeScript. 1761 errors across
+  `mav-cmd`, `mav-frame`, `mav-ftp-err`, `mav-protocol-capability`,
+  `mav-standard-mode`, `autopilot-version` and `storage-information`.
+- **TypeScript does not create its own output directories.** `generate()` opens
+  `<out>/enums/...` without `mkdir`, so a first run into a fresh directory dies
+  with `FileNotFoundError` that mavgen reports only as exit 1.
 - **Ada, `common.xml` and `ardupilotmega.xml`.** `mavgen_ada.py:459` asserts
   `types_size[f.enum] == f.type_length` and raises `Different size for one enum`,
   so generation stops with a traceback before writing anything. `minimal` and
