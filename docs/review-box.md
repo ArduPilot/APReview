@@ -458,8 +458,8 @@ python3 -m pymavlink.tools.mavgen --lang=<L> --wire-protocol=2.0 -o <out> $D/<di
 | Ada | `gprbuild`, then run `obj/test` | v1 and v2, `minimal` and `standard` |
 | CS | `dotnet build -f netstandard2.0` | v1 and v2 |
 | ObjC | `gcc -x objective-c` + GNUstep | v1 140/144, v2 228/237 (see below) |
-| Swift | `swiftc` | **no compiler on this box** |
-| Spin2 | `flexspin` | **no compiler on this box** |
+| Swift | `swiftc` | v1 only (see below) |
+| Spin2 | `flexspin -2` | v1 and v2 |
 
 **Java** needs nothing special:
 
@@ -493,9 +493,23 @@ gcc -c -x objective-c $(gnustep-config --objc-flags) -include Foundation/Foundat
     $INC -I<c-out> -I<c-out>/<dialect> <file>.m -o <file>.o
 ```
 
-### Three defects this found
+**Swift** has no build file; compile the sources as a module:
 
-All three are in master, none is new, and none is reachable without a compiler.
+```
+cd <out> && swiftc -emit-module -module-name MAVLink -o /tmp/m.swiftmodule $(find . -name '*.swift')
+```
+
+**Spin2** emits one file, named after `--output` rather than placed in it, so
+`-o <out>` writes `<out>.spin2`. `-2` selects the P2, and `Lib` has to be on the
+include path or nothing resolves:
+
+```
+flexspin -2 -L /opt/flexspin/Lib -o /tmp/out.binary <out>.spin2
+```
+
+### Four defects this found
+
+All four are in master, none is new, and none is reachable without a compiler.
 
 - **ObjC, any field with a multi-line description.** `mavgen_objc.py:269` emits
   `//! ${description}` - a one-line comment for text that is not one line, so
@@ -510,6 +524,14 @@ All three are in master, none is new, and none is reachable without a compiler.
   the accessor collides with `NSObject`'s own `-description`:
   `redefinition of '-[MVMessageOpenDroneIdSelfId description]'`. Nothing in the
   generator reserves the names the base class already uses.
+- **Swift generates MAVLink 2 that cannot compile.** `mavgen_swift.py:148`
+  writes `public static let id = UInt8(${id})`. Message IDs are 8-bit in v1 and
+  24-bit in v2, so every v2 message numbered above 255 fails with
+  `integer literal '12900' overflows when stored into 'UInt8'` - nine of them in
+  `common.xml`, all OpenDroneID. The file has no reference to
+  `wire_protocol_version` at all: the generator is v1-only and says nothing when
+  asked for v2. `test_generate_all.sh` runs `--lang='Swift' --wire-protocol=2.0`
+  and passes, because it only generates.
 - **Ada, `common.xml` and `ardupilotmega.xml`.** `mavgen_ada.py:459` asserts
   `types_size[f.enum] == f.type_length` and raises `Different size for one enum`,
   so generation stops with a traceback before writing anything. `minimal` and
