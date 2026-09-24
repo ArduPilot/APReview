@@ -431,6 +431,93 @@ non-zero exit was swallowed by `|| exit 0`, and a reply carrying prose rather
 than a meter simply recorded nothing. Either way the run log showed no probe at
 all, so the only sign was a reading missing from the history.
 
+## Compiling what pymavlink generates
+
+A review of a generator change can execute its output rather than read it.
+`bin/install-gen-toolchains.sh` installs the compilers; this section is the part
+that is not guessable - what each language needs beyond its own compiler.
+
+pymavlink's own CI generates and never compiles, so an output that does not
+build is not something upstream would have caught.
+
+The definitions are not in the pymavlink checkout (`message_definitions` is a
+submodule that is not fetched). They are in the mavlink clone:
+
+```
+D=$HOME/review/repositories/upstream-mavlink/message_definitions/v1.0
+export PYTHONPATH=$HOME/review/repositories
+cd $HOME/review/repositories/pymavlink
+python3 -m pymavlink.tools.mavgen --lang=<L> --wire-protocol=2.0 -o <out> $D/<dialect>.xml
+```
+
+| language | compiler | builds |
+| --- | --- | --- |
+| C, C++11 | gcc, g++ | yes |
+| Python, JavaScript, TypeScript, Lua, WLua | interpreters | yes |
+| Java | `javac` | v1 and v2 |
+| Ada | `gprbuild`, then run `obj/test` | v1 and v2, `minimal` and `standard` |
+| CS | `dotnet build -f netstandard2.0` | v1 and v2 |
+| ObjC | `gcc -x objective-c` + GNUstep | v1 140/144, v2 228/237 (see below) |
+| Swift | `swiftc` | **no compiler on this box** |
+| Spin2 | `flexspin` | **no compiler on this box** |
+
+**Java** needs nothing special:
+
+```
+javac -nowarn -d build $(find com -name '*.java')
+```
+
+**Ada** builds the test project the generator writes, and the binary runs:
+
+```
+cd <out>/tests && gprbuild test.gpr && ./obj/test
+```
+
+**CS** is an SDK-style project with NuGet PackageReferences, so the build needs
+network the first time. `net461` builds too, via the reference-assemblies
+package; `-f netstandard2.0` alone is enough to compile-check the generated code.
+
+**ObjC** needs three things the generated tree does not say:
+
+- the **C** output as well, on the include path: the ObjC is a wrapper over it
+  and `MVMessage.h` imports `mavlink.h`
+- **every dialect subdirectory** as a `-I`, because `MVMavlink.h` imports each
+  dialect's aggregate header by bare name
+- **Foundation forced in**, because no generated header imports it - the code
+  uses `NSObject`, `NSData` and `NSString` and assumes a prefix header, the way
+  Xcode supplies one
+
+```
+INC="-I."; for d in <out>/*/; do INC="$INC -I$d"; done
+gcc -c -x objective-c $(gnustep-config --objc-flags) -include Foundation/Foundation.h \
+    $INC -I<c-out> -I<c-out>/<dialect> <file>.m -o <file>.o
+```
+
+### Three defects this found
+
+All three are in master, none is new, and none is reachable without a compiler.
+
+- **ObjC, any field with a multi-line description.** `mavgen_objc.py:269` emits
+  `//! ${description}` - a one-line comment for text that is not one line, so
+  every line after the first lands in the header as code. `MISSION_COUNT`'s
+  `opaque_id` produces `This field is used when...` where a declaration belongs.
+  Eight of `common.xml`'s generated files will not compile: `MISSION_COUNT`,
+  `MISSION_ACK`, `HOME_POSITION`, `RADIO_RC_CHANNELS`, `STORAGE_INFORMATION`,
+  `AUTOPILOT_VERSION`, and the two aggregates that import them. The template
+  line dates from the original generator in 2013; the descriptions grew
+  multi-line later.
+- **ObjC, a field called `description`.** `OPEN_DRONE_ID_SELF_ID` has one, and
+  the accessor collides with `NSObject`'s own `-description`:
+  `redefinition of '-[MVMessageOpenDroneIdSelfId description]'`. Nothing in the
+  generator reserves the names the base class already uses.
+- **Ada, `common.xml` and `ardupilotmega.xml`.** `mavgen_ada.py:459` asserts
+  `types_size[f.enum] == f.type_length` and raises `Different size for one enum`,
+  so generation stops with a traceback before writing anything. `minimal` and
+  `standard` generate, build and pass their generated test. Whether
+  `generator/Ada/v2/test.sh` ever passed depends on the definitions it was run
+  against - the assert is about the XML, not the generator - but against the
+  current upstream definitions it stops on its second dialect.
+
 ## Publishing
 
 Reports go out with `rsync`, either to an rsync daemon (`rsync://user@host` plus a
