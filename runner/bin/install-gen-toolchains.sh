@@ -35,7 +35,10 @@ else
         echo "FATAL: needs sudo" >&2
         exit 1
     fi
-    if dpkg -l 2>/dev/null | awk 'NR>5 && $1 !~ /^ii/ {bad=1} END {exit !bad}'; then
+    # dpkg's own journal of an unfinished transaction, which is what produces
+    # "dpkg was interrupted". Not the package states: rc, ic and ec are ordinary
+    # on any box that has ever removed something, and apt does not mind them.
+    if [ -n "$(find /var/lib/dpkg/updates -maxdepth 1 -type f -print -quit 2>/dev/null)" ]; then
         echo "repairing an interrupted dpkg first"
         # wireshark-common asks whether non-root users may capture, and blocks
         echo 'wireshark-common wireshark-common/install-setuid boolean false' \
