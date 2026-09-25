@@ -410,6 +410,14 @@ M = [
                   '        if False:\n            changed.append(view["name"])\n            continue'),
  ('authorplan', PRJ, '                         or present[k].get("author") != wanted[k].get("author")))', '                         ))'),
  ('authorwrite', PRJ, '        if author_id and want.get("author"):', '        if False:'),
+ # The bug this shipped with, reproduced exactly. normpath collapses ".."
+ # textually, so ~/review/bin is stripped before the kernel can follow it and
+ # the lookup lands in ~/review. Passing the same path to open() unnormalised
+ # would work by accident - the kernel follows the symlink, then applies "..".
+ ('syncrealpath', PRJ, '        d = REPOS.load()',
+                       '        d = json.load(open(os.path.normpath(os.path.join('
+                       'os.path.dirname(os.path.dirname(os.path.abspath(__file__))),'
+                       ' "..", "repos.json"))))'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -663,6 +671,7 @@ REGRESSION = {
     'viewdry': 'Sweep.test_a_dry_run_does_not_change_the_view',
     'authorplan': 'Plan.test_a_row_missing_only_its_author_is_still_rewritten',
     'authorwrite': 'Sweep.test_a_new_row_records_who_opened_the_pr',
+    'syncrealpath': 'Owners.test_it_finds_repos_json_through_a_symlinked_bin',
 }
 
 def main():

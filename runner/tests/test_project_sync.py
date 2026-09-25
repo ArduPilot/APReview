@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
 
@@ -452,6 +453,27 @@ class Owners(unittest.TestCase):
 
     def test_a_plain_list_of_names_works_too(self):
         self.assertEqual(PS.swept_owners(self.repos(["A/one", "B/two"])), ["A", "B"])
+
+    def test_it_finds_repos_json_through_a_symlinked_bin(self):
+        """The deployed layout, which is not the layout tests usually run in.
+
+        ~/review/bin is a symlink into the checkout, so a path built from
+        __file__ without realpath resolves to ~/review and finds no repos.json.
+        That is exactly how this broke on the box after passing every test here.
+        """
+        link = os.path.join(self.d, "bin")
+        os.symlink(BIN, link)
+        out = subprocess.run(
+            ["python3", "-c",
+             "import importlib.util,sys;"
+             "spec=importlib.util.spec_from_file_location('ps', sys.argv[1]);"
+             "m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m);"
+             "print(' '.join(m.swept_owners()))",
+             os.path.join(link, "project-sync.py")],
+            capture_output=True, text=True,
+            env={"HOME": self.d, "PATH": "/usr/bin:/bin"})
+        self.assertEqual(out.returncode, 0, out.stderr)
+        self.assertIn("ArduPilot", out.stdout)
 
     def test_the_real_repos_file_names_the_orgs_we_sweep(self):
         # a search is per-org, so an org missing here is a repo silently never

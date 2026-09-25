@@ -26,8 +26,9 @@ import os
 import subprocess
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import apreview_verdict as V                                       # noqa: E402
+import repos as REPOS                                              # noqa: E402
 
 TITLE = "APReview Results"
 # Every comment this system posts carries it. Author alone is not enough:
@@ -46,8 +47,6 @@ LABELS = ("AIReview", "DevCallTopic", "DevCallEU")
 OPTIONS = [("ACCEPT", "GREEN", "Reviewed, no blockers"),
            ("COMMENT", "YELLOW", "Reviewed, notes but nothing blocking"),
            ("REQUEST CHANGES", "RED", "Reviewed, blocking findings")]
-
-HERE = os.path.dirname(os.path.abspath(__file__))
 
 
 class GhError(Exception):
@@ -94,10 +93,18 @@ def gh_list(query, strings, lists):
 # --- what should be on the board ---------------------------------------------
 
 def swept_owners(path=None):
-    """The orgs we review, from repos.json beside this script."""
-    path = path or os.path.join(os.path.dirname(HERE), "..", "repos.json")
-    with open(os.path.normpath(path)) as fh:
-        d = json.load(fh)
+    """The orgs we review, in the order repos.json first names them.
+
+    Through repos.py rather than a path of its own: ~/review/bin is a symlink
+    into the checkout, so a path built from __file__ without realpath looks for
+    repos.json in ~/review and finds nothing. repos.py already gets that right,
+    and one copy of the rule is the point.
+    """
+    if path:
+        with open(path) as fh:
+            d = json.load(fh)
+    else:
+        d = REPOS.load()
     repos = d if isinstance(d, list) else (d.get("repos") or [])
     names = [r if isinstance(r, str) else (r.get("repo") or "") for r in repos]
     seen, out = set(), []
