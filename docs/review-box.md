@@ -561,6 +561,84 @@ All six are in master, none is new, and none is reachable without a compiler.
   against - the assert is about the XML, not the generator - but against the
   current upstream definitions it stops on its second dialect.
 
+## The APReview Results board
+
+[github.com/orgs/ArduPilot/projects/33](https://github.com/orgs/ArduPilot/projects/33) —
+every open PR carrying a trigger label that this system has posted a verdict on,
+with a sortable **Result** column: `ACCEPT`, `COMMENT`, `REQUEST CHANGES`.
+
+`bin/project-sync.py` makes the board match reality. It takes no arguments and
+is told nothing by the run that calls it: it asks GitHub what is labelled, open
+and reviewed, and adds, relabels or removes rows to suit. The same command is
+therefore correct at the end of a review and from cron a quarter of an hour
+later.
+
+```
+project-sync.py                what it does on the two triggers below
+project-sync.py --dry-run      say what would change, change nothing
+project-sync.py --show         the verdict it reads for each PR, and from where
+project-sync.py --prune-only   only remove what no longer belongs
+```
+
+Two triggers, both calling `bin/project-sync.sh`, which cannot fail its caller:
+
+- the EXIT trap of every run, beside the dashboard publish
+- `*/15 * * * *`, which is what takes a merged or closed PR off — nothing tells
+  us a PR closed, it simply stops coming back from the search
+
+### Where the verdict comes from
+
+The posted comment, not the published report. Each label's report page is
+overwritten by the next run of that label, so it only ever covers the most
+recent sweep: measured on 2026-09-26, the reports held a verdict for **35** of
+the 168 open labelled PRs, against **166** from the comments. Where both had one
+they disagreed ten times, the report being the stale one.
+
+`apreview_verdict.py` reads it, from two sources:
+
+1. **A marker the review emits**, which is exact and renders as nothing:
+   `<!-- apreview: verdict=ACCEPT head=5574a60eb2 -->`. Written by step 8 of
+   `commands/reviewprs.md`.
+2. **Failing that, the prose.** Seven phrasings appear in the comments already
+   posted, so this is not a one-line regex:
+
+   ```
+   **Verdict: COMMENT - no blockers.**       Verdict: **COMMENT** - ...
+   Verdict: COMMENT                          **REQUEST CHANGES** - ...
+   **APPROVE - no blockers.**                ## COMMENT - one real gap
+   **... Verdict stays APPROVE.**
+   ```
+
+   Every anchor requires something that means *this is the verdict* - a
+   "Verdict" label, a heading, or the start of a bold run - because the bare
+   words are everywhere in ordinary review prose. Ten of the 168 name a second
+   verdict within 400 characters of the right one.
+
+   `the verdict moves from REQUEST CHANGES to COMMENT` is handled on its own and
+   first: every other anchor reads it backwards and takes the old verdict. Four
+   PRs were wrong that way before it existed.
+
+The verdict is the newest comment that **states** one, not the newest comment. A
+followup note says only that the author's code moved and carries no verdict;
+treating that as "no review" would drop a reviewed PR off the board. Superseded
+comments are skipped, so a stale verdict folded into a deprecation cannot
+outrank a live followup that has none. That rule alone took coverage from 77% to
+94%; the seven phrasings took it to 166 of 168. The two it cannot read state no
+verdict at all - a draft, reviewed as guidance - and are left off rather than
+guessed at.
+
+A comment counts as ours only if it carries the `AI-generated` marker *and* was
+posted by one of `REVIEW_COMMENT_ACCOUNTS`. Author alone is not enough:
+commenting moved from a person's account to the bot, so the older reviews are
+authored by someone who also writes ordinary comments, and "I would request
+changes here" is not a verdict.
+
+### Refusing to empty the board
+
+A sweep that returns nothing looks exactly like every PR having merged. More
+than 25 removals, or more than a quarter of the board, is refused with exit 3
+and nothing changed; `--force-prune` overrides it when the news is real.
+
 ## Publishing
 
 Reports go out with `rsync`, either to an rsync daemon (`rsync://user@host` plus a
