@@ -435,6 +435,38 @@ class Sweep(unittest.TestCase):
         self.assertEqual(texts, ["someone"])
 
 
+class ScopeMessage(unittest.TestCase):
+    """The message the cron log shows when the token is not allowed to help."""
+
+    def test_a_scope_failure_names_the_command_that_fixes_it(self):
+        text = PS._explain(
+            "gh: Your token has not been granted the required scopes to execute "
+            "this query. The 'id' field requires one of the following scopes: "
+            "['read:project']")
+        self.assertIn("gh auth refresh -s project,read:project", text)
+
+    def test_the_message_survives_the_path_a_scope_failure_actually_takes(self):
+        """gh exits non-zero and prints it, so the errors list is never reached.
+
+        Testing _explain alone proves nothing about what lands in the log.
+        """
+        import subprocess as sp
+        real = PS.subprocess.run
+        self.addCleanup(setattr, PS.subprocess, "run", real)
+        PS.subprocess.run = lambda *a, **k: sp.CompletedProcess(
+            a[0] if a else [], 1, "",
+            "gh: Your token has not been granted the required scopes to execute "
+            "this query. The 'id' field requires one of the following scopes: "
+            "['read:project']")
+        with self.assertRaises(PS.GhError) as e:
+            PS.gh("query { viewer { login } }")
+        self.assertIn("gh auth refresh -s project,read:project", str(e.exception))
+
+    def test_an_ordinary_failure_is_not_dressed_up_as_a_scope_problem(self):
+        text = PS._explain("Could not resolve to an Organization with the login of 'x'")
+        self.assertNotIn("gh auth refresh", text)
+
+
 class Owners(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp()

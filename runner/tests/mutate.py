@@ -418,6 +418,10 @@ M = [
                        '        d = json.load(open(os.path.normpath(os.path.join('
                        'os.path.dirname(os.path.dirname(os.path.abspath(__file__))),'
                        ' "..", "repos.json"))))'),
+ ('scopehelp', PRJ, '    if "not been granted the required scopes" in text or "read:project" in text:',
+                    '    if False:'),
+ ('scopeexplain', PRJ, '        raise GhError(_explain((p.stderr or p.stdout).strip()))\n    try:',
+                       '        raise GhError((p.stderr or p.stdout).strip()[:400])\n    try:'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -672,6 +676,8 @@ REGRESSION = {
     'authorplan': 'Plan.test_a_row_missing_only_its_author_is_still_rewritten',
     'authorwrite': 'Sweep.test_a_new_row_records_who_opened_the_pr',
     'syncrealpath': 'Owners.test_it_finds_repos_json_through_a_symlinked_bin',
+    'scopehelp': 'ScopeMessage.test_a_scope_failure_names_the_command_that_fixes_it',
+    'scopeexplain': 'ScopeMessage.test_the_message_survives_the_path_a_scope_failure_actually_takes',
 }
 
 def main():

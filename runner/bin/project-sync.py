@@ -63,24 +63,30 @@ def gh(query, **variables):
         args += ["-f", "%s=%s" % (k, v)]
     p = subprocess.run(args, capture_output=True, text=True)
     if p.returncode != 0:
-        raise GhError((p.stderr or p.stdout).strip()[:400])
+        # gh exits non-zero on a GraphQL error as well as on a transport
+        # failure, and prints the message itself, so this is the path a scope
+        # problem actually takes - not the errors list below.
+        raise GhError(_explain((p.stderr or p.stdout).strip()))
     try:
         d = json.loads(p.stdout)
     except ValueError:
         raise GhError("unparseable reply: %s" % p.stdout[:200])
     if d.get("errors"):
-        raise GhError(_explain(d["errors"]))
+        raise GhError(_explain("; ".join(e.get("message", "?")
+                                         for e in d["errors"])))
     return d["data"]
 
 
-def _explain(errors):
+SCOPE_HELP = ("\n       The box login needs the project scope. On the box:\n"
+              "           gh auth refresh -s project,read:project\n"
+              "       project-sync.sh deliberately does not use the AP-Review "
+              "token, which is scoped to public_repo alone.")
+
+
+def _explain(text):
     """A scope failure says what to do about it, not just what went wrong."""
-    text = "; ".join(e.get("message", "?") for e in errors)
-    if any(e.get("type") == "INSUFFICIENT_SCOPES" for e in errors):
-        return (text[:300] + "\n       This needs the project scope. On the box: "
-                "gh auth refresh -s project,read:project\n"
-                "       (project-sync.sh deliberately does not use the narrow "
-                "AP-Review token.)")
+    if "not been granted the required scopes" in text or "read:project" in text:
+        return text[:300] + SCOPE_HELP
     return text[:400]
 
 
@@ -94,10 +100,11 @@ def gh_list(query, strings, lists):
     p = subprocess.run(["gh", "api", "graphql", "--input", "-"],
                        input=json.dumps(body), capture_output=True, text=True)
     if p.returncode != 0:
-        raise GhError((p.stderr or p.stdout).strip()[:400])
+        raise GhError(_explain((p.stderr or p.stdout).strip()))
     d = json.loads(p.stdout)
     if d.get("errors"):
-        raise GhError("; ".join(e.get("message", "?") for e in d["errors"])[:400])
+        raise GhError(_explain("; ".join(e.get("message", "?")
+                                         for e in d["errors"])))
     return d["data"]
 
 
