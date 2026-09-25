@@ -633,6 +633,17 @@ commenting moved from a person's account to the bot, so the older reviews are
 authored by someone who also writes ordinary comments, and "I would request
 changes here" is not a verdict.
 
+### Making the column visible
+
+A field exists whether or not a view shows it. Creating `Result` set a value on
+all 166 rows and the board displayed none of them, because a new field is not
+added to views that already exist - so the sync configures the views too, and
+leaves alone any that already show it.
+
+Column order cannot be chosen. `visibleFieldIds` is documented as ordered, but
+asking for `Result, Title, Repository` returns `Title, Repository, Result`:
+columns follow the order the fields were created in, so `Result` sits last.
+
 ### Refusing to empty the board
 
 A sweep that returns nothing looks exactly like every PR having merged. More

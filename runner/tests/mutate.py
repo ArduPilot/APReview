@@ -404,6 +404,10 @@ M = [
  ('prunedryrun', PRJ, '    if a.dry_run:\n        for k in add:', '    if False:\n        for k in add:'),
  ('pruneonly', PRJ, '    if a.prune_only:\n        add, update = [], []', '    if False:\n        add, update = [], []'),
  ('projdraftnote', PRJ, '            if num is None or not repo:', '            if False:'),
+ ('viewnoshow', PRJ, '    print("view: %s" % ensure_view(project["id"], a.dry_run))', '    pass'),
+ ('viewalready', PRJ, '        if shown is not None and fields[FIELD] in shown:', '        if False:'),
+ ('viewdry', PRJ, '        if dry:\n            changed.append(view["name"] + " (would show it)")\n            continue',
+                  '        if False:\n            changed.append(view["name"])\n            continue'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -652,6 +656,9 @@ REGRESSION = {
     'prunedryrun': 'Sweep.test_a_dry_run_changes_nothing',
     'pruneonly': 'Sweep.test_prune_only_removes_without_adding',
     'projdraftnote': 'Sweep.test_a_free_text_note_on_the_board_is_left_alone',
+    'viewnoshow': 'Sweep.test_a_view_that_does_not_show_the_result_is_made_to',
+    'viewalready': 'Sweep.test_a_view_already_showing_it_is_left_alone',
+    'viewdry': 'Sweep.test_a_dry_run_does_not_change_the_view',
 }
 
 def main():

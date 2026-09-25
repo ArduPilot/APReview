@@ -270,9 +270,24 @@ class Sweep(unittest.TestCase):
         PS.gh = self.fake_gh
         self.found = {}          # key -> verdict the comments say
         self.note = False        # whether the board also holds a free-text note
+        self.shown = ["f1"]      # field ids the view currently displays
+        self.real_gh_list = PS.gh_list
+        self.addCleanup(setattr, PS, "gh_list", self.real_gh_list)
+        PS.gh_list = self.fake_gh_list
+        self.view_sets = []
+
+    def fake_gh_list(self, query, strings, lists):
+        self.view_sets.append(lists.get("fields"))
+        return {"updateProjectV2View": {"projectV2View": {"id": "view1",
+                                                          "name": "View 1"}}}
 
     def fake_gh(self, query, **v):
         self.calls.append((query, v))
+        if "views(first: 20)" in query:
+            return {"node": {"views": {"nodes": [{"id": "view1", "number": 1,
+                                                  "name": "View 1"}]}}}
+        if "ProjectV2View" in query and "fields(first: 50)" in query:
+            return {"node": {"fields": {"nodes": [{"id": f} for f in self.shown]}}}
         if "search(" in query:
             nodes = []
             for key, verdict in self.found.items():
@@ -355,6 +370,28 @@ class Sweep(unittest.TestCase):
         self.assertEqual(self.run_main("--prune-only"), 0)
         self.assertEqual(self.deletes(), ["item-ArduPilot/ardupilot#1"])
         self.assertFalse([q for q, _ in self.calls if "addProjectV2ItemById" in q])
+
+    def test_a_view_that_does_not_show_the_result_is_made_to(self):
+        # the field existed and every row had a value, and the board showed
+        # none of it: a new field is not added to views that already exist
+        self.shown = ["other-field"]
+        self.found = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(self.view_sets), 1, "it never touched the view")
+        self.assertIn("f1", self.view_sets[0], "Result was not made visible")
+
+    def test_a_view_already_showing_it_is_left_alone(self):
+        # someone may have arranged their own columns; do not fight them
+        self.shown = ["f1", "something-they-added"]
+        self.found = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.view_sets, [])
+
+    def test_a_dry_run_does_not_change_the_view(self):
+        self.shown = ["other-field"]
+        self.found = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        self.assertEqual(self.run_main("--dry-run"), 0)
+        self.assertEqual(self.view_sets, [])
 
     def test_a_free_text_note_on_the_board_is_left_alone(self):
         # someone may pin a note to the project; it is not a PR, it cannot be

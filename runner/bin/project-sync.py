@@ -69,6 +69,23 @@ def gh(query, **variables):
     return d["data"]
 
 
+def gh_list(query, strings, lists):
+    """gh() for a mutation that takes a list variable.
+
+    -f sends everything as a string, so a [ID!]! has to go through --input as
+    JSON rather than as repeated -f arguments.
+    """
+    body = {"query": query, "variables": dict(strings, **lists)}
+    p = subprocess.run(["gh", "api", "graphql", "--input", "-"],
+                       input=json.dumps(body), capture_output=True, text=True)
+    if p.returncode != 0:
+        raise GhError((p.stderr or p.stdout).strip()[:400])
+    d = json.loads(p.stdout)
+    if d.get("errors"):
+        raise GhError("; ".join(e.get("message", "?") for e in d["errors"])[:400])
+    return d["data"]
+
+
 # --- what should be on the board ---------------------------------------------
 
 def swept_owners(path=None):
@@ -157,6 +174,20 @@ query($project: ID!) {
       ... on ProjectV2SingleSelectField { id name options { id name } }
     } }
   } }
+}"""
+
+VIEWS = """
+query($project: ID!) {
+  node(id: $project) { ... on ProjectV2 {
+    views(first: 20) { nodes { id number name } }
+  } }
+}"""
+
+UPDATE_VIEW = """
+mutation($view: ID!, $fields: [ID!]!) {
+  updateProjectV2View(input: {viewId: $view, configuration: {visibleFieldIds: $fields}}) {
+    projectV2View { id name }
+  }
 }"""
 
 ITEMS = """
@@ -256,6 +287,60 @@ def ensure_field(project_id, dry=False):
     return f["id"], {o["name"]: o["id"] for o in f["options"]}, "created"
 
 
+# What the board should show. A field exists whether or not a view displays it:
+# creating Result put a value on all 166 rows and showed none of them, because a
+# new field is not added to views that already exist.
+#
+# The order here is not the order you get. visibleFieldIds is documented as
+# ordered, but asking for Result, Title, Repository returns Title, Repository,
+# Result - columns follow the order the fields were created in, so Result, being
+# newest, sits last whatever this says.
+COLUMNS = ("Title", "Repository", FIELD, "Updated")
+
+
+def ensure_view(project_id, dry=False, columns=COLUMNS):
+    """Make every table view show the Result column.
+
+    Idempotent, and it does not fight anyone: a view already showing Result is
+    left exactly as it is, so a column someone added by hand survives.
+    """
+    fields = {f["name"]: f["id"]
+              for f in gh(FIELDS, project=project_id)["node"]["fields"]["nodes"]
+              if f and f.get("name")}
+    wanted = [fields[c] for c in columns if c in fields]
+    if FIELD not in fields:
+        return "no %s field yet" % FIELD
+    changed = []
+    for view in gh(VIEWS, project=project_id)["node"]["views"]["nodes"]:
+        shown = view_fields(project_id, view["id"])
+        if shown is not None and fields[FIELD] in shown:
+            continue                      # already visible; leave the view alone
+        if dry:
+            changed.append(view["name"] + " (would show it)")
+            continue
+        gh_list(UPDATE_VIEW, {"view": view["id"]}, {"fields": wanted})
+        changed.append(view["name"])
+    return ("showed %s in: %s" % (FIELD, ", ".join(changed)) if changed
+            else "%s already shown" % FIELD)
+
+
+VIEW_FIELDS = """
+query($view: ID!) {
+  node(id: $view) { ... on ProjectV2View {
+    fields(first: 50) { nodes { ... on ProjectV2FieldCommon { id } } }
+  } }
+}"""
+
+
+def view_fields(project_id, view_id):
+    """The field ids a view currently shows, or None if it will not say."""
+    try:
+        nodes = gh(VIEW_FIELDS, view=view_id)["node"]["fields"]["nodes"]
+    except GhError:
+        return None
+    return [n["id"] for n in nodes if n and n.get("id")]
+
+
 def project_items(project_id):
     """What is on the board now, by repo#number."""
     out, after = {}, None
@@ -346,6 +431,7 @@ def main(argv=None):
     print("%s: %s  %s" % (a.title, how, project.get("url", "")))
     field_id, options, fhow = ensure_field(project["id"], a.dry_run)
     print("field %s: %s" % (FIELD, fhow))
+    print("view: %s" % ensure_view(project["id"], a.dry_run))
 
     present = project_items(project["id"])
     add, update, remove = plan(wanted, present)
