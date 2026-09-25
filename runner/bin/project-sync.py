@@ -69,8 +69,19 @@ def gh(query, **variables):
     except ValueError:
         raise GhError("unparseable reply: %s" % p.stdout[:200])
     if d.get("errors"):
-        raise GhError("; ".join(e.get("message", "?") for e in d["errors"])[:400])
+        raise GhError(_explain(d["errors"]))
     return d["data"]
+
+
+def _explain(errors):
+    """A scope failure says what to do about it, not just what went wrong."""
+    text = "; ".join(e.get("message", "?") for e in errors)
+    if any(e.get("type") == "INSUFFICIENT_SCOPES" for e in errors):
+        return (text[:300] + "\n       This needs the project scope. On the box: "
+                "gh auth refresh -s project,read:project\n"
+                "       (project-sync.sh deliberately does not use the narrow "
+                "AP-Review token.)")
+    return text[:400]
 
 
 def gh_list(query, strings, lists):

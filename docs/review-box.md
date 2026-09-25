@@ -648,6 +648,24 @@ Column order cannot be chosen. `visibleFieldIds` is documented as ordered, but
 asking for `Result, Title, Repository` returns `Title, Repository, Result`:
 columns follow the order the fields were created in, so `Result` sits last.
 
+### Which account it runs as
+
+Not the bot. `review-env.sh` exports `GH_TOKEN` so reviews are posted as
+AP-Review, and that token is deliberately narrow — `public_repo` and nothing
+else, which cannot even read a project. `project-sync.sh` unsets it and falls
+back to the box's own `gh` login: writing to a project needs the `project`
+scope, and granting that to the commenting token would widen what a compromised
+review run can reach, for the sake of a board whose items carry no author
+anyway.
+
+The box login needs the scope once:
+
+```sh
+gh auth refresh -s project,read:project
+```
+
+Until then the sync exits 2 and says so; nothing else is affected.
+
 ### Refusing to empty the board
 
 A sweep that returns nothing looks exactly like every PR having merged. More
