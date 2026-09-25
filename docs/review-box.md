@@ -565,7 +565,9 @@ All six are in master, none is new, and none is reachable without a compiler.
 
 [github.com/orgs/ArduPilot/projects/33](https://github.com/orgs/ArduPilot/projects/33) —
 every open PR carrying a trigger label that this system has posted a verdict on,
-with a sortable **Result** column: `ACCEPT`, `COMMENT`, `REQUEST CHANGES`.
+with a sortable **Result** column (`ACCEPT`, `COMMENT`, `REQUEST CHANGES`) and a
+**PR Author** column. Not `Author`: that name is reserved, and
+`createProjectV2Field` refuses it with "Name cannot have a reserved value".
 
 `bin/project-sync.py` makes the board match reality. It takes no arguments and
 is told nothing by the run that calls it: it asks GitHub what is labelled, open
@@ -637,8 +639,10 @@ changes here" is not a verdict.
 
 A field exists whether or not a view shows it. Creating `Result` set a value on
 all 166 rows and the board displayed none of them, because a new field is not
-added to views that already exist - so the sync configures the views too, and
-leaves alone any that already show it.
+added to views that already exist - so the sync configures the views too. It
+adds what is missing to what a view already shows rather than replacing the set,
+so a column someone arranged by hand survives, and a view already showing all of
+ours is left untouched.
 
 Column order cannot be chosen. `visibleFieldIds` is documented as ordered, but
 asking for `Result, Title, Repository` returns `Title, Repository, Result`:

@@ -36,6 +36,11 @@ TITLE = "APReview Results"
 # saying "I'd request changes here" must not be read as a verdict.
 AI_MARKER = "AI-generated"
 FIELD = "Result"
+# GitHub has no built-in author field - Assignees and Reviewers are neither -
+# so the board carries its own, filled in from the PR. Not called "Author":
+# that name is reserved, and createProjectV2Field refuses it with "Name cannot
+# have a reserved value".
+AUTHOR = "PR Author"
 LABELS = ("AIReview", "DevCallTopic", "DevCallEU")
 # The option colours GitHub accepts, chosen so the board reads at a glance.
 OPTIONS = [("ACCEPT", "GREEN", "Reviewed, no blockers"),
@@ -123,6 +128,7 @@ query($q: String!, $after: String) {
     pageInfo { hasNextPage endCursor }
     nodes { ... on PullRequest {
       id number title url state isDraft
+      author { login }
       repository { nameWithOwner }
       comments(first: 100) { nodes { author { login } body } }
     } }
@@ -149,7 +155,8 @@ def reviewed_prs(owners, accounts):
                 verdict, how = V.of_thread(ours) if ours else (None, None)
                 if verdict:
                     out[key] = {"id": pr["id"], "verdict": verdict, "how": how,
-                                "url": pr["url"], "title": pr["title"]}
+                                "url": pr["url"], "title": pr["title"],
+                                "author": (pr.get("author") or {}).get("login") or ""}
             if not d["pageInfo"]["hasNextPage"]:
                 break
             after = d["pageInfo"]["endCursor"]
@@ -204,6 +211,8 @@ query($project: ID!, $after: String) {
         fieldValues(first: 30) { nodes {
           ... on ProjectV2ItemFieldSingleSelectValue { name field {
             ... on ProjectV2FieldCommon { name } } }
+          ... on ProjectV2ItemFieldTextValue { text field {
+            ... on ProjectV2FieldCommon { name } } }
         } }
       }
     }
@@ -238,6 +247,20 @@ mutation($project: ID!, $content: ID!) {
   addProjectV2ItemById(input: {projectId: $project, contentId: $content}) {
     item { id }
   }
+}"""
+
+CREATE_TEXT_FIELD = """
+mutation($project: ID!, $name: String!) {
+  createProjectV2Field(input: {projectId: $project, dataType: TEXT, name: $name}) {
+    projectV2Field { ... on ProjectV2FieldCommon { id name } }
+  }
+}"""
+
+SET_TEXT = """
+mutation($project: ID!, $item: ID!, $field: ID!, $text: String!) {
+  updateProjectV2ItemFieldValue(input: {
+    projectId: $project, itemId: $item, fieldId: $field, value: {text: $text}
+  }) { projectV2Item { id } }
 }"""
 
 SET_FIELD = """
@@ -295,33 +318,46 @@ def ensure_field(project_id, dry=False):
 # ordered, but asking for Result, Title, Repository returns Title, Repository,
 # Result - columns follow the order the fields were created in, so Result, being
 # newest, sits last whatever this says.
-COLUMNS = ("Title", "Repository", FIELD, "Updated")
+COLUMNS = ("Title", "Repository", AUTHOR, FIELD, "Updated")
 
 
-def ensure_view(project_id, dry=False, columns=COLUMNS):
-    """Make every table view show the Result column.
+# The columns this board exists for. A view missing any of them gets it added.
+OURS = (FIELD, AUTHOR)
 
-    Idempotent, and it does not fight anyone: a view already showing Result is
-    left exactly as it is, so a column someone added by hand survives.
+
+def ensure_view(project_id, dry=False, columns=COLUMNS, ours=OURS):
+    """Make every view show the columns this board is for.
+
+    Adds what is missing to what a view already shows rather than replacing it,
+    so a column someone arranged by hand survives. A view already showing all of
+    ours is not touched at all.
     """
     fields = {f["name"]: f["id"]
               for f in gh(FIELDS, project=project_id)["node"]["fields"]["nodes"]
               if f and f.get("name")}
-    wanted = [fields[c] for c in columns if c in fields]
-    if FIELD not in fields:
-        return "no %s field yet" % FIELD
+    absent = [c for c in ours if c not in fields]
+    need = [fields[c] for c in ours if c in fields]
+    if not need:
+        return "no %s field yet" % " or ".join(ours)
     changed = []
     for view in gh(VIEWS, project=project_id)["node"]["views"]["nodes"]:
         shown = view_fields(project_id, view["id"])
-        if shown is not None and fields[FIELD] in shown:
-            continue                      # already visible; leave the view alone
-        if dry:
-            changed.append(view["name"] + " (would show it)")
+        if shown is None:
+            shown, missing = [], need     # could not read it; set our own set
+        else:
+            missing = [f for f in need if f not in shown]
+        if not missing:
             continue
-        gh_list(UPDATE_VIEW, {"view": view["id"]}, {"fields": wanted})
+        if dry:
+            changed.append(view["name"] + " (would)")
+            continue
+        keep = shown or [fields[c] for c in columns if c in fields and fields[c] not in need]
+        gh_list(UPDATE_VIEW, {"view": view["id"]}, {"fields": keep + missing})
         changed.append(view["name"])
-    return ("showed %s in: %s" % (FIELD, ", ".join(changed)) if changed
-            else "%s already shown" % FIELD)
+    note = ("; %s not created yet" % ", ".join(absent)) if absent else ""
+    return (("updated: %s" % ", ".join(changed)) if changed
+            else "%s already shown" % " and ".join(c for c in ours
+                                                   if c not in absent)) + note
 
 
 VIEW_FIELDS = """
@@ -339,6 +375,18 @@ def view_fields(project_id, view_id):
     except GhError:
         return None
     return [n["id"] for n in nodes if n and n.get("id")]
+
+
+def ensure_author_field(project_id, dry=False):
+    """The Author column. Plain text: there are as many authors as contributors."""
+    for f in gh(FIELDS, project=project_id)["node"]["fields"]["nodes"]:
+        if f and f.get("name") == AUTHOR:
+            return f["id"], "exists"
+    if dry:
+        return None, "would create the field"
+    f = gh(CREATE_TEXT_FIELD, project=project_id,
+           name=AUTHOR)["createProjectV2Field"]["projectV2Field"]
+    return f["id"], "created"
 
 
 def project_items(project_id):
@@ -359,11 +407,14 @@ def project_items(project_id):
             if num is None or not repo:
                 continue
             key = "%s#%s" % (repo, num)
-            result = None
+            result, author = None, None
             for fv in it["fieldValues"]["nodes"]:
-                if fv and (fv.get("field") or {}).get("name") == FIELD:
+                name = (fv or {}).get("field", {}).get("name")
+                if name == FIELD:
                     result = fv.get("name")
-            out[key] = {"item": it["id"], "result": result,
+                elif name == AUTHOR:
+                    author = fv.get("text")
+            out[key] = {"item": it["id"], "result": result, "author": author,
                         "state": c.get("state")}
         if not d["pageInfo"]["hasNextPage"]:
             return out
@@ -394,7 +445,9 @@ def plan(wanted, present):
     """
     add = sorted(k for k in wanted if k not in present)
     update = sorted(k for k in wanted
-                    if k in present and present[k]["result"] != wanted[k]["verdict"])
+                    if k in present
+                    and (present[k]["result"] != wanted[k]["verdict"]
+                         or present[k].get("author") != wanted[k].get("author")))
     remove = sorted(k for k in present if k not in wanted)
     return add, update, remove
 
@@ -431,6 +484,8 @@ def main(argv=None):
     print("%s: %s  %s" % (a.title, how, project.get("url", "")))
     field_id, options, fhow = ensure_field(project["id"], a.dry_run)
     print("field %s: %s" % (FIELD, fhow))
+    author_id, ahow = ensure_author_field(project["id"], a.dry_run)
+    print("field %s: %s" % (AUTHOR, ahow))
     print("view: %s" % ensure_view(project["id"], a.dry_run))
 
     present = project_items(project["id"])
@@ -452,27 +507,34 @@ def main(argv=None):
         for k in add:
             print("  + %-42s %s" % (k, wanted[k]["verdict"]))
         for k in update:
-            print("  ~ %-42s %s -> %s" % (k, present[k]["result"], wanted[k]["verdict"]))
+            print("  ~ %-42s %s -> %s  author %s -> %s"
+                  % (k, present[k]["result"], wanted[k]["verdict"],
+                     present[k].get("author"), wanted[k].get("author")))
         for k in remove:
             print("  - %s" % k)
         return 0
 
     if not field_id:
         raise GhError("no %s field to write to" % FIELD)
+    def write_row(item, want):
+        gh(SET_FIELD, project=project["id"], item=item, field=field_id,
+           option=options[want["verdict"]])
+        if author_id and want.get("author"):
+            gh(SET_TEXT, project=project["id"], item=item, field=author_id,
+               text=want["author"])
+
     failed = 0
     for k in add:
         try:
             item = gh(ADD_ITEM, project=project["id"],
                       content=wanted[k]["id"])["addProjectV2ItemById"]["item"]["id"]
-            gh(SET_FIELD, project=project["id"], item=item, field=field_id,
-               option=options[wanted[k]["verdict"]])
+            write_row(item, wanted[k])
         except (GhError, KeyError) as e:
             failed += 1
             print("  ! add %s: %s" % (k, e))
     for k in update:
         try:
-            gh(SET_FIELD, project=project["id"], item=present[k]["item"],
-               field=field_id, option=options[wanted[k]["verdict"]])
+            write_row(present[k]["item"], wanted[k])
         except (GhError, KeyError) as e:
             failed += 1
             print("  ! relabel %s: %s" % (k, e))

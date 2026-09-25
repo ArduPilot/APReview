@@ -157,10 +157,12 @@ class Plan(unittest.TestCase):
     """What the board should change, decided without touching a board."""
 
     def want(self, **kw):
-        return {k: {"verdict": v, "id": "n-" + k} for k, v in kw.items()}
+        return {k: {"verdict": v, "id": "n-" + k, "author": "someone"}
+                for k, v in kw.items()}
 
     def have(self, **kw):
-        return {k: {"item": "i-" + k, "result": v} for k, v in kw.items()}
+        return {k: {"item": "i-" + k, "result": v, "author": "someone"}
+                for k, v in kw.items()}
 
     def test_a_reviewed_pr_not_on_the_board_is_added(self):
         add, upd, rm = PS.plan(self.want(a=V.ACCEPT), {})
@@ -186,12 +188,20 @@ class Plan(unittest.TestCase):
         add, upd, rm = PS.plan(self.want(a=V.ACCEPT), self.have(a=None))
         self.assertEqual(upd, ["a"])
 
+    def test_a_row_missing_only_its_author_is_still_rewritten(self):
+        # adding the column to an existing board backfills nothing unless the
+        # plan notices the author, not just the verdict
+        present = {"a": {"item": "i-a", "result": V.ACCEPT, "author": None}}
+        add, upd, rm = PS.plan(self.want(a=V.ACCEPT), present)
+        self.assertEqual(upd, ["a"])
+
 
 class PruneGuard(unittest.TestCase):
     """A sweep that comes back short must not empty the board."""
 
     def board(self, n):
-        return {"k%d" % i: {"item": "i", "result": "ACCEPT"} for i in range(n)}
+        return {"k%d" % i: {"item": "i", "result": "ACCEPT", "author": "x"}
+                for i in range(n)}
 
     def test_an_empty_search_against_a_full_board_is_refused(self):
         b = self.board(166)
@@ -270,7 +280,7 @@ class Sweep(unittest.TestCase):
         PS.gh = self.fake_gh
         self.found = {}          # key -> verdict the comments say
         self.note = False        # whether the board also holds a free-text note
-        self.shown = ["f1"]      # field ids the view currently displays
+        self.shown = ["f1", "fa"]   # field ids the view currently displays
         self.real_gh_list = PS.gh_list
         self.addCleanup(setattr, PS, "gh_list", self.real_gh_list)
         PS.gh_list = self.fake_gh_list
@@ -298,6 +308,7 @@ class Sweep(unittest.TestCase):
                     "id": "node-" + key, "number": int(num), "title": "t",
                     "url": "u", "state": "OPEN", "isDraft": False,
                     "repository": {"nameWithOwner": repo},
+                    "author": {"login": "someone"},
                     "comments": {"nodes": [{"author": {"login": "AP-Review"},
                                             "body": NOTE + "**Verdict: %s**" % verdict}]}})
             return {"search": {"pageInfo": {"hasNextPage": False, "endCursor": None},
@@ -305,9 +316,11 @@ class Sweep(unittest.TestCase):
         if "projectsV2(first: 100)" in query:
             return {"organization": {"id": "org1", "projectsV2": {"nodes": [
                 {"id": "proj1", "number": 33, "title": PS.TITLE, "url": "purl"}]}}}
-        if "fields(first: 50)" in query:
-            return {"node": {"fields": {"nodes": [{"id": "f1", "name": PS.FIELD,
-                    "options": [{"id": "o-" + n, "name": n} for n, _, _ in PS.OPTIONS]}]}}}
+        if "fields(first: 50)" in query and "ProjectV2View" not in query:
+            return {"node": {"fields": {"nodes": [
+                {"id": "f1", "name": PS.FIELD,
+                 "options": [{"id": "o-" + n, "name": n} for n, _, _ in PS.OPTIONS]},
+                {"id": "fa", "name": PS.AUTHOR}]}}}
         if "items(first: 100" in query:
             # a project can hold free-text notes as well as PRs; they have no
             # content, and reaching for their repository would abort the sweep
@@ -319,7 +332,8 @@ class Sweep(unittest.TestCase):
                               "content": {"number": int(num), "state": "OPEN",
                                           "repository": {"nameWithOwner": repo}},
                               "fieldValues": {"nodes": [
-                                  {"name": verdict, "field": {"name": PS.FIELD}}]}})
+                                  {"name": verdict, "field": {"name": PS.FIELD}},
+                                  {"text": "someone", "field": {"name": PS.AUTHOR}}]}})
             return {"node": {"items": {"pageInfo": {"hasNextPage": False,
                                                     "endCursor": None}, "nodes": nodes}}}
         if "deleteProjectV2Item" in query:
@@ -328,6 +342,9 @@ class Sweep(unittest.TestCase):
             return {"addProjectV2ItemById": {"item": {"id": "new-item"}}}
         if "updateProjectV2ItemFieldValue" in query:
             return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": v["item"]}}}
+        if "createProjectV2Field" in query:
+            return {"createProjectV2Field": {"projectV2Field":
+                    {"id": "fa", "name": PS.AUTHOR}}}
         raise AssertionError("unstubbed query: " + query[:60])
 
     def deletes(self):
@@ -382,7 +399,7 @@ class Sweep(unittest.TestCase):
 
     def test_a_view_already_showing_it_is_left_alone(self):
         # someone may have arranged their own columns; do not fight them
-        self.shown = ["f1", "something-they-added"]
+        self.shown = ["f1", "fa", "something-they-added"]
         self.found = {"ArduPilot/ardupilot#1": "ACCEPT"}
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.view_sets, [])
@@ -406,8 +423,15 @@ class Sweep(unittest.TestCase):
         self.found = {"ArduPilot/ardupilot#7": "REQUEST CHANGES"}
         self.assertEqual(self.run_main(), 0)
         sets = [v for q, v in self.calls if "updateProjectV2ItemFieldValue" in q]
-        self.assertEqual(len(sets), 1)
-        self.assertEqual(sets[0]["option"], "o-REQUEST CHANGES")
+        self.assertEqual([s.get("option") for s in sets if "option" in s],
+                         ["o-REQUEST CHANGES"])
+
+    def test_a_new_row_records_who_opened_the_pr(self):
+        self.found = {"ArduPilot/ardupilot#7": "COMMENT"}
+        self.assertEqual(self.run_main(), 0)
+        texts = [v["text"] for q, v in self.calls
+                 if "updateProjectV2ItemFieldValue" in q and "text" in v]
+        self.assertEqual(texts, ["someone"])
 
 
 class Owners(unittest.TestCase):

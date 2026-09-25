@@ -389,8 +389,8 @@ M = [
  ('verdnewest', VRD, '    for body in reversed([b for b in bodies if not is_deprecated(b)]):',
                      '    for body in [b for b in bodies if not is_deprecated(b)]:'),
  ('verdapprove', VRD, '    if w in ("ACCEPT", "APPROVE", "APPROVED"):', '    if w in ("ACCEPT",):'),
- ('planunchanged', PRJ, '                    if k in present and present[k]["result"] != wanted[k]["verdict"])',
-                        '                    if k in present)'),
+ ('planunchanged', PRJ, '                    and (present[k]["result"] != wanted[k]["verdict"]',
+                        '                    and (False'),
  ('planremove', PRJ, '    remove = sorted(k for k in present if k not in wanted)', '    remove = []'),
  ('planadd', PRJ, '    add = sorted(k for k in wanted if k not in present)', '    add = []'),
  ('syncaimarker', PRJ, '            and AI_MARKER in (c.get("body") or "")]', ']'),
@@ -405,9 +405,11 @@ M = [
  ('pruneonly', PRJ, '    if a.prune_only:\n        add, update = [], []', '    if False:\n        add, update = [], []'),
  ('projdraftnote', PRJ, '            if num is None or not repo:', '            if False:'),
  ('viewnoshow', PRJ, '    print("view: %s" % ensure_view(project["id"], a.dry_run))', '    pass'),
- ('viewalready', PRJ, '        if shown is not None and fields[FIELD] in shown:', '        if False:'),
- ('viewdry', PRJ, '        if dry:\n            changed.append(view["name"] + " (would show it)")\n            continue',
+ ('viewalready', PRJ, '        if not missing:\n            continue', '        if False:\n            continue'),
+ ('viewdry', PRJ, '        if dry:\n            changed.append(view["name"] + " (would)")\n            continue',
                   '        if False:\n            changed.append(view["name"])\n            continue'),
+ ('authorplan', PRJ, '                         or present[k].get("author") != wanted[k].get("author")))', '                         ))'),
+ ('authorwrite', PRJ, '        if author_id and want.get("author"):', '        if False:'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -645,7 +647,7 @@ REGRESSION = {
     'verddeprecated': 'Thread.test_a_thread_of_only_deprecated_comments_has_no_verdict',
     'verdnewest': 'Thread.test_the_newest_comment_that_states_one_wins',
     'verdapprove': 'Marker.test_approve_in_a_marker_is_accept',
-    'planunchanged': 'Plan.test_an_unchanged_row_is_left_alone',
+    'planunchanged': 'Plan.test_a_changed_verdict_is_relabelled_not_re_added',
     'planremove': 'Plan.test_a_pr_no_longer_eligible_is_removed',
     'planadd': 'Plan.test_a_reviewed_pr_not_on_the_board_is_added',
     'syncaimarker': 'OurComments.test_a_human_comment_from_the_same_account_does_not',
@@ -659,6 +661,8 @@ REGRESSION = {
     'viewnoshow': 'Sweep.test_a_view_that_does_not_show_the_result_is_made_to',
     'viewalready': 'Sweep.test_a_view_already_showing_it_is_left_alone',
     'viewdry': 'Sweep.test_a_dry_run_does_not_change_the_view',
+    'authorplan': 'Plan.test_a_row_missing_only_its_author_is_still_rewritten',
+    'authorwrite': 'Sweep.test_a_new_row_records_who_opened_the_pr',
 }
 
 def main():
