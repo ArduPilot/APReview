@@ -1107,6 +1107,22 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
      repo; where it cannot, post the new comment and say so rather than failing the PR.
 
    - **Mark every comment as AI-generated.** Begin the body with a marker line, e.g.: `**Automated review note — AI-generated (Claude), validated against the live diff.** Please sanity-check before acting.`
+   - **State the verdict in a machine-readable marker**, on its own line immediately after the AI-generated
+     marker line. It renders as nothing on GitHub, and it is what puts the PR on the
+     [APReview Results](https://github.com/orgs/ArduPilot/projects/33) board:
+
+     ```
+     <!-- apreview: verdict=REQUEST_CHANGES head=5574a60eb2 -->
+     ```
+
+     `verdict` is exactly one of `ACCEPT`, `COMMENT`, `REQUEST_CHANGES` (`APPROVE` is accepted as a synonym
+     of `ACCEPT`). `head` is the head you reviewed. Write it on **every** comment that carries a verdict,
+     including a re-review that changes one. Do **not** write it on a followup note that only says the code
+     moved — that comment has no verdict, and the board should keep showing the last one that did.
+
+     Without it the verdict has to be recovered from prose, which works but is not exact: a survey of the
+     168 open labelled PRs on 2026-09-26 found seven different phrasings, and "the verdict moves from
+     REQUEST CHANGES to COMMENT" reads backwards unless specifically handled.
    - **Link the comment to the report it came from**, on its own line near the top, so the author can see
      the full context and what else was checked. **The URL differs per mode — use the one for the mode you
      are actually running**, and construct it from the path you published to in step 9 rather than from
