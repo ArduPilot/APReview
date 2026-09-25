@@ -22,6 +22,8 @@ PAGE = "runner/bin/make-runs-page.py"
 QUO = "runner/bin/quota.py"
 PRB = "runner/bin/claude-usage-probe.sh"
 ACC = "runner/bin/accounts.py"
+VRD = "runner/bin/apreview_verdict.py"
+PRJ = "runner/bin/project-sync.py"
 MIG = "runner/bin/migrate-auth-root.sh"
 
 # name -> (file(s), old, new)   old must appear exactly once in each file
@@ -377,6 +379,31 @@ M = [
  ('pagepolicyerr', PAGE, "    elif 'status=account-policy-error' in txt:", "    elif False:"),
  ('pagedeferfail', PAGE, "    elif r['status'] not in ('running', 'queued', 'deferred'): m['fail'] += 1",
                          "    elif r['status'] not in ('running',): m['fail'] += 1"),
+ # --- the APReview Results board ----------------------------------------------
+ ('verdmarker', VRD, '    m = MARKER.search(body or "")\n    if not m:\n        return None',
+                     '    m = MARKER.search(body or "")\n    if True:\n        return None'),
+ # the real bug: taking the verdict it moved FROM rather than the one it moved TO
+ ('verdmoves', VRD, 'r"[^.\\n]{0,40}?\\bto\\s+\\*{0,2}\\s*" + _WORDS, re.I)),',
+                    'r"[^.\\n]{0,40}?\\bfrom\\s+\\*{0,2}\\s*" + _WORDS, re.I)),'),
+ ('verddeprecated', VRD, 'return (body or "").lstrip().startswith(DEPRECATED)', 'return False'),
+ ('verdnewest', VRD, '    for body in reversed([b for b in bodies if not is_deprecated(b)]):',
+                     '    for body in [b for b in bodies if not is_deprecated(b)]:'),
+ ('verdapprove', VRD, '    if w in ("ACCEPT", "APPROVE", "APPROVED"):', '    if w in ("ACCEPT",):'),
+ ('planunchanged', PRJ, '                    if k in present and present[k]["result"] != wanted[k]["verdict"])',
+                        '                    if k in present)'),
+ ('planremove', PRJ, '    remove = sorted(k for k in present if k not in wanted)', '    remove = []'),
+ ('planadd', PRJ, '    add = sorted(k for k in wanted if k not in present)', '    add = []'),
+ ('syncaimarker', PRJ, '            and AI_MARKER in (c.get("body") or "")]', ']'),
+ ('syncauthor', PRJ, '            if c and (c.get("author") or {}).get("login") in accounts',
+                     '            if c'),
+ ('syncdedupe', PRJ, '        if owner and owner not in seen:', '        if owner:'),
+ ('pruneguard', PRJ, '    if remove and too_much_to_remove(remove, present) and not a.force_prune:',
+                     '    if False:'),
+ ('prunescale', PRJ, '    return len(remove) > max(limit, len(present) // 4)',
+                     '    return len(remove) > limit'),
+ ('prunedryrun', PRJ, '    if a.dry_run:\n        for k in add:', '    if False:\n        for k in add:'),
+ ('pruneonly', PRJ, '    if a.prune_only:\n        add, update = [], []', '    if False:\n        add, update = [], []'),
+ ('projdraftnote', PRJ, '            if num is None or not repo:', '            if False:'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -609,6 +636,22 @@ REGRESSION = {
     'pagedeferred': 'Dashboard.test_a_deferred_run_is_shown_as_held_by_quota_not_as_running',
     'pagepolicyerr': 'Dashboard.test_a_policy_that_could_not_be_applied_is_shown_as_a_failure',
     'pagedeferfail': 'Dashboard.test_a_deferred_run_counts_against_quota_and_not_against_failures',
+    'verdmarker': 'Marker.test_the_marker_decides_when_it_is_there',
+    'verdmoves': 'Prose.test_a_verdict_that_moved_is_the_one_it_moved_to',
+    'verddeprecated': 'Thread.test_a_thread_of_only_deprecated_comments_has_no_verdict',
+    'verdnewest': 'Thread.test_the_newest_comment_that_states_one_wins',
+    'verdapprove': 'Marker.test_approve_in_a_marker_is_accept',
+    'planunchanged': 'Plan.test_an_unchanged_row_is_left_alone',
+    'planremove': 'Plan.test_a_pr_no_longer_eligible_is_removed',
+    'planadd': 'Plan.test_a_reviewed_pr_not_on_the_board_is_added',
+    'syncaimarker': 'OurComments.test_a_human_comment_from_the_same_account_does_not',
+    'syncauthor': 'OurComments.test_a_marked_comment_from_someone_else_does_not',
+    'syncdedupe': 'Owners.test_each_owner_once_in_the_order_first_seen',
+    'pruneguard': 'Sweep.test_an_empty_search_does_not_empty_the_board',
+    'prunescale': 'PruneGuard.test_the_limit_scales_with_the_board_not_just_a_flat_count',
+    'prunedryrun': 'Sweep.test_a_dry_run_changes_nothing',
+    'pruneonly': 'Sweep.test_prune_only_removes_without_adding',
+    'projdraftnote': 'Sweep.test_a_free_text_note_on_the_board_is_left_alone',
 }
 
 def main():
