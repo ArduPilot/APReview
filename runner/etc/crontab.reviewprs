@@ -65,3 +65,8 @@ MAILTO=""
 # Keep the runs dashboard current even when no run has fired recently. It is
 # published to $REVIEW_PUBLIC_URL/DevCallReviews/runs.html
 */10 * * * *   $HOME/review/bin/publish-runs-page.sh
+
+# The APReview Results board: every open PR with a trigger label that we have
+# posted a verdict on. A run updates it on the way out, but a PR that is merged
+# or closed says nothing to us, so this sweep is what takes those off again.
+*/15 * * * *   $HOME/review/bin/project-sync.sh

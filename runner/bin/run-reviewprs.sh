@@ -163,7 +163,8 @@ LOCKED=0
 trap 'FR=""; [ "$LOCKED" = 1 ] && FR="--from-run"; \
       "$HOME/review/bin/reap-orphans.sh" $FR 2>&1; \
       "$HOME/review/bin/claude-usage-probe.sh" end >/dev/null 2>&1; \
-      "$HOME/review/bin/publish-runs-page.sh" >/dev/null 2>&1 || true' EXIT
+      "$HOME/review/bin/publish-runs-page.sh" >/dev/null 2>&1 || true; \
+      "$HOME/review/bin/project-sync.sh" >/dev/null 2>&1 || true' EXIT
 
 if [ "$DRY" = 1 ]; then
     flock -n 9 9>"$LOCK" && echo "  run lock: free" || echo "  run lock: held by a run in flight (a real run would wait or skip)"
