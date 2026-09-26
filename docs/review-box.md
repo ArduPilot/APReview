@@ -679,3 +679,42 @@ password file) or over ssh (`host:path`, no auth option). Set `REVIEW_PUBLISH`,
 `RSYNC_AUTH` and `REVIEW_PUBLIC_URL` in `local.conf`; the command reads its own
 previous reports back from `REVIEW_PUBLIC_URL` and links to it from the comments it
 posts. With `REVIEW_PUBLISH` unset, a run keeps its report local and says so.
+
+`REVIEW_PUBLIC_URL` is always used as `<url>/<Module>/...`, so moving the whole
+tree is a change to that one variable and nothing in the code.
+
+### The reference deployment, and the move off fjall
+
+Since 2026-09-26 the reports are served from
+[firmware.ardupilot.org/Tools/APReview](https://firmware.ardupilot.org/Tools/APReview/),
+not from `uav.tridgell.net`:
+
+```
+REVIEW_PUBLISH="rsync://reviews@autotest.ardupilot.org"
+RSYNC_AUTH="--password-file=$HOME/review/etc/rsync.password.autotest"
+REVIEW_PUBLIC_URL="https://firmware.ardupilot.org/Tools/APReview"
+```
+
+Three rsyncd modules on that host — `DevCallReviews`, `RsyncReviews` and
+`UserReviews`, the same names fjall used, so only the host changed. They write
+into `/home/autotest/APM/buildlogs/binaries/Tools/APReview/<module>`, as
+`uid = autotest`. That path is under the tree the site serves:
+`/home/autotest/APM` is a symlink to `/storage/autotest/APM`, which is what
+`firmware.ardupilot.org` publishes.
+
+Each module carries `hosts allow = fjall.tridgell.net`, which is the review
+box's egress address — its own `hosts allow` rather than relying on the file's
+global one, so the review credential cannot be used from anywhere else.
+
+Old links are not broken. `/home/tridge/UAV-web/.htaccess` on fjall carries:
+
+```apache
+RedirectMatch 301 ^/(DevCallReviews|RsyncReviews|UserReviews)(/.*)?$ \
+    https://firmware.ardupilot.org/Tools/APReview/$1$2
+```
+
+Permanent, because those URLs are in thousands of review comments already posted
+on GitHub and cannot be rewritten. The path after the module name is carried
+over unchanged, so deep links and their `#pr<number>` anchors still land in the
+right place. The old files are deliberately left in place underneath; nothing
+serves them now, but they are the fallback if the new site has to be rebuilt.
