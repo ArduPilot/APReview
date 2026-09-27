@@ -126,6 +126,9 @@ echo "=============================================================="
 # spends quota or touches an account, so it loses nothing by waiting.
 # The role a run selected, for the children that take their own readings.
 export REVIEW_ROLE="$ROLE"
+CLAUDE_MODEL="${REVIEW_CLAUDE_MODEL:-claude-opus-5-5}"
+[ "$CLAUDE_MODEL" = "claude-opus-5-5" ] || \
+    echo "model: $CLAUDE_MODEL (overridden by REVIEW_CLAUDE_MODEL)"
 if ! clear_inherited_credentials; then
     echo "FATAL: these could not be removed from the environment and would"
     echo "       decide the account instead of the role:$CLEARED_FAILED"
@@ -573,7 +576,7 @@ fi
 fi
 
 if [ "$DRY" = 1 ]; then
-    echo "  would run: claude -p \"$PROMPT\" --model claude-opus-5 --effort high"
+    echo "  would run: claude -p \"$PROMPT\" --model $CLAUDE_MODEL --effort high"
     echo "             --permission-mode auto --add-dir $REVIEW_ROOT"
     echo "DRY RUN: every pre-flight passed; nothing was started."
     exit 0
@@ -595,6 +598,17 @@ START=$(date +%s)
 # Pin the model explicitly rather than via the 'opus' alias, so a future alias
 # change cannot silently move these runs onto a different model (and a different
 # quota pool). High effort: these reviews are the whole point of the box.
+#
+# REVIEW_CLAUDE_MODEL overrides it for one run: how a new model is tried on real
+# work, and how to drop back to the previous one without an edit and a deploy -
+#     REVIEW_CLAUDE_MODEL=claude-opus-5 review-now.sh <pr>
+# The default is the pin, and an unset or empty variable changes nothing, so
+# this cannot become a way for the model to drift quietly.
+#
+# Moved to opus 5.5 on 2026-09-27. Claude Code has to know the model by name:
+# an older CLI accepts it, then assumes a 200k context window and auto-compacts
+# to fit, which on a three-hour sweep would be silent and awful. blu6 was on
+# 2.1.274, which did not, and was upgraded to 2.1.283 first.
 # Again, immediately before the launch. The clear at the top of the run is five
 # minutes and several claude invocations ago, and one of them is this run's own
 # start probe: `claude -p /usage` takes the OAuth refresh lock, and if the
@@ -605,7 +619,7 @@ START=$(date +%s)
 clear_stale_oauth_lock "$CLAUDE_DIR"
 
 stdbuf -oL -eL claude -p "$PROMPT" \
-    --model claude-opus-5 \
+    --model "$CLAUDE_MODEL" \
     --effort high \
     --permission-mode auto \
     --add-dir "$REVIEW_ROOT" \

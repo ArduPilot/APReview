@@ -127,6 +127,7 @@ print(o.get('accessToken') or '')" 2>/dev/null)
         "${STUB_CONFIG_DIR:-$d}"
 else
     echo unexpected-launch > "$HOME/launched"
+    echo "$@" > "$HOME/launch-args"
     exit 97
 fi''')
         stub(os.path.join(self.stubs, "gh"), 'exit 0')
@@ -323,6 +324,42 @@ fi''')
         rc, log = self.guard_live("followup")
         self.assertEqual(rc, 0, log)
         self.assertFalse(os.path.exists(stale), log)
+
+    def test_the_model_is_pinned_unless_deliberately_overridden(self):
+        # the pin exists so an alias change cannot move these runs onto another
+        # model, and another quota pool, without anyone noticing
+        self.settings(self.AUTH_DENY)   # reach the launch line
+        out = self.whole_run("followup", "--dry-run")
+        self.assertIn("--model claude-opus-5-5 ", out.stdout)
+        self.assertNotIn("REVIEW_CLAUDE_MODEL", out.stdout)
+
+    def test_an_override_moves_the_model_and_says_so(self):
+        self.settings(self.AUTH_DENY)   # reach the launch line
+        # to the previous model, which is also the rollback path
+        out = self.whole_run("followup", "--dry-run",
+                             REVIEW_CLAUDE_MODEL="claude-opus-5")
+        self.assertIn("--model claude-opus-5 ", out.stdout)
+        self.assertIn("overridden by REVIEW_CLAUDE_MODEL", out.stdout)
+
+    def test_an_empty_override_is_not_an_override(self):
+        # an unset variable that expands to nothing must not launch claude with
+        # an empty --model
+        self.settings(self.AUTH_DENY)   # reach the launch line
+        out = self.whole_run("followup", "--dry-run", REVIEW_CLAUDE_MODEL="")
+        self.assertIn("--model claude-opus-5-5 ", out.stdout)
+        self.assertNotIn("overridden", out.stdout)
+
+    def test_the_launch_really_uses_the_pinned_model(self):
+        """Not the dry-run echo - the command that actually starts.
+
+        The echo and the launch are two separate strings; pinning only the echo
+        lets them drift, and the one that spends the subscription is the launch.
+        """
+        self.settings(self.AUTH_DENY)
+        self.whole_run("followup")          # not --dry-run: it reaches claude
+        args = os.path.join(self.home, "launch-args")
+        self.assertTrue(os.path.exists(args), "claude was never launched")
+        self.assertIn("--model claude-opus-5-5", open(args).read())
 
     def test_a_dry_run_reports_a_choice_without_recording_it(self):
         self.policy({"default": {"claude": ["claude-ardupilot"]}},

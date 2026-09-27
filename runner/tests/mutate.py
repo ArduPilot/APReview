@@ -335,8 +335,8 @@ M = [
  ("stalllockwait", PAGE, "        if w and 'lock acquired' not in txt:",
                          "        if False:"),
  # a refusal that nobody can see is a slot that goes quiet
- ("refusalbeforelog", RUN, 'export REVIEW_ROLE="$ROLE"\nif ! clear_inherited_credentials',
-                           'export REVIEW_ROLE="$ROLE"\nexec >/dev/null\nif ! clear_inherited_credentials'),
+ ("refusalbeforelog", RUN, 'if ! clear_inherited_credentials',
+                           'exec >/dev/null\nif ! clear_inherited_credentials'),
  # the dashboard: it describes the accounts the roles select
  ("pageaccounts", QUO, 'sorted(glob.glob(os.path.join(glob.escape(AUTH), tool + "-*")))', "[]"),
  ("pageown", QUO, 'for d in [os.path.join(HOME, "." + tool)] + \\', 'for d in [] + \\'),
@@ -422,6 +422,12 @@ M = [
                     '    if False:'),
  ('scopeexplain', PRJ, '        raise GhError(_explain((p.stderr or p.stdout).strip()))\n    try:',
                        '        raise GhError((p.stderr or p.stdout).strip()[:400])\n    try:'),
+ # the model is pinned, and the override cannot become a silent drift
+ ('modelpin', RUN, 'CLAUDE_MODEL="${REVIEW_CLAUDE_MODEL:-claude-opus-5-5}"',
+                   'CLAUDE_MODEL="${REVIEW_CLAUDE_MODEL:-claude-opus-5}"'),
+ ('modelalias', RUN, '    --model "$CLAUDE_MODEL" \\', '    --model opus \\'),
+ ('modelempty', RUN, 'CLAUDE_MODEL="${REVIEW_CLAUDE_MODEL:-claude-opus-5-5}"',
+                     'CLAUDE_MODEL="$REVIEW_CLAUDE_MODEL"'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -678,6 +684,9 @@ REGRESSION = {
     'syncrealpath': 'Owners.test_it_finds_repos_json_through_a_symlinked_bin',
     'scopehelp': 'ScopeMessage.test_a_scope_failure_names_the_command_that_fixes_it',
     'scopeexplain': 'ScopeMessage.test_the_message_survives_the_path_a_scope_failure_actually_takes',
+    'modelpin': 'Guard.test_the_model_is_pinned_unless_deliberately_overridden',
+    'modelalias': 'Guard.test_the_launch_really_uses_the_pinned_model',
+    'modelempty': 'Guard.test_an_empty_override_is_not_an_override',
 }
 
 def main():
