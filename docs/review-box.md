@@ -616,6 +616,21 @@ they disagreed ten times, the report being the stale one.
    words are everywhere in ordinary review prose. Ten of the 168 name a second
    verdict within 400 characters of the right one.
 
+   An adversarial review on 2026-09-27 got eight wrong answers out of it, and
+   the anchors are correspondingly fussier now. A verdict word may not begin a
+   longer word (`Verdict: acceptable once the crash is fixed` was an ACCEPT); a
+   heading or a bold run counts only if the verdict is all it contains (`##
+   Comment on test coverage`, `Please **comment** on the test plan`); and a
+   verdict inside a negated or hypothetical clause is ignored (`the verdict
+   does not move to ACCEPT`, `if tests pass, the verdict moves to ACCEPT`).
+   Quotations and fenced code are stripped before any of it - a maintainer
+   disagreeing with `> **Verdict: ACCEPT**` was read as a fresh ACCEPT, and so
+   was a marker quoted as an example.
+
+   Coverage fell from 166 of 168 to 155 of 164 as a result. That is the trade
+   being made on purpose: unknown leaves the last plainly-stated verdict
+   standing, and a wrong verdict does not.
+
    `the verdict moves from REQUEST CHANGES to COMMENT` is handled on its own and
    first: every other anchor reads it backwards and takes the old verdict. Four
    PRs were wrong that way before it existed.
@@ -666,11 +681,32 @@ gh auth refresh -s project,read:project
 
 Until then the sync exits 2 and says so; nothing else is affected.
 
-### Refusing to empty the board
+### Removing a row needs evidence, not absence
 
-A sweep that returns nothing looks exactly like every PR having merged. More
-than 25 removals, or more than a quarter of the board, is refused with exit 3
-and nothing changed; `--force-prune` overrides it when the news is real.
+A row the search did not return is a question, not an answer. Search is capped
+at [1000 results](https://docs.github.com/en/graphql/reference/search), its
+index lags, an org can answer empty, and a transient failure looks the same as
+"everything merged". So every removal candidate is checked against the PR
+itself - state and labels - and only a definite "closed, or no longer labelled"
+takes a row off. Unknown keeps the row.
+
+That check is the protection. The count threshold behind it is an alarm for
+something systematically wrong: more than 25 removals, or more than a quarter
+of the board, or the last row off a board that had more than one, is refused
+with exit 3 and nothing changed. `--force-prune` overrides it.
+
+Numbers are sent with `-F`, not `-f`. `-f` makes every value a String and
+`Int!` refuses a String, which the caller reads as "cannot tell" - safe, and
+useless: it made every check answer unknown, so nothing was ever removed.
+
+Comments are read newest-first and paged backwards until a verdict is found, up
+to five pages. A PR busy enough to push its review out of the newest hundred
+would otherwise look unreviewed, and lose its row.
+
+One sync at a time: `project-sync.sh` holds a lock, because the cron sweep and a
+run's exit path can fire together and interleave - the first reads the board,
+the second adds a row, the first deletes it as "not in my search". Every `gh`
+call has a deadline, since the sync runs while the run lock is still held.
 
 ## Publishing
 

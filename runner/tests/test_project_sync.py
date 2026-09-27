@@ -126,6 +126,65 @@ class Prose(unittest.TestCase):
                    "guidance on work in progress rather than a merge gate."), (None, None))
 
 
+class Adversarial(unittest.TestCase):
+    """Every one of these was a wrong answer found by an adversarial review.
+
+    Kept as its own class because they are not phrasings anyone expected - they
+    are what the parser did when someone went looking for ways to break it.
+    """
+
+    def check(self, text, want):
+        got, how = V.from_prose(text)
+        self.assertEqual(got, want, "%r matched %s" % (text[:60], how))
+
+    def test_a_verdict_word_may_not_be_the_start_of_a_longer_word(self):
+        self.check("Verdict: acceptable once the crash is fixed.", None)
+
+    def test_a_heading_about_a_verdict_is_not_a_verdict(self):
+        self.check("## Comment on test coverage", None)
+
+    def test_emphasis_mid_sentence_is_not_a_verdict(self):
+        self.check("Please **comment** on the test plan.", None)
+
+    def test_a_bold_verdict_inside_a_sentence_is_an_opinion(self):
+        # the review's own verdict opens a line or a sentence; bold in the
+        # middle of one is somebody weighing up, not declaring
+        self.check("I would call this **COMMENT**, personally.", None)
+
+    def test_a_denied_verdict_is_not_the_verdict(self):
+        self.check("Verdict does not move to ACCEPT. **REQUEST CHANGES**.", V.REQUEST)
+
+    def test_a_conditional_verdict_is_not_the_verdict(self):
+        self.check("Verdict: COMMENT. If tests pass, the verdict moves to ACCEPT.",
+                   V.COMMENT)
+
+    def test_a_negated_bold_verdict_decides_nothing(self):
+        self.check("This is not a **REQUEST CHANGES**.", None)
+
+    def test_was_x_now_y_is_y(self):
+        self.check("Verdict was **REQUEST CHANGES**, now **COMMENT**.", V.COMMENT)
+
+    def test_downgraded_to_x_is_x(self):
+        self.check("Verdict: ACCEPT, downgraded to REQUEST CHANGES.", V.REQUEST)
+
+    def test_a_quoted_verdict_is_somebody_quoting_us(self):
+        # a maintainer disagreeing with our review was read as a fresh ACCEPT
+        body = ("I disagree with this:\n"
+                "> **Verdict: ACCEPT**\n"
+                "There are blockers.")
+        self.assertEqual(V.from_prose(body), (None, None))
+
+    def test_a_quoted_marker_is_not_our_marker(self):
+        body = ("Here is what the bot emits:\n"
+                "> <!-- apreview: verdict=ACCEPT -->\n"
+                "and I disagree.")
+        self.assertIsNone(V.from_marker(body))
+
+    def test_a_marker_in_a_fenced_block_is_an_example(self):
+        body = "To mark a verdict, write:\n```\n<!-- apreview: verdict=ACCEPT -->\n```\n"
+        self.assertIsNone(V.from_marker(body))
+
+
 class Thread(unittest.TestCase):
     def test_the_newest_comment_that_states_one_wins(self):
         self.assertEqual(V.of_thread(["**Verdict: COMMENT**", "**Verdict: ACCEPT**"])[0],
@@ -282,6 +341,12 @@ class Sweep(unittest.TestCase):
         self.found = {}          # key -> verdict the comments say
         self.note = False        # whether the board also holds a free-text note
         self.shown = ["f1", "fa"]   # field ids the view currently displays
+        self.pr_state = {}       # key -> (state, [labels]) for the direct check
+        self.view_readable = True
+        self.search_pages = 1    # how many pages the search answers in
+        self.item_pages = 1
+        self.older = {}          # key -> an older comment page, for pagination
+        self.searched = []       # every search query string seen
         self.real_gh_list = PS.gh_list
         self.addCleanup(setattr, PS, "gh_list", self.real_gh_list)
         PS.gh_list = self.fake_gh_list
@@ -298,21 +363,45 @@ class Sweep(unittest.TestCase):
             return {"node": {"views": {"nodes": [{"id": "view1", "number": 1,
                                                   "name": "View 1"}]}}}
         if "ProjectV2View" in query and "fields(first: 50)" in query:
+            if not self.view_readable:
+                raise PS.GhError("502 while reading the view")
             return {"node": {"fields": {"nodes": [{"id": f} for f in self.shown]}}}
+        if "pullRequest(number:" in query and "before:" not in query:
+            key = "%s/%s#%s" % (v["owner"], v["repo"], v["number"])
+            state, labels = self.pr_state.get(key, ("MERGED", []))
+            if state == "GONE":
+                return {"repository": {"pullRequest": None}}
+            return {"repository": {"pullRequest": {
+                "state": state,
+                "labels": {"nodes": [{"name": n} for n in labels]}}}}
+        if "before:" in query:
+            key = "%s/%s#%s" % (v["owner"], v["repo"], v["number"])
+            return {"repository": {"pullRequest": {"comments": self.older.get(key)}}}
         if "search(" in query:
+            self.searched.append(v["q"])
+            org = v["q"].split("org:")[1].split()[0]
+            mine = [(k, x) for k, x in self.found.items()
+                    if k.partition("#")[0].startswith(org)]
+            page = int(v.get("after") or 0)
+            per = max(1, -(-len(mine) // self.search_pages)) if mine else 1
+            chunk = mine[page * per:(page + 1) * per]
             nodes = []
-            for key, verdict in self.found.items():
+            for key, verdict in chunk:
                 repo, _, num = key.partition("#")
-                if not repo.startswith(v["q"].split("org:")[1].split()[0]):
-                    continue
                 nodes.append({
                     "id": "node-" + key, "number": int(num), "title": "t",
                     "url": "u", "state": "OPEN", "isDraft": False,
-                    "repository": {"nameWithOwner": repo},
                     "author": {"login": "someone"},
-                    "comments": {"nodes": [{"author": {"login": "AP-Review"},
-                                            "body": NOTE + "**Verdict: %s**" % verdict}]}})
-            return {"search": {"pageInfo": {"hasNextPage": False, "endCursor": None},
+                    "repository": {"nameWithOwner": repo},
+                    "comments": {
+                        "pageInfo": {"hasPreviousPage": key in self.older,
+                                     "startCursor": "cur-" + key},
+                        "nodes": ([] if key in self.older else
+                                  [{"author": {"login": "AP-Review"},
+                                    "body": NOTE + "**Verdict: %s**" % verdict}])}})
+            more = (page + 1) * per < len(mine)
+            return {"search": {"pageInfo": {"hasNextPage": more,
+                                            "endCursor": str(page + 1)},
                                "nodes": nodes}}
         if "projectsV2(first: 100)" in query:
             return {"organization": {"id": "org1", "projectsV2": {"nodes": [
@@ -335,8 +424,13 @@ class Sweep(unittest.TestCase):
                               "fieldValues": {"nodes": [
                                   {"name": verdict, "field": {"name": PS.FIELD}},
                                   {"text": "someone", "field": {"name": PS.AUTHOR}}]}})
-            return {"node": {"items": {"pageInfo": {"hasNextPage": False,
-                                                    "endCursor": None}, "nodes": nodes}}}
+            page = int(v.get("after") or 0)
+            per = max(1, -(-len(nodes) // self.item_pages)) if nodes else 1
+            chunk = nodes[page * per:(page + 1) * per]
+            more = (page + 1) * per < len(nodes)
+            return {"node": {"items": {"pageInfo": {"hasNextPage": more,
+                                                    "endCursor": str(page + 1)},
+                                       "nodes": chunk}}}
         if "deleteProjectV2Item" in query:
             return {"deleteProjectV2Item": {"deletedItemId": v["item"]}}
         if "addProjectV2ItemById" in query:
@@ -411,6 +505,152 @@ class Sweep(unittest.TestCase):
         self.assertEqual(self.run_main("--dry-run"), 0)
         self.assertEqual(self.view_sets, [])
 
+    # --- deletion needs evidence, not absence ---------------------------------
+    def test_a_row_the_search_missed_but_the_pr_still_wants_is_kept(self):
+        """Search is capped at 1000, lags its index, and can answer short.
+
+        Absence is a question; the PR itself is the answer.
+        """
+        self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        self.found = {}                       # the search lost it
+        self.pr_state = {"ArduPilot/ardupilot#1": ("OPEN", ["AIReview"])}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.deletes(), [], "it deleted a PR that is still open")
+
+    def test_a_row_whose_pr_will_not_answer_is_kept(self):
+        self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        self.found = {}
+        self.pr_state = {"ArduPilot/ardupilot#1": ("GONE", [])}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.deletes(), [])
+
+    def test_a_merged_pr_is_removed_even_though_it_kept_its_label(self):
+        # the label stays on a PR after it merges, so the state is what decides
+        self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        self.found = {}
+        self.pr_state = {"ArduPilot/ardupilot#1": ("MERGED", ["AIReview"])}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.deletes(), ["item-ArduPilot/ardupilot#1"])
+
+    def test_a_pr_that_lost_its_label_is_removed(self):
+        self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        self.found = {}
+        self.pr_state = {"ArduPilot/ardupilot#1": ("OPEN", ["Copter"])}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.deletes(), ["item-ArduPilot/ardupilot#1"])
+
+    def test_an_empty_org_does_not_take_that_org_off_the_board(self):
+        # one org answering empty looked exactly like every PR in it closing
+        self.board = {"ArduPilot/ardupilot#1": "ACCEPT",
+                      "RsyncProject/rsync#9": "COMMENT"}
+        self.found = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        self.pr_state = {"RsyncProject/rsync#9": ("OPEN", ["AIReview"])}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.deletes(), [])
+
+    # --- pagination -----------------------------------------------------------
+    def test_every_page_of_the_search_is_read(self):
+        self.found = {"ArduPilot/ardupilot#%d" % i: "COMMENT" for i in range(7)}
+        self.search_pages = 3
+        self.assertEqual(self.run_main(), 0)
+        adds = [v for q, v in self.calls if "addProjectV2ItemById" in q]
+        self.assertEqual(len(adds), 7, "stopped before the last page")
+
+    def test_every_page_of_the_board_is_read(self):
+        # a board read short looks like rows that are not there, and the rows it
+        # did see get re-added
+        self.board = {"ArduPilot/ardupilot#%d" % i: "COMMENT" for i in range(7)}
+        self.found = {"ArduPilot/ardupilot#%d" % i: "COMMENT" for i in range(7)}
+        self.item_pages = 3
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual([v for q, v in self.calls if "addProjectV2ItemById" in q], [])
+
+    def test_the_verdict_is_found_on_an_older_comment_page(self):
+        # a PR busy enough to push the review out of the newest hundred would
+        # otherwise drop off the board entirely
+        key = "ArduPilot/ardupilot#1"
+        self.found = {key: "REQUEST CHANGES"}
+        self.older[key] = {
+            "pageInfo": {"hasPreviousPage": False, "startCursor": None},
+            "nodes": [{"author": {"login": "AP-Review"},
+                       "body": NOTE + "**Verdict: REQUEST CHANGES**"}]}
+        self.assertEqual(self.run_main(), 0)
+        sets = [v for q, v in self.calls if "updateProjectV2ItemFieldValue" in q]
+        self.assertIn("o-REQUEST CHANGES", [x.get("option") for x in sets])
+
+    def test_all_three_trigger_labels_are_searched(self):
+        self.found = {"ArduPilot/ardupilot#1": "COMMENT"}
+        self.run_main()
+        for label in PS.LABELS:
+            self.assertTrue(any(label in q for q in self.searched), label)
+
+    # --- views ----------------------------------------------------------------
+    def test_a_view_that_cannot_be_read_is_left_alone(self):
+        # one 502 used to be read as permission to install the defaults, wiping
+        # whatever columns somebody had arranged
+        self.view_readable = False
+        self.found = {"ArduPilot/ardupilot#1": "COMMENT"}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.view_sets, [], "it rewrote a view it could not read")
+
+    def test_adding_our_columns_keeps_the_ones_already_there(self):
+        self.shown = ["f1", "someone-elses-column"]      # PR Author missing
+        self.found = {"ArduPilot/ardupilot#1": "COMMENT"}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(len(self.view_sets), 1)
+        self.assertIn("someone-elses-column", self.view_sets[0])
+        self.assertIn("fa", self.view_sets[0])
+
+    def test_it_will_not_take_the_last_row_off_a_board(self):
+        # three merged PRs is under every threshold, but a board going to zero
+        # is what a broken sweep looks like and is worth a human glance
+        self.board = {"ArduPilot/ardupilot#%d" % i: "ACCEPT" for i in range(3)}
+        self.found = {}
+        self.pr_state = {k: ("MERGED", []) for k in self.board}
+        self.assertEqual(self.run_main(), 3)
+        self.assertEqual(self.deletes(), [])
+
+    def test_a_refused_prune_really_changes_nothing(self):
+        # the view was rewritten before the safety check, so "Nothing was
+        # changed" was not true
+        self.shown = ["f1"]                               # would want updating
+        self.board = {"ArduPilot/ardupilot#%d" % i: "ACCEPT" for i in range(60)}
+        self.found = {}
+        self.pr_state = {k: ("MERGED", []) for k in self.board}
+        self.assertEqual(self.run_main(), 3)
+        self.assertEqual(self.deletes(), [])
+        self.assertEqual(self.view_sets, [], "it changed the view then refused")
+
+    def test_one_org_failing_applies_nothing_from_the_others(self):
+        # half a picture is the dangerous kind: the orgs already gathered would
+        # look complete, and every row of the failed org would be "missing"
+        self.board = {"ArduPilot/ardupilot#1": "ACCEPT",
+                      "RsyncProject/rsync#9": "COMMENT"}
+        self.found = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        real = self.fake_gh
+
+        def flaky(query, **v):
+            if "search(" in query and "org:RsyncProject" in v.get("q", ""):
+                raise PS.GhError("502 Bad Gateway")
+            return real(query, **v)
+
+        PS.gh = flaky
+        with self.assertRaises(PS.GhError):
+            self.run_main()
+        self.assertEqual(self.deletes(), [])
+
+    def test_a_free_text_note_never_reaches_the_plan(self):
+        """It must be skipped when the board is read, not merely survive.
+
+        The direct-verification layer would keep it anyway - a note has no PR
+        to ask about - so asserting only that it is not deleted proves nothing
+        about the skip itself.
+        """
+        self.note = True
+        self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        present = PS.project_items("proj1")
+        self.assertEqual(sorted(present), ["ArduPilot/ardupilot#1"])
+
     def test_a_free_text_note_on_the_board_is_left_alone(self):
         # someone may pin a note to the project; it is not a PR, it cannot be
         # matched against the search, and it must not be removed or crashed on
@@ -465,6 +705,75 @@ class ScopeMessage(unittest.TestCase):
     def test_an_ordinary_failure_is_not_dressed_up_as_a_scope_problem(self):
         text = PS._explain("Could not resolve to an Organization with the login of 'x'")
         self.assertNotIn("gh auth refresh", text)
+
+
+class GhCalls(unittest.TestCase):
+    """The transport. Every one of these is a way to mistake failure for data."""
+
+    def reply(self, out, rc=0):
+        import subprocess as sp
+        real = PS.subprocess.run
+        self.addCleanup(setattr, PS.subprocess, "run", real)
+        PS.subprocess.run = lambda *a, **k: sp.CompletedProcess(
+            a[0] if a else [], rc, out, "")
+
+    def test_a_number_is_sent_as_a_number(self):
+        """-f sends everything as a String, and Int! refuses a String.
+
+        The failure is caught and read as "cannot tell", which is safe and
+        useless: every deletion check answered unknown, so nothing was ever
+        removed and the board only grew.
+        """
+        import subprocess as sp
+        seen = {}
+        real = PS.subprocess.run
+        self.addCleanup(setattr, PS.subprocess, "run", real)
+
+        def spy(args, **k):
+            seen["args"] = args
+            return sp.CompletedProcess(args, 0, json.dumps({"data": {}}), "")
+
+        PS.subprocess.run = spy
+        PS.gh("query { x }", number=31738, owner="ArduPilot")
+        args = seen["args"]
+        self.assertIn("-F", args, "an Int was sent with -f and would be refused")
+        self.assertEqual(args[args.index("-F") + 1], "number=31738")
+        self.assertEqual(args[args.index("owner=ArduPilot") - 1], "-f")
+
+    def test_errors_beside_data_are_still_errors(self):
+        # GitHub answers a partial result as data plus errors, exit 0. Reading
+        # the data and ignoring the errors is how a short answer becomes truth.
+        self.reply(json.dumps({"data": {"search": {"nodes": []}},
+                               "errors": [{"message": "timed out"}]}))
+        with self.assertRaises(PS.GhError):
+            PS.gh("query { x }")
+
+    def test_unparseable_output_is_an_error_not_an_empty_answer(self):
+        self.reply("<html>502</html>")
+        with self.assertRaises(PS.GhError):
+            PS.gh("query { x }")
+
+    def test_every_call_carries_a_deadline(self):
+        """The sync runs from a run's EXIT trap, still holding the run lock.
+
+        Asserting that a TimeoutExpired becomes a GhError proves nothing on its
+        own - the stub raises it either way. What matters is that a timeout was
+        asked for at all.
+        """
+        import subprocess as sp
+        seen = {}
+        real = PS.subprocess.run
+        self.addCleanup(setattr, PS.subprocess, "run", real)
+
+        def spy(*a, **k):
+            seen.update(k)
+            raise sp.TimeoutExpired(cmd="gh", timeout=1)
+
+        PS.subprocess.run = spy
+        with self.assertRaises(PS.GhError) as e:
+            PS.gh("query { x }")
+        self.assertIn("timed out", str(e.exception))
+        self.assertTrue(seen.get("timeout"), "subprocess.run was given no timeout")
 
 
 class Owners(unittest.TestCase):

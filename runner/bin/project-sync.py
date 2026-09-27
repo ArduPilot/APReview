@@ -49,6 +49,19 @@ OPTIONS = [("ACCEPT", "GREEN", "Reviewed, no blockers"),
            ("REQUEST CHANGES", "RED", "Reviewed, blocking findings")]
 
 
+GH_TIMEOUT = 120               # no gh call may hang a run's exit path
+
+
+def _run(args, stdin=None):
+    """gh, with a deadline. The sync runs from a run's EXIT trap, and a request
+    that never returns would hold the run lock open behind it."""
+    try:
+        return subprocess.run(args, capture_output=True, text=True,
+                              input=stdin, timeout=GH_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise GhError("gh timed out after %ds" % GH_TIMEOUT)
+
+
 class GhError(Exception):
     """A GitHub call failed.
 
@@ -58,10 +71,18 @@ class GhError(Exception):
 
 
 def gh(query, **variables):
+    """A GraphQL call. Numbers go as numbers.
+
+    -f sends every value as a String, so an Int! argument is rejected with
+    "could not coerce value". That failure is caught and read as "cannot tell",
+    which is safe but useless: it made every deletion check answer unknown, so
+    nothing was ever removed. -F sends a typed value.
+    """
     args = ["gh", "api", "graphql", "-f", "query=" + query]
     for k, v in variables.items():
-        args += ["-f", "%s=%s" % (k, v)]
-    p = subprocess.run(args, capture_output=True, text=True)
+        typed = isinstance(v, (int, float)) and not isinstance(v, bool)
+        args += ["-F" if typed else "-f", "%s=%s" % (k, v)]
+    p = _run(args)
     if p.returncode != 0:
         # gh exits non-zero on a GraphQL error as well as on a transport
         # failure, and prints the message itself, so this is the path a scope
@@ -97,8 +118,7 @@ def gh_list(query, strings, lists):
     JSON rather than as repeated -f arguments.
     """
     body = {"query": query, "variables": dict(strings, **lists)}
-    p = subprocess.run(["gh", "api", "graphql", "--input", "-"],
-                       input=json.dumps(body), capture_output=True, text=True)
+    p = _run(["gh", "api", "graphql", "--input", "-"], stdin=json.dumps(body))
     if p.returncode != 0:
         raise GhError(_explain((p.stderr or p.stdout).strip()))
     d = json.loads(p.stdout)
@@ -155,10 +175,60 @@ query($q: String!, $after: String) {
       id number title url state isDraft
       author { login }
       repository { nameWithOwner }
-      comments(first: 100) { nodes { author { login } body } }
+      comments(last: 100) {
+        pageInfo { hasPreviousPage startCursor }
+        nodes { author { login } body }
+      }
     } }
   }
 }"""
+
+# Older comments on one PR, walked backwards. comments(last: 100) gives the
+# newest hundred, which is the window the verdict is almost always in; a PR
+# busy enough to push it out of that window would otherwise lose its row
+# entirely, because "no verdict" and "not reviewed" look the same here.
+OLDER_COMMENTS = """
+query($owner: String!, $repo: String!, $number: Int!, $before: String!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      comments(last: 100, before: $before) {
+        pageInfo { hasPreviousPage startCursor }
+        nodes { author { login } body }
+      }
+    }
+  }
+}"""
+
+
+MAX_COMMENT_PAGES = 5          # 500 comments back; beyond that, give up openly
+
+
+def verdict_of(pr, accounts, fetch_older=None):
+    """The PR's verdict, paging back through comments until one is stated."""
+    page = pr["comments"]
+    while True:
+        verdict, how = V.of_thread(our_comments(page["nodes"], accounts))
+        if verdict:
+            return verdict, how
+        info = page.get("pageInfo") or {}
+        if not info.get("hasPreviousPage") or not info.get("startCursor"):
+            return None, None
+        if fetch_older is None:
+            fetch_older = _older_comments
+        page = fetch_older(pr, info["startCursor"])
+        if page is None:
+            return None, None
+
+
+def _older_comments(pr, cursor, _depth=[0]):
+    repo = pr["repository"]["nameWithOwner"]
+    owner, _, name = repo.partition("/")
+    try:
+        d = gh(OLDER_COMMENTS, owner=owner, repo=name,
+               number=int(pr["number"]), before=cursor)
+    except GhError:
+        return None
+    return ((d.get("repository") or {}).get("pullRequest") or {}).get("comments")
 
 
 def reviewed_prs(owners, accounts):
@@ -176,8 +246,7 @@ def reviewed_prs(owners, accounts):
                 if not pr:
                     continue
                 key = "%s#%d" % (pr["repository"]["nameWithOwner"], pr["number"])
-                ours = our_comments(pr["comments"]["nodes"], accounts)
-                verdict, how = V.of_thread(ours) if ours else (None, None)
+                verdict, how = verdict_of(pr, accounts)
                 if verdict:
                     out[key] = {"id": pr["id"], "verdict": verdict, "how": how,
                                 "url": pr["url"], "title": pr["title"],
@@ -242,6 +311,20 @@ query($project: ID!, $after: String) {
       }
     }
   } }
+}"""
+
+# One PR, asked about by name. Absence from a search is not evidence that a PR
+# closed: search is capped at 1000 results, its index lags, and a transient
+# failure or an org that happens to answer empty looks identical to "all merged".
+# Every removal is therefore confirmed against the PR itself.
+VERIFY = """
+query($owner: String!, $repo: String!, $number: Int!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      state
+      labels(first: 50) { nodes { name } }
+    }
+  }
 }"""
 
 CREATE_PROJECT = """
@@ -364,22 +447,26 @@ def ensure_view(project_id, dry=False, columns=COLUMNS, ours=OURS):
     need = [fields[c] for c in ours if c in fields]
     if not need:
         return "no %s field yet" % " or ".join(ours)
-    changed = []
+    changed, skipped = [], []
     for view in gh(VIEWS, project=project_id)["node"]["views"]["nodes"]:
         shown = view_fields(project_id, view["id"])
         if shown is None:
-            shown, missing = [], need     # could not read it; set our own set
-        else:
-            missing = [f for f in need if f not in shown]
+            # One 502 while reading a customised view used to be taken as
+            # permission to install the defaults, wiping whatever columns
+            # somebody had arranged. If we cannot see it, we do not touch it.
+            skipped.append(view["name"])
+            continue
+        missing = [f for f in need if f not in shown]
         if not missing:
             continue
         if dry:
             changed.append(view["name"] + " (would)")
             continue
-        keep = shown or [fields[c] for c in columns if c in fields and fields[c] not in need]
-        gh_list(UPDATE_VIEW, {"view": view["id"]}, {"fields": keep + missing})
+        gh_list(UPDATE_VIEW, {"view": view["id"]}, {"fields": shown + missing})
         changed.append(view["name"])
     note = ("; %s not created yet" % ", ".join(absent)) if absent else ""
+    if skipped:
+        note += "; could not read %s, left alone" % ", ".join(skipped)
     return (("updated: %s" % ", ".join(changed)) if changed
             else "%s already shown" % " and ".join(c for c in ours
                                                    if c not in absent)) + note
@@ -455,10 +542,55 @@ PRUNE_LIMIT = 25
 def too_much_to_remove(remove, present, limit=PRUNE_LIMIT):
     """True when this many removals is more likely a bad sweep than real news.
 
-    Scaled as well as capped: 30 rows off a board of 166 is an ordinary week,
-    30 off a board of 40 is a search that came back short.
+    A second line only: every removal has already been confirmed against the PR
+    itself, so this exists to catch something systematically wrong rather than
+    to decide individual rows.
+
+    Scaled as well as capped - 30 rows off a board of 166 is an ordinary week,
+    30 off a board of 40 is not - and it will never take the last row off a
+    board that had anything on it, because "everything closed at once" is what
+    a broken sweep looks like.
     """
+    if not remove:
+        return False
+    if len(remove) >= len(present) > 1:
+        return True
     return len(remove) > max(limit, len(present) // 4)
+
+
+def still_eligible(key, labels=LABELS):
+    """Is this PR still open and labelled?
+
+    True keep, False genuinely gone, None unknown. Unknown is kept: the whole
+    point is that only a definite answer may delete a row.
+    """
+    repo, _, num = key.partition("#")
+    owner, _, name = repo.partition("/")
+    if not (owner and name and num.isdigit()):
+        return None
+    try:
+        pr = (gh(VERIFY, owner=owner, repo=name, number=int(num))
+              .get("repository") or {}).get("pullRequest")
+    except GhError:
+        return None
+    if pr is None:
+        return None                      # deleted, moved, or not visible
+    if pr.get("state") != "OPEN":
+        return False
+    names = {n["name"] for n in (pr.get("labels") or {}).get("nodes", []) if n}
+    return bool(names & set(labels))
+
+
+def confirmed_gone(candidates, verify=still_eligible):
+    """The candidates a direct check says are really no longer eligible."""
+    gone, unsure = [], []
+    for k in candidates:
+        state = verify(k)
+        if state is False:
+            gone.append(k)
+        elif state is None:
+            unsure.append(k)
+    return gone, unsure
 
 
 def plan(wanted, present):
@@ -511,22 +643,33 @@ def main(argv=None):
     print("field %s: %s" % (FIELD, fhow))
     author_id, ahow = ensure_author_field(project["id"], a.dry_run)
     print("field %s: %s" % (AUTHOR, ahow))
-    print("view: %s" % ensure_view(project["id"], a.dry_run))
 
     present = project_items(project["id"])
-    add, update, remove = plan(wanted, present)
+    add, update, candidates = plan(wanted, present)
     if a.prune_only:
         add, update = [], []
+
+    # A candidate is a row the search did not return. That is a question, not
+    # an answer: ask the PR itself before taking anything off the board.
+    remove, unsure = confirmed_gone(candidates)
+    if unsure:
+        print("kept %d row(s) the search dropped but the PR would not confirm: %s"
+              % (len(unsure), ", ".join(unsure[:5])))
 
     print("on the board: %d   reviewed and open: %d" % (len(present), len(wanted)))
     print("add %d, relabel %d, remove %d" % (len(add), len(update), len(remove)))
 
     if remove and too_much_to_remove(remove, present) and not a.force_prune:
-        print("REFUSED: %d of %d rows would be removed. That is more likely a short"
+        print("REFUSED: %d of %d rows would be removed. Each was confirmed closed"
               % (len(remove), len(present)))
-        print("         search result than that many PRs closing at once. Nothing was")
-        print("         changed. Re-run with --force-prune if it is real.")
+        print("         or unlabelled, but that many at once still looks more like")
+        print("         something systematically wrong. Nothing was changed.")
+        print("         Re-run with --force-prune if it is real.")
         return 3
+
+    # Only once nothing is going to be refused: a view rewritten before the
+    # safety check meant "Nothing was changed" was not true.
+    print("view: %s" % ensure_view(project["id"], a.dry_run))
 
     if a.dry_run:
         for k in add:

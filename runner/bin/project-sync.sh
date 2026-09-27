@@ -14,5 +14,17 @@
 # project items carry no author.
 unset GH_TOKEN GITHUB_TOKEN
 
-python3 "$REVIEW_ROOT/bin/project-sync.py" "$@" >>"$REVIEW_LOGS/project-sync.log" 2>&1
+# One sync at a time. The cron sweep and a run's exit path can fire together,
+# and two in flight interleave: the first reads the board, the second adds a
+# row, the first then deletes it as "not in my search". -n rather than a wait,
+# because the next sweep is fifteen minutes away and this must never hold up
+# the run that called it.
+exec 9>"$REVIEW_ROOT/etc/project-sync.lock"
+if ! flock -n 9; then
+    echo "$(date -Is) skipped: another project sync is running" \
+        >>"$REVIEW_LOGS/project-sync.log"
+    exit 0
+fi
+
+python3 "$REVIEW_ROOT/bin/project-sync.py" "$@" >>"$REVIEW_LOGS/project-sync.log" 2>&1 9>&-
 exit 0
