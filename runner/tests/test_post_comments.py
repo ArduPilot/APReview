@@ -16,8 +16,10 @@ spec.loader.exec_module(pc)
 
 BOT, OLD, HUMAN = "AP-Review", "tridge", "peterbarker"
 ACCOUNTS = [BOT, OLD]
-AI = "**Automated review note — AI-generated (Claude)** reviewed at head `abcdef1234`."
-NEW_BODY = "**Automated review note — AI-generated (Claude)** reviewed at head `999999aaaa`."
+AI = ("**Automated review note — AI-generated (Claude)** reviewed at head `abcdef1234`."
+      "\n**Verdict: COMMENT**\n")
+NEW_BODY = ("**Automated review note — AI-generated (Claude)** reviewed at head `999999aaaa`."
+            "\n**Verdict: COMMENT**\n")
 
 
 def c(login, at, body, kind="comment", cid=1):
@@ -333,6 +335,44 @@ class Guards(unittest.TestCase):
                            body="a review with no marker")
         self.assertEqual(self.calls, [], "posted an unmarked machine review")
         self.assertEqual(rc, 1)
+
+    def test_a_body_that_does_not_state_its_verdict_on_line_2_is_refused(self):
+        # the conclusion goes directly under the marker line, where a reader
+        # sees it first and the board reads it from
+        rc = self.run_plan({"accounts": ACCOUNTS,
+                            "comments": [{"key": "1", "repo": "o/r", "number": 1,
+                                          "head": "abc1234", "body_file": "b.md"}]},
+                           body=NEW_BODY.split("\n")[0] + "\n\nReviewed at head `x`.\n**Verdict: COMMENT**")
+        self.assertEqual(self.calls, [], "posted a review with no verdict line")
+        self.assertEqual(rc, 1)
+
+    def test_a_verdict_line_must_name_one_of_the_three(self):
+        rc = self.run_plan({"accounts": ACCOUNTS,
+                            "comments": [{"key": "1", "repo": "o/r", "number": 1,
+                                          "head": "abc1234", "body_file": "b.md"}]},
+                           body=NEW_BODY.split("\n")[0] + "\n**Verdict: LGTM**\n")
+        self.assertEqual(self.calls, [])
+        self.assertEqual(rc, 1)
+
+    def test_a_note_with_no_verdict_must_say_so_in_the_plan(self):
+        # a "your code moved" followup carries none, and the board keeps the
+        # last verdict that was stated; the plan has to declare that
+        body = NEW_BODY.split("\n")[0] + "\n\nRe-reviewed at head `999999aaaa`; the code moved."
+        rc = self.run_plan({"accounts": ACCOUNTS,
+                            "comments": [{"key": "1", "repo": "o/r", "number": 1,
+                                          "head": "abc1234", "body_file": "b.md",
+                                          "verdict": "none"}]}, body=body)
+        self.assertEqual(rc, 0)
+        self.assertEqual(self.calls, ["post"])
+
+    def test_the_verdict_line_is_accepted_in_its_written_forms(self):
+        for line in ("**Verdict: ACCEPT**", "Verdict: REQUEST CHANGES",
+                     "**Verdict:** COMMENT", "**Verdict: REQUEST_CHANGES.**"):
+            with self.subTest(line=line):
+                self.assertTrue(pc.states_verdict("marker line\n" + line + "\nmore"))
+        for line in ("", "**Verdict: acceptable**", "Verdict: none", "The verdict: COMMENT"):
+            with self.subTest(line=line):
+                self.assertFalse(pc.states_verdict("marker line\n" + line + "\nmore"))
 
     def test_a_held_repo_is_never_posted_to(self):
         rc = self.run_plan({"accounts": ACCOUNTS, "hold": ["o/r"],

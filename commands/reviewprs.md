@@ -811,7 +811,7 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
    - Summary table at the end
 
 5. Verdicts should be:
-   - **APPROVE**: Code is correct and ready to merge
+   - **ACCEPT**: Code is correct and ready to merge (`APPROVE` means the same and is accepted)
    - **COMMENT**: Minor issues that should be noted but don't block merge
    - **REQUEST CHANGES**: Bugs or significant issues that must be fixed
 
@@ -1107,22 +1107,24 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
      repo; where it cannot, post the new comment and say so rather than failing the PR.
 
    - **Mark every comment as AI-generated.** Begin the body with a marker line, e.g.: `**Automated review note — AI-generated (Claude), validated against the live diff.** Please sanity-check before acting.`
-   - **State the verdict in a machine-readable marker**, on its own line immediately after the AI-generated
-     marker line. It renders as nothing on GitHub, and it is what puts the PR on the
-     [APReview Results](https://github.com/orgs/ArduPilot/projects/33) board:
+   - **State the verdict on line 2**, directly under the AI-generated marker line, as a line of its own:
 
      ```
-     <!-- apreview: verdict=REQUEST_CHANGES head=5574a60eb2 -->
+     **Automated review note — AI-generated (Claude), validated against the live diff.** Please sanity-check before acting.
+     **Verdict: REQUEST CHANGES**
      ```
 
-     `verdict` is exactly one of `ACCEPT`, `COMMENT`, `REQUEST_CHANGES` (`APPROVE` is accepted as a synonym
-     of `ACCEPT`). `head` is the head you reviewed. Write it on **every** comment that carries a verdict,
-     including a re-review that changes one. Do **not** write it on a followup note that only says the code
-     moved — that comment has no verdict, and the board should keep showing the last one that did.
+     Exactly one of `ACCEPT`, `COMMENT`, `REQUEST CHANGES` (`APPROVE` is accepted as a synonym of `ACCEPT`),
+     and nothing else on the line. It is the first thing a reader sees, and it is what puts the PR on the
+     [APReview Results](https://github.com/orgs/ArduPilot/projects/33) board with the right colour:
+     `post-comments.py` refuses a body whose line 2 is not a verdict line. Write it on **every** comment
+     that carries a verdict, including a re-review that changes one; the prose below may still say how
+     and why it moved. A followup note that only says the code moved and re-reviews nothing carries no
+     verdict - leave the line out and put `"verdict": "none"` on that entry in the plan, so the board keeps
+     showing the last verdict that was stated.
 
-     Without it the verdict has to be recovered from prose, which works but is not exact: a survey of the
-     168 open labelled PRs on 2026-09-26 found seven different phrasings, and "the verdict moves from
-     REQUEST CHANGES to COMMENT" reads backwards unless specifically handled.
+     Before 2026-09-28 the verdict was recovered from prose, in seven phrasings, and two adversarial
+     reviews each found a way to read the wrong one. The line replaced all of that.
    - **Link the comment to the report it came from**, on its own line near the top, so the author can see
      the full context and what else was checked. **The URL differs per mode — use the one for the mode you
      are actually running**, and construct it from the path you published to in step 9 rather than from

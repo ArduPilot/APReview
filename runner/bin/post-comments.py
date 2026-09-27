@@ -19,9 +19,11 @@ The plan is written by the review run:
     "comments": [
       {"key": "34292", "repo": "ArduPilot/ardupilot", "number": 34292,
        "head": "0374a23d84",                 # the head this review is of
-       "body_file": "bodies/34292.md"}
-    ]
-  }
+       "body_file": "bodies/34292.md",
+       "verdict": "none"}                    # only on a note that states no
+    ]                                        # verdict (the code moved, nothing
+  }                                          # was re-reviewed); otherwise line
+                                             # 2 of the body must state it
 
 Decisions, one per PR, taken by decide() below so they can be tested without a
 network. Editing a comment in place sends the author no notification, so an edit
@@ -43,6 +45,9 @@ import os
 import re
 import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import apreview_verdict as V                                       # noqa: E402
 
 MARKER = "AI-generated"
 DEPRECATED_PREFIX = "> **Deprecated"
@@ -209,6 +214,15 @@ def main():
             print("  REFUSED %s: body carries no %r marker" % (what, MARKER))
             count("refused"); failed += 1
             continue
+        # Line 2 states the conclusion - for the reader, who should not have to
+        # find it in the prose, and for the board, which reads it from there.
+        # A note that carries none (the code moved, nothing was re-reviewed)
+        # has to say so in the plan rather than simply leave the line out.
+        if not states_verdict(body) and entry.get("verdict") != "none":
+            print("  REFUSED %s: line 2 is not '**Verdict: ACCEPT|COMMENT|REQUEST "
+                  "CHANGES**' and the plan entry does not say verdict: none" % what)
+            count("refused"); failed += 1
+            continue
         # The run always knows the head it reviewed, so a plan entry without one
         # is a bug in the run - and a silent one: decide() would fall back to
         # "has anyone spoken since", which is the behaviour the head test exists
@@ -282,6 +296,12 @@ def main():
                                or "nothing to do")
           + ("  (dry run)" if args.dry_run else ""))
     return 1 if failed else 0
+
+
+def states_verdict(body):
+    """Is the verdict stated on line 2, where a reader and the board look?"""
+    lines = body.split("\n")
+    return len(lines) > 1 and bool(V.VERDICT_LINE.match(lines[1]))
 
 
 def held_repos():

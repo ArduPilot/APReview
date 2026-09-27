@@ -34,233 +34,119 @@ PS = load("project_sync", "project-sync.py")
 NOTE = "**Automated review note — AI-generated (Claude).** Please sanity-check.\n\n"
 
 
-class Marker(unittest.TestCase):
-    def test_the_marker_decides_when_it_is_there(self):
-        body = NOTE + "<!-- apreview: verdict=ACCEPT head=abc123 -->\n\n**REQUEST CHANGES**"
-        self.assertEqual(V.of_comment(body), (V.ACCEPT, "marker"))
+class Line(unittest.TestCase):
+    """The verdict is line 2 of the comment. That is the whole rule."""
 
-    def test_the_marker_beats_prose_that_says_otherwise(self):
-        # the whole point of it: prose is what we are trying to stop depending on
-        body = NOTE + "## REQUEST CHANGES\n<!-- apreview: verdict=COMMENT -->"
-        self.assertEqual(V.from_marker(body), V.COMMENT)
+    def test_the_line_under_the_marker_is_the_verdict(self):
+        self.assertEqual(V.of_comment(NOTE.rstrip("\n") + "\n**Verdict: REQUEST CHANGES**\n\nReviewed"),
+                         (V.REQUEST, "line"))
 
-    def test_request_changes_is_written_with_an_underscore_in_the_marker(self):
-        self.assertEqual(V.from_marker("<!-- apreview: verdict=REQUEST_CHANGES -->"),
-                         V.REQUEST)
+    def test_every_written_form_reads_the_same(self):
+        for line in ("**Verdict: ACCEPT**", "Verdict: ACCEPT", "**Verdict:** ACCEPT",
+                     "**Verdict: APPROVE.**", "Verdict: REQUEST_CHANGES",
+                     "**Verdict: REQUEST CHANGES.**", "  Verdict: COMMENT  "):
+            with self.subTest(line=line):
+                self.assertTrue(V.from_line("marker\n" + line + "\nmore"), line)
 
-    def test_approve_in_a_marker_is_accept(self):
+    def test_a_verdict_word_must_be_the_whole_of_the_line(self):
+        # "Verdict: acceptable once fixed" and "Verdict: COMMENT - two notes"
+        # are prose, and prose is exactly what this replaced
+        for line in ("Verdict: acceptable once the crash is fixed.",
+                     "**Verdict: COMMENT — no blockers.**",
+                     "Verdict: COMMENT, downgraded from ACCEPT",
+                     "The verdict: COMMENT"):
+            with self.subTest(line=line):
+                self.assertIsNone(V.from_line("marker\n" + line + "\nmore"), line)
+
+    def test_the_line_has_to_be_near_the_top(self):
+        # a "Verdict:" deep in the body is somebody discussing one
+        deep = "marker\n" + "\n" * (V.HEAD_LINES + 2) + "**Verdict: ACCEPT**"
+        self.assertIsNone(V.from_line(deep))
+        self.assertEqual(V.from_line("marker\n\n<!-- x -->\n**Verdict: ACCEPT**"), V.ACCEPT)
+
+    def test_the_line_beats_the_old_marker(self):
+        body = NOTE.rstrip("\n") + "\n**Verdict: COMMENT**\n<!-- apreview: verdict=ACCEPT -->\n"
+        self.assertEqual(V.of_comment(body), (V.COMMENT, "line"))
+
+    def test_the_old_marker_is_still_read_when_there_is_no_line(self):
+        self.assertEqual(V.of_comment(NOTE + "<!-- apreview: verdict=REQUEST_CHANGES head=a1 -->"),
+                         (V.REQUEST, "marker"))
         self.assertEqual(V.from_marker("<!-- apreview: verdict=APPROVE -->"), V.ACCEPT)
-
-    def test_a_marker_with_no_verdict_field_decides_nothing(self):
         self.assertIsNone(V.from_marker("<!-- apreview: head=abc123 -->"))
-
-    def test_a_nonsense_verdict_in_a_marker_is_not_silently_a_comment(self):
         self.assertIsNone(V.from_marker("<!-- apreview: verdict=LGTM -->"))
 
+    def test_a_quoted_or_indented_marker_is_not_ours(self):
+        # the marker counts only at the start of a line; somebody quoting it
+        # or showing it as an example does not restate our verdict
+        self.assertIsNone(V.from_marker("> <!-- apreview: verdict=ACCEPT -->"))
+        self.assertIsNone(V.from_marker("    <!-- apreview: verdict=ACCEPT -->"))
 
-class Prose(unittest.TestCase):
-    """Every shape here was copied from a real comment."""
-
-    def check(self, text, want, why=""):
-        got, how = V.from_prose(text)
-        self.assertEqual(got, want, "%s (matched %s)" % (why or text[:60], how))
-
-    def test_verdict_colon_inside_bold(self):
-        self.check("Reviewed at head `x`. **Verdict: COMMENT — no blockers.**", V.COMMENT)
-
-    def test_verdict_colon_with_the_word_bolded(self):
-        self.check("Verdict: **COMMENT** — all four previous BUGs are fixed.", V.COMMENT)
-
-    def test_verdict_colon_plain(self):
-        self.check("Verdict: REQUEST CHANGES", V.REQUEST)
-
-    def test_bare_bold_verdict(self):
-        self.check("**REQUEST CHANGES** — the protocol work is clean, but two CI jobs",
-                   V.REQUEST)
-
-    def test_bold_that_closes_after_the_word(self):
-        self.check("Reviewed at head `x`. **APPROVE — no blockers.** The refactor is",
-                   V.ACCEPT)
-
-    def test_a_heading(self):
-        self.check("Full report: http://x\n\n## COMMENT — one real gap, three small ones",
-                   V.COMMENT)
-
-    def test_verdict_stays(self):
-        self.check("I checked its scope rather than taking it on trust. Verdict stays "
-                   "APPROVE.** One new finding", V.ACCEPT)
-
-    def test_verdict_now(self):
-        self.check("Re-reviewed at head `ea11b89353`. **Verdict now APPROVE** — every "
-                   "finding from the previous round", V.ACCEPT)
-
-    # --- the ones that were read backwards --------------------------------------
-    def test_a_verdict_that_moved_is_the_one_it_moved_to(self):
-        self.check("**The blocking finding is fixed, so the verdict moves from "
-                   "REQUEST CHANGES to COMMENT.**", V.COMMENT,
-                   "must be COMMENT, not the REQUEST CHANGES it moved from")
-
-    def test_a_verdict_that_moved_with_the_target_bolded(self):
-        self.check("Verdict moves from REQUEST CHANGES to **COMMENT**.", V.COMMENT)
-
-    def test_a_verdict_that_moved_with_no_from_clause(self):
-        self.check("**No blockers. The verdict moves to APPROVE** (it was COMMENT).",
-                   V.ACCEPT)
-
-    def test_listing_all_three_verdicts_is_not_a_verdict(self):
-        # "the three passes disagreed on the overall verdict - APPROVE, COMMENT
-        # and REQUEST CHANGES" preceded the real one, and won
-        self.check("The three passes disagreed on the overall verdict — APPROVE, "
-                   "COMMENT and REQUEST CHANGES — and the tie was broken by re-running."
-                   "\n\n**REQUEST CHANGES** — real blockers remain.", V.REQUEST)
-
-    # --- what must never match ---------------------------------------------------
-    def test_the_words_in_ordinary_prose_decide_nothing(self):
-        for text in ("I would accept this once the tests land.",
-                     "Please comment on the approach before merging.",
-                     "A reviewer might request changes here, but I would not."):
+    def test_prose_decides_nothing(self):
+        # the shapes the retired parser used to read; a comment written in
+        # them now needs verdict-backfill.py, and says so by being unknown
+        for text in ("Reviewed at head `x`. **Verdict: COMMENT — no blockers.**",
+                     "**REQUEST CHANGES** — the protocol work is clean",
+                     "## COMMENT — one real gap",
+                     "the verdict moves from REQUEST CHANGES to COMMENT."):
             with self.subTest(text=text):
-                self.assertEqual(V.from_prose(text), (None, None))
-
-    def test_a_draft_with_no_verdict_yields_nothing(self):
-        self.assertEqual(V.from_prose(
-            NOTE + "Reviewed at head `x`. This is a **draft**, so treat the below as "
-                   "guidance on work in progress rather than a merge gate."), (None, None))
+                self.assertEqual(V.of_comment(NOTE + text), (None, None))
 
 
-class Adversarial(unittest.TestCase):
-    """Every one of these was a wrong answer found by an adversarial review.
+BF = load("verdict_backfill", "verdict-backfill.py")
 
-    Kept as its own class because they are not phrasings anyone expected - they
-    are what the parser did when someone went looking for ways to break it.
-    """
 
-    def check(self, text, want):
-        got, how = V.from_prose(text)
-        self.assertEqual(got, want, "%r matched %s" % (text[:60], how))
+class Backfill(unittest.TestCase):
+    """The one-off that put the line on the comments written before it."""
 
-    def test_a_verdict_word_may_not_be_the_start_of_a_longer_word(self):
-        self.check("Verdict: acceptable, with nits.", None)
+    def test_the_line_goes_directly_under_the_marker_line(self):
+        body = "**Automated review note — AI-generated.** Check.\n\nFull report: x\n"
+        self.assertEqual(BF.with_verdict_line(body, V.COMMENT).split("\n")[:3],
+                         ["**Automated review note — AI-generated.** Check.",
+                          "**Verdict: COMMENT**", ""])
 
-    def test_a_heading_about_a_verdict_is_not_a_verdict(self):
-        self.check("## Comment on test coverage", None)
+    def test_the_result_reads_back_as_that_verdict(self):
+        body = NOTE + "**REQUEST CHANGES** — two blockers."
+        self.assertEqual(V.of_comment(BF.with_verdict_line(body, V.REQUEST)), (V.REQUEST, "line"))
 
-    def test_emphasis_mid_sentence_is_not_a_verdict(self):
-        self.check("Please **comment** on the test plan.", None)
+    def test_a_comment_that_already_has_the_line_is_left_alone(self):
+        self.assertEqual(BF.decide(NOTE.rstrip("\n") + "\n**Verdict: ACCEPT**\n"),
+                         (V.ACCEPT, "already"))
 
-    def test_a_bold_verdict_inside_a_sentence_is_an_opinion(self):
-        # the review's own verdict opens a line or a sentence; bold in the
-        # middle of one is somebody weighing up, not declaring
-        self.check("I call this **COMMENT**, personally.", None)
+    def test_a_person_s_decision_beats_the_prose(self):
+        self.assertEqual(BF.decide(NOTE + "**ACCEPT** — clean.", override=V.REQUEST),
+                         (V.REQUEST, "by hand"))
 
-    def test_a_denied_verdict_is_not_the_verdict(self):
-        self.check("Verdict does not move to ACCEPT. **REQUEST CHANGES**.", V.REQUEST)
+    def test_the_old_marker_beats_the_prose(self):
+        self.assertEqual(BF.decide(NOTE + "<!-- apreview: verdict=COMMENT -->\n**ACCEPT**"),
+                         (V.COMMENT, "marker"))
 
-    def test_a_conditional_verdict_is_not_the_verdict(self):
-        self.check("Verdict: COMMENT. If tests pass, the verdict moves to ACCEPT.",
-                   V.COMMENT)
+    def test_the_prose_parser_still_reads_the_seven_shapes(self):
+        for text, want in (("Reviewed at head `x`. **Verdict: COMMENT — no blockers.**", V.COMMENT),
+                           ("Verdict: **COMMENT** — all four previous BUGs are fixed.", V.COMMENT),
+                           ("**REQUEST CHANGES** — the protocol work is clean", V.REQUEST),
+                           ("**APPROVE — no blockers.** The refactor is", V.ACCEPT),
+                           ("Full report: x\n\n## COMMENT — one real gap", V.COMMENT),
+                           ("Verdict stays APPROVE.** One new finding", V.ACCEPT),
+                           ("**The blocking finding is fixed, so the verdict moves from "
+                            "REQUEST CHANGES to COMMENT.**", V.COMMENT)):
+            with self.subTest(text=text[:40]):
+                self.assertEqual(BF.decide(NOTE + text)[0], want)
 
-    def test_a_negated_bold_verdict_decides_nothing(self):
-        self.check("This is not a **REQUEST CHANGES**.", None)
+    def test_two_declared_verdicts_are_refused_for_a_person_to_read(self):
+        self.assertEqual(BF.decide(NOTE + "Verdict: ACCEPT, downgraded to REQUEST CHANGES."),
+                         (None, None))
 
-    def test_was_x_now_y_is_y(self):
-        self.check("Verdict was **REQUEST CHANGES**, now **COMMENT**.", V.COMMENT)
-
-    def test_two_declarations_that_disagree_are_refused(self):
-        # both are declaration-shaped and nothing hedges either; "the second
-        # is the current one" was true here and false in the round-two cases
-        # below, and the rule that reads one wrongly reads the other
-        self.check("Verdict: ACCEPT, downgraded to REQUEST CHANGES.", None)
-        self.check("**Verdict: ACCEPT**\n\nOn reflection, **Verdict: REQUEST CHANGES**.",
-                   None)
-
-    def test_the_same_verdict_declared_twice_is_still_that_verdict(self):
-        self.check("## COMMENT — two notes\n\n**Verdict: COMMENT** — nothing blocking.",
-                   V.COMMENT)
-
-    # --- the second round, 2026-09-27: each of these returned ACCEPT -------
-    def test_a_condition_behind_an_opening_bold_is_still_a_condition(self):
-        self.check("Verdict: REQUEST CHANGES. If tests pass, the verdict moves to "
-                   "**ACCEPT**.", V.REQUEST)
-
-    def test_a_contraction_denies_the_verdict_too(self):
-        self.check("Verdict doesn't move to ACCEPT. **REQUEST CHANGES**.", V.REQUEST)
-
-    def test_a_condition_after_the_verdict_counts(self):
-        self.check("Verdict: REQUEST CHANGES. The verdict moves to ACCEPT if tests "
-                   "pass.", V.REQUEST)
-
-    def test_a_previous_verdict_is_history(self):
-        self.check("Previous verdict: **ACCEPT**. Current verdict: **REQUEST CHANGES**.",
-                   V.REQUEST)
-
-    def test_history_before_a_move_does_not_hide_the_move(self):
-        # a real comment: the anchor exists to read a change of verdict, so
-        # the words that mark history cannot be what disqualifies it
-        self.check("**All eight blockers from my previous comment are resolved, so "
-                   "the verdict moves from REQUEST CHANGES to COMMENT.**", V.COMMENT)
-
-    def test_an_explanation_behind_a_verdict_is_not_a_condition(self):
-        self.check("Verdict: COMMENT — all four previous BUGs are fixed, so this "
-                   "would merge cleanly.", V.COMMENT)
-
-    def test_a_marker_in_a_code_span_is_an_example(self):
-        body = ("Example: `<!-- apreview: verdict=ACCEPT -->`\n\n"
-                "**Verdict: REQUEST CHANGES**")
-        self.assertIsNone(V.from_marker(body))
-        self.assertEqual(V.of_comment(body), (V.REQUEST, "verdict-label"))
-
-    def test_a_line_under_a_quotation_is_still_the_quotation(self):
-        # CommonMark lazy continuation: without a blank line, the plain line
-        # belongs to the blockquote above it, and renders inside it
-        self.check("> Previous result:\nVerdict: ACCEPT\n\n**REQUEST CHANGES**.",
-                   V.REQUEST)
-
-    def test_a_blank_line_ends_the_quotation(self):
-        self.check("> what the bot said\n\nVerdict: ACCEPT", V.ACCEPT)
-
-    def test_our_marker_directly_under_a_quotation_is_still_ours(self):
-        # an HTML block starts a new block, so it is not lazy continuation
-        body = "> earlier\n<!-- apreview: verdict=COMMENT -->\n"
-        self.assertEqual(V.from_marker(body), V.COMMENT)
-
-    def test_a_tilde_fence_is_code_too(self):
-        self.assertIsNone(V.from_marker("~~~\n<!-- apreview: verdict=ACCEPT -->\n~~~\n"))
-
-    def test_indented_code_is_code(self):
-        self.assertIsNone(V.from_marker("    <!-- apreview: verdict=ACCEPT -->\n"))
-
-    def test_a_fence_closes_only_at_a_fence_as_long_as_itself(self):
-        body = ("````\n```\n<!-- apreview: verdict=ACCEPT -->\n```\n````\n"
-                "**Verdict: REQUEST CHANGES**")
-        self.assertIsNone(V.from_marker(body))
-        self.assertEqual(V.of_comment(body), (V.REQUEST, "verdict-label"))
-
-    def test_an_unclosed_fence_runs_to_the_end(self):
-        # that is how it renders, so nothing after it is prose - and only the
-        # fence rule can know it, there being no closing run to pair with
-        self.check("```\n$ tool --check\n\n**Verdict: ACCEPT** (as the tool prints it)", None)
-
-    def test_a_code_span_does_not_cross_a_blank_line(self):
-        # a stray backtick is not a span reaching into the next paragraph
-        self.check("Fix the `--check flag.\n\n**Verdict: COMMENT**\n\nSee `main`.", V.COMMENT)
-
-    def test_a_quoted_verdict_is_somebody_quoting_us(self):
-        # a maintainer disagreeing with our review was read as a fresh ACCEPT
-        body = ("I disagree with this:\n"
-                "> **Verdict: ACCEPT**\n"
-                "There are blockers.")
-        self.assertEqual(V.from_prose(body), (None, None))
-
-    def test_a_quoted_marker_is_not_our_marker(self):
-        body = ("Here is what the bot emits:\n"
-                "> <!-- apreview: verdict=ACCEPT -->\n"
-                "and I disagree.")
-        self.assertIsNone(V.from_marker(body))
-
-    def test_a_marker_in_a_fenced_block_is_an_example(self):
-        body = "To mark a verdict, write:\n```\n<!-- apreview: verdict=ACCEPT -->\n```\n"
-        self.assertIsNone(V.from_marker(body))
+    def test_only_the_newest_live_comment_of_ours_is_touched(self):
+        def c(login, body):
+            return {"databaseId": 1, "author": {"login": login}, "body": body}
+        pr = {"comments": {"nodes": [
+            c("AP-Review", NOTE + "old"),
+            c("someone", NOTE + "not ours"),
+            c("AP-Review", NOTE + "newest live"),
+            c("AP-Review", "> **Deprecated — see below.**\n\n" + NOTE + "superseded"),
+            c("tridge", "a human remark")]}}
+        self.assertEqual(BF.newest_live(pr, ("AP-Review", "tridge"))["body"], NOTE + "newest live")
+        self.assertIsNone(BF.newest_live({"comments": {"nodes": []}}, ("AP-Review",)))
 
 
 class Thread(unittest.TestCase):
@@ -271,7 +157,7 @@ class Thread(unittest.TestCase):
     def test_a_followup_with_no_verdict_does_not_erase_the_review(self):
         # it exists to say the code moved; reading it as "no review" would drop
         # a reviewed PR off the board entirely
-        thread = ["**Verdict: REQUEST CHANGES** — two blockers.",
+        thread = [NOTE + "**Verdict: REQUEST CHANGES**\n\nTwo blockers.",
                   NOTE + "Re-reviewed at head `abc`; my earlier comment is superseded."]
         self.assertEqual(V.of_thread(thread)[0], V.REQUEST)
 
@@ -280,7 +166,7 @@ class Thread(unittest.TestCase):
         # review, not from the copy folded into the deprecation
         thread = ["> **Deprecated — see below for the updated review.**\n\n"
                   "**Verdict: ACCEPT**",
-                  "**Verdict: REQUEST CHANGES** — two blockers.",
+                  NOTE + "**Verdict: REQUEST CHANGES**\n\nTwo blockers.",
                   NOTE + "Re-reviewed at head `abc`; earlier comment superseded."]
         self.assertEqual(V.of_thread(thread)[0], V.REQUEST)
 

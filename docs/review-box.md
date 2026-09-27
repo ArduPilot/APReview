@@ -596,69 +596,36 @@ recent sweep: measured on 2026-09-26, the reports held a verdict for **35** of
 the 168 open labelled PRs, against **166** from the comments. Where both had one
 they disagreed ten times, the report being the stale one.
 
-`apreview_verdict.py` reads it, from two sources:
+`apreview_verdict.py` reads it from line 2 of the comment, directly under the
+AI-generated marker line:
 
-1. **A marker the review emits**, which is exact and renders as nothing:
-   `<!-- apreview: verdict=ACCEPT head=5574a60eb2 -->`. Written by step 8 of
-   `commands/reviewprs.md`.
-2. **Failing that, the prose.** Seven phrasings appear in the comments already
-   posted, so this is not a one-line regex:
+```
+**Automated review note — AI-generated (Claude), validated against the live diff.** Please sanity-check before acting.
+**Verdict: REQUEST CHANGES**
+```
 
-   ```
-   **Verdict: COMMENT - no blockers.**       Verdict: **COMMENT** - ...
-   Verdict: COMMENT                          **REQUEST CHANGES** - ...
-   **APPROVE - no blockers.**                ## COMMENT - one real gap
-   **... Verdict stays APPROVE.**
-   ```
+That line is the whole rule. It is there for the reader first - the conclusion
+before the reasoning, where some reports had made it hard to find - and the
+board simply reads the same line. `post-comments.py` refuses a body without it,
+unless the plan says the entry is a no-verdict note (a "your code moved"
+followup, which leaves the last stated verdict standing). The invisible
+`<!-- apreview: verdict=... -->` marker a few days of comments carried is still
+read as a fallback; nothing else is.
 
-   Every anchor requires something that means *this is the verdict* - a
-   "Verdict" label, a heading, or the start of a bold run - because the bare
-   words are everywhere in ordinary review prose. Ten of the 168 name a second
-   verdict within 400 characters of the right one.
-
-   An adversarial review on 2026-09-27 got eight wrong answers out of it, and
-   the anchors are correspondingly fussier now. A verdict word may not begin a
-   longer word (`Verdict: acceptable once the crash is fixed` was an ACCEPT); a
-   heading or a bold run counts only if the verdict is all it contains (`##
-   Comment on test coverage`, `Please **comment** on the test plan`); and a
-   verdict inside a negated or hypothetical clause is ignored (`the verdict
-   does not move to ACCEPT`, `if tests pass, the verdict moves to ACCEPT`).
-   Quotations and fenced code are stripped before any of it - a maintainer
-   disagreeing with `> **Verdict: ACCEPT**` was read as a fresh ACCEPT, and so
-   was a marker quoted as an example.
-
-   A second round the same day found six more wrong answers, all of them a
-   comment declaring two verdicts and the parser picking the wrong one: a
-   condition hidden behind an opening `**`, a contraction (`doesn't`) the
-   negation check did not know, a condition *after* the verdict, `Previous
-   verdict: ACCEPT. Current verdict: REQUEST CHANGES`, a marker quoted in
-   backticks, and a verdict line that CommonMark puts inside the blockquote
-   above it. Rather than a third round of patches, the parser now **refuses**:
-   a comment is read only when every verdict it declares is the same one, and
-   two different ones in declaration positions are reported as unknown. The
-   one two-verdict form still read is `moves from X to Y`, where a single
-   anchor sees both. Quotations and code are stripped the way CommonMark reads
-   them - fences of either kind closing only at a fence at least as long, or
-   never; a quotation running on into the plain lines under it; code spans of
-   any backtick length.
-
-   Coverage is 157 of 164 (measured against the live comments on
-   2026-09-27, the same set the previous parser read). That is the trade being
-   made on purpose: unknown leaves the last plainly-stated verdict standing,
-   and a wrong verdict does not.
-
-   `the verdict moves from REQUEST CHANGES to COMMENT` is handled on its own and
-   first: every other anchor reads it backwards and takes the old verdict. Four
-   PRs were wrong that way before it existed.
+It was not always so. Until 2026-09-28 the verdict was recovered from prose, in
+seven phrasings surveyed across the open labelled PRs, with anchors, hedge
+words and CommonMark stripping to keep "if tests pass, the verdict moves to
+ACCEPT" from reading as ACCEPT. Two adversarial reviews each found a fresh way
+to read the wrong verdict out of it. `verdict-backfill.py` is where that parser
+retired to: it read every open labelled PR's newest live comment once, put the
+line on it (six needed a person to decide), and remains for any comment written
+the old way.
 
 The verdict is the newest comment that **states** one, not the newest comment. A
 followup note says only that the author's code moved and carries no verdict;
 treating that as "no review" would drop a reviewed PR off the board. Superseded
 comments are skipped, so a stale verdict folded into a deprecation cannot
-outrank a live followup that has none. That rule alone took coverage from 77% to
-94%; the seven phrasings took it to 166 of 168. The two it cannot read state no
-verdict at all - a draft, reviewed as guidance - and are left off rather than
-guessed at.
+outrank a live followup that has none.
 
 A comment counts as ours only if it carries the `AI-generated` marker *and* was
 posted by one of `REVIEW_COMMENT_ACCOUNTS`. Author alone is not enough:
