@@ -316,6 +316,7 @@ class Sweep(unittest.TestCase):
         self.older = {}          # key -> an older comment page, for pagination
         self.thread = {}         # key -> every comment body, oldest first
         self.author_field = True       # whether the PR Author field exists yet
+        self.result_field = True       # whether the Result field exists yet
         self.searched = []       # every search query string seen
         self.real_gh_list = PS.gh_list
         self.addCleanup(setattr, PS, "gh_list", self.real_gh_list)
@@ -396,8 +397,10 @@ class Sweep(unittest.TestCase):
             return {"organization": {"id": "org1", "projectsV2": {"nodes": [
                 {"id": "proj1", "number": 33, "title": PS.TITLE, "url": "purl"}]}}}
         if "fields(first: 50)" in query and "ProjectV2View" not in query:
-            fields = [{"id": "f1", "name": PS.FIELD,
-                       "options": [{"id": "o-" + n, "name": n} for n, _, _ in PS.OPTIONS]}]
+            fields = []
+            if self.result_field:
+                fields.append({"id": "f1", "name": PS.FIELD,
+                               "options": [{"id": "o-" + n, "name": n} for n, _, _ in PS.OPTIONS]})
             if self.author_field:
                 fields.append({"id": "fa", "name": PS.AUTHOR})
             return {"node": {"fields": {"nodes": fields}}}
@@ -408,10 +411,11 @@ class Sweep(unittest.TestCase):
                       "fieldValues": {"nodes": []}}] if self.note else []
             for key, verdict in self.board.items():
                 repo, _, num = key.partition("#")
-                nodes.append({"id": "item-" + key,
-                              "content": {"id": "pr-" + key, "number": int(num),
-                                          "state": "OPEN",
-                                          "repository": {"nameWithOwner": repo}},
+                content = {"number": int(num), "state": "OPEN",
+                           "repository": {"nameWithOwner": repo}}
+                if "PullRequest { id " in query:      # only what was asked for
+                    content["id"] = "pr-" + key
+                nodes.append({"id": "item-" + key, "content": content,
                               "fieldValues": {"nodes": [
                                   {"name": verdict, "field": {"name": PS.FIELD}},
                                   {"text": "someone", "field": {"name": PS.AUTHOR}}]}})
@@ -429,6 +433,10 @@ class Sweep(unittest.TestCase):
         if "updateProjectV2ItemFieldValue" in query:
             return {"updateProjectV2ItemFieldValue": {"projectV2Item": {"id": v["item"]}}}
         if "createProjectV2Field" in query:
+            if v.get("name") == PS.FIELD:
+                return {"createProjectV2Field": {"projectV2Field": {
+                    "id": "f1", "name": PS.FIELD,
+                    "options": [{"id": "o-" + n, "name": n} for n, _, _ in PS.OPTIONS]}}}
             return {"createProjectV2Field": {"projectV2Field":
                     {"id": "fa", "name": PS.AUTHOR}}}
         raise AssertionError("unstubbed query: " + query[:60])
@@ -643,11 +651,48 @@ class Sweep(unittest.TestCase):
         self.assertEqual(PS.verdict_of(pr, ("AP-Review",), endless), (None, None))
         self.assertEqual(len(pages), PS.MAX_COMMENT_PAGES)
 
+    def test_the_last_page_fetched_is_still_read(self):
+        # a page fetched and then thrown away is a wasted request at best and
+        # a missed verdict at worst
+        pages = []
+
+        def older(pr, cursor):
+            pages.append(cursor)
+            last = len(pages) == PS.MAX_COMMENT_PAGES
+            return {"pageInfo": {"hasPreviousPage": True,
+                                 "startCursor": "cur-%d" % len(pages)},
+                    "nodes": ([{"author": {"login": "AP-Review"},
+                                "body": NOTE + "**Verdict: COMMENT**"}] if last else [])}
+
+        pr = {"id": "node-x", "comments": {
+            "pageInfo": {"hasPreviousPage": True, "startCursor": "cur-0"},
+            "nodes": []}}
+        self.assertEqual(PS.verdict_of(pr, ("AP-Review",), older)[0], V.COMMENT)
+
+    def test_a_cursor_cycle_stops_the_walk(self):
+        pages = []
+
+        def cycle(pr, cursor):
+            pages.append(cursor)
+            if len(pages) > PS.MAX_COMMENT_PAGES + 5:
+                self.fail("the walk did not stop")
+            return {"pageInfo": {"hasPreviousPage": True,
+                                 "startCursor": ["a", "b"][len(pages) % 2]},
+                    "nodes": []}
+
+        pr = {"id": "node-x", "comments": {
+            "pageInfo": {"hasPreviousPage": True, "startCursor": "a"},
+            "nodes": []}}
+        self.assertEqual(PS.verdict_of(pr, ("AP-Review",), cycle), (None, None))
+        self.assertLessEqual(len(pages), 3)
+
     def test_a_cursor_that_does_not_advance_stops_the_walk(self):
         pages = []
 
         def stuck(pr, cursor):
             pages.append(cursor)
+            if len(pages) > PS.MAX_COMMENT_PAGES + 5:
+                self.fail("the walk did not stop")
             return {"pageInfo": {"hasPreviousPage": True, "startCursor": "same"},
                     "nodes": []}
 
@@ -656,6 +701,44 @@ class Sweep(unittest.TestCase):
             "nodes": []}}
         self.assertEqual(PS.verdict_of(pr, ("AP-Review",), stuck), (None, None))
         self.assertEqual(len(pages), 1)
+
+    def test_a_search_that_repeats_its_cursor_is_an_error_not_a_hang(self):
+        # each call answers inside its deadline, so only the walk can notice
+        real = self.fake_gh
+        asked = []
+
+        def stuck(query, **v):
+            if "search(" in query:
+                asked.append(v.get("after"))
+                if len(asked) > 30:
+                    self.fail("the search walk did not stop")
+                return {"search": {"nodes": [], "pageInfo": {
+                    "hasNextPage": True, "endCursor": "same"}}}
+            return real(query, **v)
+
+        PS.gh = stuck
+        with self.assertRaises(PS.GhError):
+            self.run_main()
+        self.assertEqual(self.deletes(), [])
+
+    def test_a_board_read_that_never_ends_is_an_error_not_a_hang(self):
+        # cursors that keep advancing past anything a real board could hold
+        real = self.fake_gh
+        asked = []
+
+        def stuck(query, **v):
+            if "items(first: 100" in query:
+                asked.append(v.get("after"))
+                if len(asked) > PS.MAX_PAGES + 10:
+                    self.fail("the board walk did not stop")
+                return {"node": {"items": {"nodes": [], "pageInfo": {
+                    "hasNextPage": True, "endCursor": "c%d" % len(asked)}}}}
+            return real(query, **v)
+
+        PS.gh = stuck
+        self.found = {"ArduPilot/ardupilot#1": "COMMENT"}
+        with self.assertRaises(PS.GhError):
+            self.run_main()
 
     def test_all_three_trigger_labels_are_searched(self):
         self.found = {"ArduPilot/ardupilot#1": "COMMENT"}
@@ -711,6 +794,15 @@ class Sweep(unittest.TestCase):
         self.assertEqual(self.run_main(), 3)
         self.assertFalse([q for q, _ in self.calls if "createProjectV2Field" in q],
                          "it created a field then refused")
+
+    def test_a_refused_prune_creates_no_result_field_either(self):
+        self.result_field = False
+        self.board = {"ArduPilot/ardupilot#%d" % i: "ACCEPT" for i in range(60)}
+        self.found = {}
+        self.pr_state = {k: "MERGED" for k in self.board}
+        self.assertEqual(self.run_main(), 3)
+        self.assertFalse([q for q, _ in self.calls if "createProjectV2Field" in q],
+                         "it created the Result field then refused")
 
     def test_one_org_failing_applies_nothing_from_the_others(self):
         # half a picture is the dangerous kind: the orgs already gathered would
@@ -961,12 +1053,30 @@ sys.exit(int(os.environ.get("STUB_RC", "0")))
         os.unlink(hold)
         self.assertEqual(first.wait(timeout=30), 0)
 
-    def test_the_lock_is_not_handed_to_python(self):
-        # with the descriptor inherited, any child python left behind would
-        # hold the lock and every later sync would be skipped
+    def test_python_holds_the_lock_while_it_runs(self):
+        # python is the process doing the work; if only the shell held the
+        # lock, killing the shell would free it while python was still writing
         self.assertEqual(self.run_wrapper().returncode, 0)
         self.assertEqual(self.runs(), 1)
-        self.assertNotIn("9", self.read(os.path.join(self.stub, "fds")).split())
+        self.assertIn("9", self.read(os.path.join(self.stub, "fds")).split())
+
+    def test_a_wrapper_killed_under_python_does_not_free_the_lock(self):
+        hold = os.path.join(self.stub, "hold")
+        open(hold, "w").close()
+        first = subprocess.Popen(["bash", self.WRAPPER], env=dict(self.env, STUB_HOLD="1"),
+                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(lambda: os.path.exists(hold) and os.unlink(hold))
+        self.wait_for(os.path.join(self.stub, "ran"))
+        first.kill()
+        first.wait()
+        second = self.run_wrapper()
+        self.assertEqual(second.returncode, 0)
+        self.assertEqual(self.runs(), 1, "a second sync ran beside the orphaned first")
+        os.unlink(hold)
+        for _ in range(500):            # the orphaned stub exits on its own
+            if not os.path.exists("/proc/%d" % first.pid):
+                break
+            time.sleep(0.01)
 
     def test_a_lock_that_cannot_be_opened_is_a_skip_not_a_free_run(self):
         # from a run's exit trap, fd 9 arrives open on the run lock; if the

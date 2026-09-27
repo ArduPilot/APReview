@@ -212,13 +212,14 @@ def verdict_of(pr, accounts, fetch_older=None):
     """The PR's verdict, paging back through comments until one is stated."""
     page = pr["comments"]
     seen = set()
-    for _ in range(MAX_COMMENT_PAGES):
+    while True:
         verdict, how = V.of_thread(our_comments(page["nodes"], accounts))
         if verdict:
             return verdict, how
         info = page.get("pageInfo") or {}
         cursor = info.get("startCursor")
-        if not info.get("hasPreviousPage") or not cursor or cursor in seen:
+        if (not info.get("hasPreviousPage") or not cursor or cursor in seen
+                or len(seen) >= MAX_COMMENT_PAGES):
             return None, None
         seen.add(cursor)
         if fetch_older is None:
@@ -226,7 +227,6 @@ def verdict_of(pr, accounts, fetch_older=None):
         page = fetch_older(pr, cursor)
         if page is None:
             return None, None
-    return None, None
 
 
 def _older_comments(pr, cursor):
@@ -237,17 +237,38 @@ def _older_comments(pr, cursor):
     return (d.get("node") or {}).get("comments")
 
 
+# Forward paging that ends. A cursor handed back twice, or more pages than
+# anything real has, means the walk is not advancing; a run's exit path must
+# not be held by it, and each call answering inside its deadline does not help.
+MAX_PAGES = 100
+
+
+def pages(fetch):
+    """Yield each page of a paginated query. fetch(after) -> the connection."""
+    after, seen = None, set()
+    while True:
+        d = fetch(after)
+        yield d
+        info = d.get("pageInfo") or {}
+        after = info.get("endCursor")
+        if not info.get("hasNextPage"):
+            return
+        if not after or after in seen or len(seen) >= MAX_PAGES:
+            raise GhError("pagination is not advancing (cursor %r)" % after)
+        seen.add(after)
+
+
 def reviewed_prs(owners, accounts):
     """Every open labelled PR we have posted a verdict on, by repo#number."""
     label = "label:" + ",".join(LABELS)
     out = {}
     for owner in owners:
-        after = None
-        while True:
+        def fetch(after, owner=owner):
             v = {"q": "is:pr is:open org:%s %s" % (owner, label)}
             if after:
                 v["after"] = after
-            d = gh(SEARCH, **v)["search"]
+            return gh(SEARCH, **v)["search"]
+        for d in pages(fetch):
             for pr in d["nodes"]:
                 if not pr:
                     continue
@@ -257,9 +278,6 @@ def reviewed_prs(owners, accounts):
                     out[key] = {"id": pr["id"], "verdict": verdict, "how": how,
                                 "url": pr["url"], "title": pr["title"],
                                 "author": (pr.get("author") or {}).get("login") or ""}
-            if not d["pageInfo"]["hasNextPage"]:
-                break
-            after = d["pageInfo"]["endCursor"]
     return out
 
 
@@ -515,12 +533,15 @@ def ensure_author_field(project_id, dry=False):
 
 def project_items(project_id):
     """What is on the board now, by repo#number."""
-    out, after = {}, None
-    while True:
+    out = {}
+
+    def fetch(after):
         v = {"project": project_id}
         if after:
             v["after"] = after
-        d = gh(ITEMS, **v)["node"]["items"]
+        return gh(ITEMS, **v)["node"]["items"]
+
+    for d in pages(fetch):
         for it in d["nodes"]:
             c = it.get("content") or {}
             repo = (c.get("repository") or {}).get("nameWithOwner")
@@ -540,9 +561,7 @@ def project_items(project_id):
                     author = fv.get("text")
             out[key] = {"item": it["id"], "content": c.get("id"),
                         "result": result, "author": author, "state": c.get("state")}
-        if not d["pageInfo"]["hasNextPage"]:
-            return out
-        after = d["pageInfo"]["endCursor"]
+    return out
 
 
 # A sweep that returns nothing looks exactly like "everything was merged". The

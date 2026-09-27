@@ -709,7 +709,11 @@ call has a deadline, since the sync runs while the run lock is still held.
 Called from the run's exit trap, the wrapper inherits fd 9 already open on the
 run lock. It closes that copy before opening its own lock, and if the sync lock
 cannot be opened it logs and skips: otherwise `flock` would be asked about the
-inherited run lock, say yes, and the sync would run with no lock at all.
+inherited run lock, say yes, and the sync would run with no lock at all. The
+lock descriptor is then handed to python, which does the work and so holds the
+lock for as long as it runs - a wrapper killed under it must not free the lock
+for the next sweep while the first is still writing. Search, board and comment
+paging each stop on a cursor that fails to advance.
 
 ## Publishing
 

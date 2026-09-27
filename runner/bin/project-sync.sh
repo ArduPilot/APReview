@@ -37,5 +37,8 @@ if ! flock -n 9; then
     exit 0
 fi
 
-python3 "$REVIEW_ROOT/bin/project-sync.py" "$@" >>"$REVIEW_LOGS/project-sync.log" 2>&1 9>&-
+# fd 9 is deliberately inherited: python is the process doing the work, so it
+# holds the lock for as long as it runs, even if this shell is killed under it.
+# Its own children (gh) do not inherit it - subprocess closes descriptors.
+python3 "$REVIEW_ROOT/bin/project-sync.py" "$@" >>"$REVIEW_LOGS/project-sync.log" 2>&1
 exit 0
