@@ -11,9 +11,13 @@ at the end of a review and from cron fifteen minutes later.
     project-sync.py --show          print the table it would write
 
 What belongs on the board: an open PR, in one of the swept repositories,
-carrying a trigger label, that we have posted a verdict on. Anything else is
-removed - a PR that was merged, closed, had its label taken off, or whose
-review we can no longer read.
+that we have posted a verdict on. A trigger label is what brings a PR to the
+board - the label search is how new reviews are found - but losing the label
+does not take it off: DevCallEU and DevCallTopic come off after the call, and
+the PR stays until it is merged or closed. So the candidates are the labelled
+PRs plus everything already on the board, each board row is refreshed from
+the PR's own comments while it is open, and only a PR confirmed closed is
+removed.
 
 The verdict comes from the comment, not from the published report: each label's
 report page is overwritten by the next run of that label, so it covers only the
@@ -315,17 +319,23 @@ query($project: ID!, $after: String) {
   } }
 }"""
 
-# One PR, asked about directly. Absence from a search is not evidence that a PR
-# closed: search is capped at 1000 results, its index lags, and a transient
-# failure or an org that happens to answer empty looks identical to "all merged".
-# Every removal is therefore confirmed against the PR itself - by node id, which
-# a repository rename or transfer does not change, where owner/repo/number could
-# name a different PR by the time it is asked.
-VERIFY = """
+# One PR already on the board, asked about directly - by node id, which a
+# repository rename or transfer does not change, where owner/repo/number could
+# name a different PR by the time it is asked. Absence from the label search
+# is not evidence of anything: the label may simply have come off, search is
+# capped at 1000 results, its index lags, and a transient failure looks
+# identical to "all merged". The same shape as a search node, so its verdict
+# is read the same way.
+BOARD_PR = """
 query($id: ID!) {
   node(id: $id) { ... on PullRequest {
-    state
-    labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
+    id number title url state
+    author { login }
+    repository { nameWithOwner }
+    comments(last: 100) {
+      pageInfo { hasPreviousPage startCursor }
+      nodes { author { login } body }
+    }
   } }
 }"""
 
@@ -560,58 +570,63 @@ def too_much_to_remove(remove, present, limit=PRUNE_LIMIT):
     return len(remove) > max(limit, len(present) // 4)
 
 
-def still_eligible(node_id, labels=LABELS):
-    """Is this PR still open and labelled?
+def board_pr(node_id):
+    """The PR behind a board row, or None if GitHub will not say.
 
-    True keep, False genuinely gone, None unknown. Unknown is kept: the whole
-    point is that only a definite answer may delete a row.
+    None is kept: the whole point is that only a definite answer may change
+    a row, and "not a PR" (an issue someone added by hand) is not a PR to
+    remove either.
     """
     if not node_id:
         return None
     try:
-        pr = gh(VERIFY, id=node_id).get("node")
+        pr = gh(BOARD_PR, id=node_id).get("node")
     except GhError:
         return None
     if not pr or "state" not in pr:
-        return None                 # deleted, not visible, or not a PR at all
-    if pr.get("state") != "OPEN":
-        return False
-    page = pr.get("labels") or {}
-    names = {n["name"] for n in page.get("nodes", []) if n}
-    if names & set(labels):
-        return True
-    # A trigger label past the page would look like no label at all. Absence
-    # has to be established, not assumed.
-    if (page.get("pageInfo") or {}).get("hasNextPage"):
         return None
-    return False
+    return pr
 
 
-def confirmed_gone(candidates, present, verify=still_eligible):
-    """The candidates a direct check says are really no longer eligible."""
-    gone, unsure = [], []
-    for k in candidates:
-        state = verify(present[k].get("content"))
-        if state is False:
-            gone.append(k)
-        elif state is None:
-            unsure.append(k)
-    return gone, unsure
+def refresh_board(present, wanted, accounts, fetch=board_pr):
+    """Every board row the label search did not return: ask the PR itself.
+
+    Open: it stays, with its verdict re-read from its comments, so a followup
+    review reaches the board whether or not the label is still there. Closed
+    or merged: gone. No answer: kept as it is. Returns (gone, kept, unsure).
+    """
+    gone, kept, unsure = [], [], []
+    for key in sorted(k for k in present if k not in wanted):
+        pr = fetch(present[key].get("content"))
+        if pr is None:
+            unsure.append(key)
+            continue
+        if pr.get("state") != "OPEN":
+            gone.append(key)
+            continue
+        verdict, how = verdict_of(pr, accounts)
+        if verdict:
+            wanted[key] = {"id": pr["id"], "verdict": verdict, "how": how,
+                           "url": pr.get("url"), "title": pr.get("title"),
+                           "author": (pr.get("author") or {}).get("login") or ""}
+        else:
+            kept.append(key)            # open, nothing readable: left alone
+    return gone, kept, unsure
 
 
-def plan(wanted, present):
+def plan(wanted, present, keep=()):
     """What to add, what to re-label, what to drop.
 
     Pure, so the rules can be tested without a project: the add/update split is
     what stops every run rewriting every row, and dropping the wrong thing is
-    the failure that loses work.
+    the failure that loses work. `keep` are rows that stay exactly as they are.
     """
     add = sorted(k for k in wanted if k not in present)
     update = sorted(k for k in wanted
                     if k in present
                     and (present[k]["result"] != wanted[k]["verdict"]
                          or present[k].get("author") != wanted[k].get("author")))
-    remove = sorted(k for k in present if k not in wanted)
+    remove = sorted(k for k in present if k not in wanted and k not in keep)
     return add, update, remove
 
 
@@ -647,16 +662,16 @@ def main(argv=None):
     print("%s: %s  %s" % (a.title, how, project.get("url", "")))
 
     present = project_items(project["id"])
-    add, update, candidates = plan(wanted, present)
+
+    # A row the label search did not return is a question, not an answer: the
+    # PR itself says whether it is still open, and what its comments conclude.
+    gone, kept, unsure = refresh_board(present, wanted, accounts)
+    if unsure:
+        print("kept %d row(s) the PR would not answer for: %s"
+              % (len(unsure), ", ".join(unsure[:5])))
+    add, update, remove = plan(wanted, present, keep=kept + unsure)
     if a.prune_only:
         add, update = [], []
-
-    # A candidate is a row the search did not return. That is a question, not
-    # an answer: ask the PR itself before taking anything off the board.
-    remove, unsure = confirmed_gone(candidates, present)
-    if unsure:
-        print("kept %d row(s) the search dropped but the PR would not confirm: %s"
-              % (len(unsure), ", ".join(unsure[:5])))
 
     print("on the board: %d   reviewed and open: %d" % (len(present), len(wanted)))
     print("add %d, relabel %d, remove %d" % (len(add), len(update), len(remove)))

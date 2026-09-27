@@ -308,13 +308,13 @@ class Sweep(unittest.TestCase):
         self.found = {}          # key -> verdict the comments say
         self.note = False        # whether the board also holds a free-text note
         self.shown = ["f1", "fa"]   # field ids the view currently displays
-        self.pr_state = {}       # key -> (state, [labels]) for the direct check
+        self.pr_state = {}       # key -> state, for a board row the search missed
+        self.pr_comments = {}    # key -> that PR's comment bodies, oldest first
         self.view_readable = True
         self.search_pages = 1    # how many pages the search answers in
         self.item_pages = 1
         self.older = {}          # key -> an older comment page, for pagination
         self.thread = {}         # key -> every comment body, oldest first
-        self.label_truncated = set()   # keys whose label page has more behind it
         self.author_field = True       # whether the PR Author field exists yet
         self.searched = []       # every search query string seen
         self.real_gh_list = PS.gh_list
@@ -336,16 +336,26 @@ class Sweep(unittest.TestCase):
             if not self.view_readable:
                 raise PS.GhError("502 while reading the view")
             return {"node": {"fields": {"nodes": [{"id": f} for f in self.shown]}}}
-        if "labels(first: 100)" in query:
-            # verification is by node id; a name would not be found here
+        if "node(id: $id)" in query and "comments(last: 100)" in query:
+            # a board row's PR, by node id; a name would not be found here
             key = v["id"][len("pr-"):] if v["id"].startswith("pr-") else None
-            state, labels = self.pr_state.get(key, ("MERGED", []))
+            state = self.pr_state.get(key, "MERGED")
+            if isinstance(state, tuple):
+                state = state[0]
             if state == "GONE" or key is None:
                 return {"node": None}
+            bodies = self.pr_comments.get(key)
+            if bodies is None:
+                bodies = ([NOTE + "**Verdict: %s**" % self.found[key]]
+                          if key in self.found else [])
+            repo, _, num = key.partition("#")
             return {"node": {
-                "state": state,
-                "labels": {"pageInfo": {"hasNextPage": key in self.label_truncated},
-                           "nodes": [{"name": n} for n in labels]}}}
+                "id": "node-" + key, "number": int(num), "title": "t", "url": "u",
+                "state": state, "author": {"login": "someone"},
+                "repository": {"nameWithOwner": repo},
+                "comments": {"pageInfo": {"hasPreviousPage": False, "startCursor": None},
+                             "nodes": [{"author": {"login": "AP-Review"}, "body": b}
+                                       for b in bodies]}}}
         if "before:" in query:
             key = v["id"][len("node-"):]
             self.older_asked = (v["id"], v["before"])
@@ -486,7 +496,7 @@ class Sweep(unittest.TestCase):
         self.assertEqual(self.run_main("--dry-run"), 0)
         self.assertEqual(self.view_sets, [])
 
-    # --- deletion needs evidence, not absence ---------------------------------
+    # --- a row stays while its PR is open; only closing removes it -----------
     def test_a_row_the_search_missed_but_the_pr_still_wants_is_kept(self):
         """Search is capped at 1000, lags its index, and can answer short.
 
@@ -494,66 +504,79 @@ class Sweep(unittest.TestCase):
         """
         self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
         self.found = {}                       # the search lost it
-        self.pr_state = {"ArduPilot/ardupilot#1": ("OPEN", ["AIReview"])}
+        self.pr_state = {"ArduPilot/ardupilot#1": "OPEN"}
+        self.pr_comments = {"ArduPilot/ardupilot#1": [NOTE + "**Verdict: ACCEPT**"]}
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.deletes(), [], "it deleted a PR that is still open")
 
     def test_a_row_whose_pr_will_not_answer_is_kept(self):
         self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
         self.found = {}
-        self.pr_state = {"ArduPilot/ardupilot#1": ("GONE", [])}
+        self.pr_state = {"ArduPilot/ardupilot#1": "GONE"}
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.deletes(), [])
 
-    def test_a_merged_pr_is_removed_even_though_it_kept_its_label(self):
+    def test_a_merged_pr_is_removed_whatever_labels_it_kept(self):
         # the label stays on a PR after it merges, so the state is what decides
         self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
         self.found = {}
-        self.pr_state = {"ArduPilot/ardupilot#1": ("MERGED", ["AIReview"])}
+        self.pr_state = {"ArduPilot/ardupilot#1": "MERGED"}
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.deletes(), ["item-ArduPilot/ardupilot#1"])
 
-    def test_a_pr_that_lost_its_label_is_removed(self):
+    def test_a_pr_that_lost_its_label_stays_while_it_is_open(self):
+        # DevCallEU and DevCallTopic come off after the call; the PR is still
+        # open, still reviewed, and followups still land on it
         self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
-        self.found = {}
-        self.pr_state = {"ArduPilot/ardupilot#1": ("OPEN", ["Copter"])}
-        self.assertEqual(self.run_main(), 0)
-        self.assertEqual(self.deletes(), ["item-ArduPilot/ardupilot#1"])
-
-    def test_a_pr_kept_only_by_a_devcall_label_is_kept(self):
-        # any trigger label keeps a row, not just the first one
-        self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
-        self.found = {}
-        self.pr_state = {"ArduPilot/ardupilot#1": ("OPEN", ["DevCallEU"])}
+        self.found = {}                       # no trigger label, so not searched
+        self.pr_state = {"ArduPilot/ardupilot#1": "OPEN"}
+        self.pr_comments = {"ArduPilot/ardupilot#1": [NOTE + "**Verdict: ACCEPT**"]}
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.deletes(), [])
+        self.assertFalse([q for q, _ in self.calls if "updateProjectV2ItemFieldValue" in q])
 
-    def test_a_label_page_with_more_behind_it_proves_nothing(self):
-        # the trigger label could be the 101st; a partial page is not absence
+    def test_a_delabelled_pr_still_gets_its_new_verdict(self):
+        # a followup re-reviewed it after the label came off; the board must
+        # show what that review said, not what the last labelled run said
         self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
         self.found = {}
-        self.pr_state = {"ArduPilot/ardupilot#1": ("OPEN", ["Copter", "Plane"])}
-        self.label_truncated = {"ArduPilot/ardupilot#1"}
+        self.pr_state = {"ArduPilot/ardupilot#1": "OPEN"}
+        self.pr_comments = {"ArduPilot/ardupilot#1": [
+            NOTE + "**Verdict: ACCEPT**", NOTE + "**Verdict: REQUEST CHANGES**"]}
         self.assertEqual(self.run_main(), 0)
-        self.assertEqual(self.deletes(), [], "it read a partial label page as complete")
+        self.assertEqual(self.deletes(), [])
+        sets = [v for q, v in self.calls if "updateProjectV2ItemFieldValue" in q]
+        self.assertEqual([s.get("option") for s in sets if "option" in s],
+                         ["o-REQUEST CHANGES"])
 
-    def test_a_row_is_verified_by_its_node_id(self):
+    def test_an_open_row_with_nothing_readable_is_left_alone(self):
+        # the comment may be gone or unreadable; the PR is open, so the row
+        # stays as it is rather than being removed or rewritten
+        self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
+        self.found = {}
+        self.pr_state = {"ArduPilot/ardupilot#1": "OPEN"}
+        self.pr_comments = {"ArduPilot/ardupilot#1": []}
+        self.assertEqual(self.run_main(), 0)
+        self.assertEqual(self.deletes(), [])
+        self.assertFalse([q for q, _ in self.calls if "updateProjectV2ItemFieldValue" in q])
+
+    def test_a_row_is_asked_about_by_its_node_id(self):
         # a renamed or transferred repository whose old name is reused can put
         # a different, closed PR at the same owner/repo/number
         self.board = {"ArduPilot/ardupilot#1": "ACCEPT"}
         self.found = {}
-        self.pr_state = {"ArduPilot/ardupilot#1": ("OPEN", ["AIReview"])}
+        self.pr_state = {"ArduPilot/ardupilot#1": "OPEN"}
         self.run_main()
-        asked = [v for q, v in self.calls if "labels(first: 100)" in q]
-        self.assertEqual([a.get("id") for a in asked], ["pr-ArduPilot/ardupilot#1"])
-        self.assertFalse(any("number" in a or "owner" in a for a in asked))
+        asked = [v for q, v in self.calls if "node(id: $id)" in q and "state" in q]
+        self.assertEqual([x.get("id") for x in asked], ["pr-ArduPilot/ardupilot#1"])
+        self.assertFalse(any("number" in x or "owner" in x for x in asked))
 
     def test_an_empty_org_does_not_take_that_org_off_the_board(self):
         # one org answering empty looked exactly like every PR in it closing
         self.board = {"ArduPilot/ardupilot#1": "ACCEPT",
                       "RsyncProject/rsync#9": "COMMENT"}
         self.found = {"ArduPilot/ardupilot#1": "ACCEPT"}
-        self.pr_state = {"RsyncProject/rsync#9": ("OPEN", ["AIReview"])}
+        self.pr_state = {"RsyncProject/rsync#9": "OPEN"}
         self.assertEqual(self.run_main(), 0)
         self.assertEqual(self.deletes(), [])
 
@@ -662,7 +685,7 @@ class Sweep(unittest.TestCase):
         # is what a broken sweep looks like and is worth a human glance
         self.board = {"ArduPilot/ardupilot#%d" % i: "ACCEPT" for i in range(3)}
         self.found = {}
-        self.pr_state = {k: ("MERGED", []) for k in self.board}
+        self.pr_state = {k: "MERGED" for k in self.board}
         self.assertEqual(self.run_main(), 3)
         self.assertEqual(self.deletes(), [])
 
@@ -672,7 +695,7 @@ class Sweep(unittest.TestCase):
         self.shown = ["f1"]                               # would want updating
         self.board = {"ArduPilot/ardupilot#%d" % i: "ACCEPT" for i in range(60)}
         self.found = {}
-        self.pr_state = {k: ("MERGED", []) for k in self.board}
+        self.pr_state = {k: "MERGED" for k in self.board}
         self.assertEqual(self.run_main(), 3)
         self.assertEqual(self.deletes(), [])
         self.assertEqual(self.view_sets, [], "it changed the view then refused")
@@ -684,7 +707,7 @@ class Sweep(unittest.TestCase):
         self.author_field = False
         self.board = {"ArduPilot/ardupilot#%d" % i: "ACCEPT" for i in range(60)}
         self.found = {}
-        self.pr_state = {k: ("MERGED", []) for k in self.board}
+        self.pr_state = {k: "MERGED" for k in self.board}
         self.assertEqual(self.run_main(), 3)
         self.assertFalse([q for q, _ in self.calls if "createProjectV2Field" in q],
                          "it created a field then refused")

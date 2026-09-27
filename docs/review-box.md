@@ -664,18 +664,24 @@ gh auth refresh -s project,read:project
 
 Until then the sync exits 2 and says so; nothing else is affected.
 
-### Removing a row needs evidence, not absence
+### A row stays while its PR is open
 
-A row the search did not return is a question, not an answer. Search is capped
-at [1000 results](https://docs.github.com/en/graphql/reference/search), its
-index lags, an org can answer empty, and a transient failure looks the same as
-"everything merged". So every removal candidate is checked against the PR
-itself - state and labels - and only a definite "closed, or no longer labelled"
-takes a row off. Unknown keeps the row. The check is by the PR's node id, not
-owner/repo/number: a repository renamed or transferred and its old name reused
-can put a different, closed PR at the same address. A label page with more
-behind it proves nothing either - the trigger label could be the one past the
-page - and is unknown.
+A trigger label is what brings a PR to the board: the label search is how new
+reviews are found. Losing the label does not take it off. `DevCallEU` and
+`DevCallTopic` come off after the call, the PR is still open and still
+reviewed, and followups still land on it, so it stays until it is merged or
+closed. The candidates are therefore the labelled PRs plus everything already
+on the board.
+
+A row the label search did not return is a question, not an answer. Search is
+capped at [1000 results](https://docs.github.com/en/graphql/reference/search),
+its index lags, an org can answer empty, and a transient failure looks the same
+as "everything merged". So each such row is asked about directly, by the PR's
+node id - a repository renamed or transferred and its old name reused can put
+a different, closed PR at the same address. Open: the row stays, and its
+verdict is re-read from the PR's own comments, so a followup review reaches
+the board with or without the label. Closed or merged: the row goes. No
+answer: the row stays as it is.
 
 That check is the protection. The count threshold behind it is an alarm for
 something systematically wrong: more than 25 removals, or more than a quarter
