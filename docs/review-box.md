@@ -627,9 +627,25 @@ they disagreed ten times, the report being the stale one.
    disagreeing with `> **Verdict: ACCEPT**` was read as a fresh ACCEPT, and so
    was a marker quoted as an example.
 
-   Coverage fell from 166 of 168 to 155 of 164 as a result. That is the trade
-   being made on purpose: unknown leaves the last plainly-stated verdict
-   standing, and a wrong verdict does not.
+   A second round the same day found six more wrong answers, all of them a
+   comment declaring two verdicts and the parser picking the wrong one: a
+   condition hidden behind an opening `**`, a contraction (`doesn't`) the
+   negation check did not know, a condition *after* the verdict, `Previous
+   verdict: ACCEPT. Current verdict: REQUEST CHANGES`, a marker quoted in
+   backticks, and a verdict line that CommonMark puts inside the blockquote
+   above it. Rather than a third round of patches, the parser now **refuses**:
+   a comment is read only when every verdict it declares is the same one, and
+   two different ones in declaration positions are reported as unknown. The
+   one two-verdict form still read is `moves from X to Y`, where a single
+   anchor sees both. Quotations and code are stripped the way CommonMark reads
+   them - fences of either kind closing only at a fence at least as long, or
+   never; a quotation running on into the plain lines under it; code spans of
+   any backtick length.
+
+   Coverage is 157 of 164 (measured against the live comments on
+   2026-09-27, the same set the previous parser read). That is the trade being
+   made on purpose: unknown leaves the last plainly-stated verdict standing,
+   and a wrong verdict does not.
 
    `the verdict moves from REQUEST CHANGES to COMMENT` is handled on its own and
    first: every other anchor reads it backwards and takes the old verdict. Four
@@ -688,7 +704,11 @@ at [1000 results](https://docs.github.com/en/graphql/reference/search), its
 index lags, an org can answer empty, and a transient failure looks the same as
 "everything merged". So every removal candidate is checked against the PR
 itself - state and labels - and only a definite "closed, or no longer labelled"
-takes a row off. Unknown keeps the row.
+takes a row off. Unknown keeps the row. The check is by the PR's node id, not
+owner/repo/number: a repository renamed or transferred and its old name reused
+can put a different, closed PR at the same address. A label page with more
+behind it proves nothing either - the trigger label could be the one past the
+page - and is unknown.
 
 That check is the protection. The count threshold behind it is an alarm for
 something systematically wrong: more than 25 removals, or more than a quarter
@@ -700,13 +720,23 @@ Numbers are sent with `-F`, not `-f`. `-f` makes every value a String and
 useless: it made every check answer unknown, so nothing was ever removed.
 
 Comments are read newest-first and paged backwards until a verdict is found, up
-to five pages. A PR busy enough to push its review out of the newest hundred
-would otherwise look unreviewed, and lose its row.
+to five pages, and not past a cursor that fails to advance. A PR busy enough to
+push its review out of the newest hundred would otherwise look unreviewed, and
+lose its row.
+
+Nothing is written before the safety check - not the view, and not the two
+fields either. A refused sweep that had already created a column was printing
+"Nothing was changed" untruthfully.
 
 One sync at a time: `project-sync.sh` holds a lock, because the cron sweep and a
 run's exit path can fire together and interleave - the first reads the board,
 the second adds a row, the first deletes it as "not in my search". Every `gh`
 call has a deadline, since the sync runs while the run lock is still held.
+
+Called from the run's exit trap, the wrapper inherits fd 9 already open on the
+run lock. It closes that copy before opening its own lock, and if the sync lock
+cannot be opened it logs and skips: otherwise `flock` would be asked about the
+inherited run lock, say yes, and the sync would run with no lock at all.
 
 ## Publishing
 

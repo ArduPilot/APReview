@@ -188,47 +188,49 @@ query($q: String!, $after: String) {
 # busy enough to push it out of that window would otherwise lose its row
 # entirely, because "no verdict" and "not reviewed" look the same here.
 OLDER_COMMENTS = """
-query($owner: String!, $repo: String!, $number: Int!, $before: String!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      comments(last: 100, before: $before) {
-        pageInfo { hasPreviousPage startCursor }
-        nodes { author { login } body }
-      }
+query($id: ID!, $before: String!) {
+  node(id: $id) { ... on PullRequest {
+    comments(last: 100, before: $before) {
+      pageInfo { hasPreviousPage startCursor }
+      nodes { author { login } body }
     }
-  }
+  } }
 }"""
 
 
-MAX_COMMENT_PAGES = 5          # 500 comments back; beyond that, give up openly
+# 500 comments back; beyond that, give up openly rather than walk a PR's whole
+# history from a run's exit path. A cursor seen twice means the walk is not
+# advancing, and is stopped for the same reason.
+MAX_COMMENT_PAGES = 5
 
 
 def verdict_of(pr, accounts, fetch_older=None):
     """The PR's verdict, paging back through comments until one is stated."""
     page = pr["comments"]
-    while True:
+    seen = set()
+    for _ in range(MAX_COMMENT_PAGES):
         verdict, how = V.of_thread(our_comments(page["nodes"], accounts))
         if verdict:
             return verdict, how
         info = page.get("pageInfo") or {}
-        if not info.get("hasPreviousPage") or not info.get("startCursor"):
+        cursor = info.get("startCursor")
+        if not info.get("hasPreviousPage") or not cursor or cursor in seen:
             return None, None
+        seen.add(cursor)
         if fetch_older is None:
             fetch_older = _older_comments
-        page = fetch_older(pr, info["startCursor"])
+        page = fetch_older(pr, cursor)
         if page is None:
             return None, None
+    return None, None
 
 
-def _older_comments(pr, cursor, _depth=[0]):
-    repo = pr["repository"]["nameWithOwner"]
-    owner, _, name = repo.partition("/")
+def _older_comments(pr, cursor):
     try:
-        d = gh(OLDER_COMMENTS, owner=owner, repo=name,
-               number=int(pr["number"]), before=cursor)
+        d = gh(OLDER_COMMENTS, id=pr["id"], before=cursor)
     except GhError:
         return None
-    return ((d.get("repository") or {}).get("pullRequest") or {}).get("comments")
+    return (d.get("node") or {}).get("comments")
 
 
 def reviewed_prs(owners, accounts):
@@ -299,8 +301,8 @@ query($project: ID!, $after: String) {
       nodes {
         id
         content {
-          ... on PullRequest { number state repository { nameWithOwner } }
-          ... on Issue { number repository { nameWithOwner } }
+          ... on PullRequest { id number state repository { nameWithOwner } }
+          ... on Issue { id number repository { nameWithOwner } }
         }
         fieldValues(first: 30) { nodes {
           ... on ProjectV2ItemFieldSingleSelectValue { name field {
@@ -313,18 +315,18 @@ query($project: ID!, $after: String) {
   } }
 }"""
 
-# One PR, asked about by name. Absence from a search is not evidence that a PR
+# One PR, asked about directly. Absence from a search is not evidence that a PR
 # closed: search is capped at 1000 results, its index lags, and a transient
 # failure or an org that happens to answer empty looks identical to "all merged".
-# Every removal is therefore confirmed against the PR itself.
+# Every removal is therefore confirmed against the PR itself - by node id, which
+# a repository rename or transfer does not change, where owner/repo/number could
+# name a different PR by the time it is asked.
 VERIFY = """
-query($owner: String!, $repo: String!, $number: Int!) {
-  repository(owner: $owner, name: $repo) {
-    pullRequest(number: $number) {
-      state
-      labels(first: 50) { nodes { name } }
-    }
-  }
+query($id: ID!) {
+  node(id: $id) { ... on PullRequest {
+    state
+    labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
+  } }
 }"""
 
 CREATE_PROJECT = """
@@ -526,8 +528,8 @@ def project_items(project_id):
                     result = fv.get("name")
                 elif name == AUTHOR:
                     author = fv.get("text")
-            out[key] = {"item": it["id"], "result": result, "author": author,
-                        "state": c.get("state")}
+            out[key] = {"item": it["id"], "content": c.get("id"),
+                        "result": result, "author": author, "state": c.get("state")}
         if not d["pageInfo"]["hasNextPage"]:
             return out
         after = d["pageInfo"]["endCursor"]
@@ -558,34 +560,38 @@ def too_much_to_remove(remove, present, limit=PRUNE_LIMIT):
     return len(remove) > max(limit, len(present) // 4)
 
 
-def still_eligible(key, labels=LABELS):
+def still_eligible(node_id, labels=LABELS):
     """Is this PR still open and labelled?
 
     True keep, False genuinely gone, None unknown. Unknown is kept: the whole
     point is that only a definite answer may delete a row.
     """
-    repo, _, num = key.partition("#")
-    owner, _, name = repo.partition("/")
-    if not (owner and name and num.isdigit()):
+    if not node_id:
         return None
     try:
-        pr = (gh(VERIFY, owner=owner, repo=name, number=int(num))
-              .get("repository") or {}).get("pullRequest")
+        pr = gh(VERIFY, id=node_id).get("node")
     except GhError:
         return None
-    if pr is None:
-        return None                      # deleted, moved, or not visible
+    if not pr or "state" not in pr:
+        return None                 # deleted, not visible, or not a PR at all
     if pr.get("state") != "OPEN":
         return False
-    names = {n["name"] for n in (pr.get("labels") or {}).get("nodes", []) if n}
-    return bool(names & set(labels))
+    page = pr.get("labels") or {}
+    names = {n["name"] for n in page.get("nodes", []) if n}
+    if names & set(labels):
+        return True
+    # A trigger label past the page would look like no label at all. Absence
+    # has to be established, not assumed.
+    if (page.get("pageInfo") or {}).get("hasNextPage"):
+        return None
+    return False
 
 
-def confirmed_gone(candidates, verify=still_eligible):
+def confirmed_gone(candidates, present, verify=still_eligible):
     """The candidates a direct check says are really no longer eligible."""
     gone, unsure = [], []
     for k in candidates:
-        state = verify(k)
+        state = verify(present[k].get("content"))
         if state is False:
             gone.append(k)
         elif state is None:
@@ -639,10 +645,6 @@ def main(argv=None):
         print("%s: %s" % (a.title, how))
         return 0
     print("%s: %s  %s" % (a.title, how, project.get("url", "")))
-    field_id, options, fhow = ensure_field(project["id"], a.dry_run)
-    print("field %s: %s" % (FIELD, fhow))
-    author_id, ahow = ensure_author_field(project["id"], a.dry_run)
-    print("field %s: %s" % (AUTHOR, ahow))
 
     present = project_items(project["id"])
     add, update, candidates = plan(wanted, present)
@@ -651,7 +653,7 @@ def main(argv=None):
 
     # A candidate is a row the search did not return. That is a question, not
     # an answer: ask the PR itself before taking anything off the board.
-    remove, unsure = confirmed_gone(candidates)
+    remove, unsure = confirmed_gone(candidates, present)
     if unsure:
         print("kept %d row(s) the search dropped but the PR would not confirm: %s"
               % (len(unsure), ", ".join(unsure[:5])))
@@ -667,8 +669,12 @@ def main(argv=None):
         print("         Re-run with --force-prune if it is real.")
         return 3
 
-    # Only once nothing is going to be refused: a view rewritten before the
-    # safety check meant "Nothing was changed" was not true.
+    # Only once nothing is going to be refused: fields created and a view
+    # rewritten before the safety check meant "Nothing was changed" was not true.
+    field_id, options, fhow = ensure_field(project["id"], a.dry_run)
+    print("field %s: %s" % (FIELD, fhow))
+    author_id, ahow = ensure_author_field(project["id"], a.dry_run)
+    print("field %s: %s" % (AUTHOR, ahow))
     print("view: %s" % ensure_view(project["id"], a.dry_run))
 
     if a.dry_run:

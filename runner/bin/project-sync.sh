@@ -19,7 +19,18 @@ unset GH_TOKEN GITHUB_TOKEN
 # row, the first then deletes it as "not in my search". -n rather than a wait,
 # because the next sweep is fifteen minutes away and this must never hold up
 # the run that called it.
-exec 9>"$REVIEW_ROOT/etc/project-sync.lock"
+#
+# Called from a run's EXIT trap, fd 9 arrives already open: it is the run lock,
+# inherited from run-reviewprs.sh. It has to go first. If it stayed and the open
+# below failed, flock would be asked about the run lock instead, succeed, and
+# the sync would run with no lock at all. Closing this copy does not release
+# the run's own hold on it.
+exec 9>&-
+if ! exec 9>"$REVIEW_ROOT/etc/project-sync.lock"; then
+    echo "$(date -Is) skipped: cannot open the sync lock" \
+        >>"$REVIEW_LOGS/project-sync.log"
+    exit 0
+fi
 if ! flock -n 9; then
     echo "$(date -Is) skipped: another project sync is running" \
         >>"$REVIEW_LOGS/project-sync.log"

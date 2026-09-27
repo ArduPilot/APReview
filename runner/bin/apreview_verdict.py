@@ -27,9 +27,19 @@ Two sources, in order:
      bare words appear constantly in ordinary review prose: 10 of the 168 name
      a second verdict within the first 400 characters of the right one.
 
-The fallback reaches 94% of the existing backlog. The rest either state no
-verdict (a draft, reviewed as guidance) or are followup notes that deliberately
-carry none, and they are reported as unknown rather than guessed at.
+The fallback is refused whenever it is not obvious. A comment that declares two
+different verdicts - "Verdict: REQUEST CHANGES ... moves to ACCEPT if tests
+pass", "Previous verdict: ACCEPT. Current verdict: REQUEST CHANGES" - is
+reported as unknown rather than resolved, after two rounds of adversarial
+review each found a way to make "resolve it" pick the wrong one. The board then
+keeps the last verdict that was stated plainly, or leaves the PR off. The one
+two-verdict form still read is "moves from X to Y", where a single anchor sees
+both and the answer is not in doubt.
+
+The fallback reaches 96% of the existing backlog (157 of 164 on 2026-09-27).
+The rest either state no verdict (a draft, reviewed as guidance) or are
+followup notes that deliberately carry none, and they are reported as unknown
+rather than guessed at.
 """
 import re
 
@@ -54,25 +64,45 @@ _END_WORD = r"\b(?!\w)"
 # "Please **comment** on the test plan".
 _END_ALONE = _END_WORD + r"(?=\s*(?:\*{0,2})\s*(?:[-–—:.,;!?)\]]|$))"
 
-# Words that make the sentence hypothetical or deny it. A verdict inside one is
-# not a verdict: "the verdict does not move to ACCEPT" and "if tests pass, the
-# verdict moves to ACCEPT" both said ACCEPT before this existed.
-_UNREAL = re.compile(
-    r"\b(?:if|once|unless|until|should|would|could|when|provided|assuming|"
-    r"not|n't|never|cannot|rather\s+than|instead\s+of|was|were|previously|"
-    r"had\s+been|no\s+longer)\b", re.I)
+# Words that make the sentence hypothetical, deny it, or put it in the past. A
+# verdict inside one is not a verdict: "the verdict does not move to ACCEPT",
+# "if tests pass, the verdict moves to ACCEPT" and "Previous verdict: ACCEPT"
+# all said ACCEPT before this existed. Behind the verdict, only the words that
+# hedge it count: "Verdict: COMMENT - all four previous BUGs are fixed" is a
+# plain COMMENT.
+_HEDGE = (r"if|once|unless|until|should|would|could|when|provided|assuming|"
+          r"otherwise|else|only")
+_DENIED = r"not|never|cannot|rather\s+than|instead\s+of"
+_HISTORY = (r"was|were|previous(?:ly)?|prior|earlier|original(?:ly)?|"
+            r"initial(?:ly)?|former(?:ly)?|old|last|had\s+been|no\s+longer")
 
 
-def _unreal_before(text, start, window=60):
-    """Is this match inside a negated or hypothetical clause?
+def _words(*groups):
+    # n't has no word boundary in front of it: "doesn't" is one word
+    return re.compile(r"(?:\b(?:%s)|n't)\b" % "|".join(groups), re.I)
 
-    Only the current clause is examined - a full stop, semicolon, newline or
-    bold run ends it - because "No blockers. Verdict: ACCEPT" is a perfectly
-    ordinary thing for a review to say.
+
+_UNREAL_BEFORE = _words(_HEDGE, _DENIED, _HISTORY)
+# "verdict moves from X to Y" is about history by nature - "was X, now Y",
+# "all blockers from my previous comment are fixed, so the verdict moves to
+# Y" - so for that anchor only the hedges and denials count.
+_UNREAL_BEFORE_MOVES = _words(_HEDGE, _DENIED)
+_UNREAL_AFTER = _words(_HEDGE)
+
+
+def _unreal(text, start, end, history=True, window=80):
+    """Is this match inside a negated, hypothetical or historical clause?
+
+    Only the current clause is examined - a full stop, semicolon or newline ends
+    it - because "No blockers. Verdict: ACCEPT" is a perfectly ordinary thing
+    for a review to say. Behind the match, a bold run or a dash ends it as
+    well: what follows there is the explanation, not the condition.
     """
-    clause = text[max(0, start - window):start]
-    clause = re.split(r"[.;\n]|\*\*", clause)[-1]
-    return bool(_UNREAL.search(clause))
+    before = re.split(r"[.;\n]", text[max(0, start - window):start])[-1]
+    if (_UNREAL_BEFORE if history else _UNREAL_BEFORE_MOVES).search(before):
+        return True
+    after = re.split(r"[.;\n]|\*\*|\s[-\u2013\u2014]\s", text[end:end + window])[0]
+    return bool(_UNREAL_AFTER.search(after))
 
 
 MARKER = re.compile(r"<!--\s*apreview:\s*([^>]*?)-->", re.I)
@@ -81,19 +111,50 @@ _FIELD = re.compile(r"(\w+)\s*=\s*([^\s]+)")
 # A comment we superseded. Its verdict is not the current one.
 DEPRECATED = "> **Deprecated"
 
-# Quoted text and fenced code are somebody else's words, or our own repeated
-# back at us. A maintainer disagreeing with "> **Verdict: ACCEPT**" was read as
-# a fresh ACCEPT.
-_QUOTED = re.compile(r"^\s{0,3}>.*$", re.M)
-_FENCED = re.compile(r"```.*?```|~~~.*?~~~", re.S)
-_INDENTED_CODE = re.compile(r"^(?: {4}|\t).*$", re.M)
+# Quoted text and code are somebody else's words, or our own repeated back at
+# us. A maintainer disagreeing with "> **Verdict: ACCEPT**" was read as a fresh
+# ACCEPT, and so was an example marker inside backticks. Done by line, the way
+# CommonMark reads it: a fence closes only at a fence of its own kind at least
+# as long, or never; a quotation runs on into the plain lines under it until a
+# blank line or a new block; a code span is any run of backticks matched by an
+# equal run.
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+_QUOTE = re.compile(r"^ {0,3}>")
+_BLOCK_START = re.compile(r"^ {0,3}(?:#{1,6}(?:\s|$)|[-*+]\s|\d{1,9}[.)]\s|"
+                          r"(?:[-*_]\s*){3,}$|<)")
+_INDENTED_CODE = re.compile(r"^(?: {4}|\t)")
+_CODE_SPAN = re.compile(r"(?<!`)(`+)(?!`)((?:(?!\n\s*\n).)+?)(?<!`)\1(?!`)", re.S)
 
 
 def strip_quotes(body):
     """The comment's own prose, with quotations and code removed."""
-    body = _FENCED.sub("\n", body or "")
-    body = _QUOTED.sub("", body)
-    return _INDENTED_CODE.sub("", body)
+    out, fence, quoting = [], None, False
+    for line in (body or "").split("\n"):
+        if fence:
+            m = _FENCE.match(line)
+            if (m and m.group(1)[0] == fence[0] and len(m.group(1)) >= len(fence)
+                    and not line[m.end():].strip()):
+                fence = None
+            out.append("")
+            continue
+        m = _FENCE.match(line)
+        if m and not (m.group(1)[0] == "`" and "`" in line[m.end():]):
+            fence, quoting = m.group(1), False
+            out.append("")
+            continue
+        if _QUOTE.match(line):
+            quoting = True
+            out.append("")
+            continue
+        if quoting and line.strip() and not _BLOCK_START.match(line):
+            out.append("")          # lazy continuation: still the quotation
+            continue
+        quoting = False
+        if _INDENTED_CODE.match(line):
+            out.append("")
+            continue
+        out.append(line)
+    return _CODE_SPAN.sub(" ", "\n".join(out))
 
 
 # Ordered. Each requires something that means "this is the verdict"; none will
@@ -151,22 +212,39 @@ def from_marker(body):
     return normalise(fields.get("verdict", "").replace("_", " "))
 
 
-def from_prose(body):
-    """(verdict, which anchor matched), or (None, None).
+def declarations(body):
+    """Every verdict the comment declares, as (verdict, anchor), in anchor order.
 
-    Unknown is a safe answer and a wrong verdict is not, so anything ambiguous
-    returns nothing rather than a guess: the board then keeps the last verdict
-    that was stated plainly, or leaves the PR off.
+    Declared, not mentioned: each anchor needs a marker that means "this is the
+    verdict", and a match inside a hedged, denied or historical clause does not
+    count. What is left is what the comment is actually claiming.
     """
     body = strip_quotes(body)
+    out = []
     for name, pat in _ANCHORS:
         for m in pat.finditer(body):
-            if _unreal_before(body, m.start(m.lastindex)):
+            if _unreal(body, m.start(m.lastindex), m.end(m.lastindex),
+                       history=(name != "verdict-moves")):
                 continue
             v = normalise(m.group(m.lastindex))
             if v:
-                return v, name
-    return None, None
+                out.append((v, name))
+    return out
+
+
+def from_prose(body):
+    """(verdict, which anchor matched), or (None, None).
+
+    Unknown is a safe answer and a wrong verdict is not. A comment is read only
+    when everything it declares agrees: two different verdicts in declaration
+    positions - a history, a condition the hedge words missed, an example -
+    are refused rather than resolved, because each rule for resolving them has
+    turned out to have a counter-example that reads the wrong one.
+    """
+    found = declarations(body)
+    if len({v for v, _ in found}) != 1:
+        return None, None
+    return found[0]
 
 
 def of_comment(body):
