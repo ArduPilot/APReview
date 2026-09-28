@@ -1,0 +1,465 @@
+#!/usr/bin/env python3
+"""A finite candidate snapshot and durable claims drive four independent tracks."""
+import argparse
+import os
+from pathlib import Path
+import sys
+import subprocess
+import time
+import uuid
+
+from review_guardian import alive, cleanup_attempt, identity, launch
+from review_lock import canonical, try_lock
+from review_schema import FILES, read_result
+from review_store import Store, StubAdapter, atomic, delivery_id, digest, mkdir, read
+
+KINDS = ("primary", "cold", "validation", "reconciliation")
+WALL = {"primary": 5400, "cold": 1800, "validation": 1800, "reconciliation": 2700}
+
+
+def refresh(candidate):
+    """The slice's read-only adapter uses supplied live metadata."""
+    if candidate.get("refresh_error"):
+        raise OSError("candidate refresh failed")
+    return dict(candidate, **candidate.get("live", {}))
+
+
+def reconciliation_snapshot(candidate):
+    if candidate.get("reconciliation_error"):
+        raise OSError("reconciliation snapshot failed")
+    return {"title": candidate.get("title", ""), "head": candidate["head"],
+            "thread": candidate.get("thread", [])}
+
+
+class Supervisor:
+    def __init__(self, data, directory, candidates=None, admission=14400, wall=None, request=None,
+                 mode="candidates", pool_size=4, permit_timeout=120):
+        if os.environ.get("REVIEW_AI_STUB") != "1":
+            raise ValueError("this slice requires REVIEW_AI_STUB=1")
+        self.store = Store(Path(data).resolve())
+        self.directory = Path(directory).resolve()
+        mkdir(self.directory)
+        self.run_id = str(self.directory)
+        self.lock = None
+        self.owned = {}
+        self.children = []
+        self.next_claim = {}
+        self.backoff = {}
+        self.config = read(self.directory / "run.json")
+        self.initial = (candidates, admission, wall, request, mode, pool_size, permit_timeout)
+        self.states = read(self.directory / "state.json", {})
+        self.adapter = StubAdapter(self.store.root)
+
+    def initialize(self):
+        if self.config is not None:
+            if self.config.get("schema") != 1 or self.config.get("data") != str(self.store.root):
+                raise ValueError("resume configuration uses a different store or schema")
+            return
+        candidates, admission, wall, request, mode, pool, permit_timeout = self.initial
+        if candidates is None:
+            raise ValueError("missing frozen run configuration")
+        if pool < 2 or pool > 256:
+            raise ValueError("reserved finishing slots require a pool of 2..256")
+        unique = {}
+        for candidate in candidates:
+            candidate = dict(candidate)
+            pr = canonical(candidate.get("pr", "pr:%s#%s" % (candidate["repository"], candidate["number"])))
+            candidate["pr"] = pr
+            candidate["repository"] = pr[3:].split("#")[0]
+            candidate["number"] = int(pr.split("#")[1])
+            for field in ("head", "base", "merge_base", "node_id", "created_at"):
+                if field not in candidate:
+                    raise ValueError("candidate missing " + field)
+            if pr in unique and unique[pr] != candidate:
+                raise ValueError("conflicting duplicate candidate")
+            unique[pr] = candidate
+        ordered = sorted(unique.values(), key=lambda c: (c["created_at"], c["pr"]))
+        self.config = {"schema": 1, "run": self.run_id, "data": str(self.store.root), "request": request or uuid.uuid4().hex,
+                       "mode": mode, "created": time.time(), "admission_deadline": time.time() + admission,
+                       "pool_size": pool, "permit_timeout": permit_timeout, "wall": wall,
+                       "candidates": ordered, "stub": True,
+                       "plain_guardians": os.environ.get("REVIEW_GUARDIAN_PLAIN") == "1",
+                       "observation": self.store.ticket()}
+        atomic(self.directory / "run.json", self.config)
+
+    def project(self, candidate, phase, generation=None):
+        pr = candidate["pr"]
+        patch = {"ticket": self.config["observation"], "removed": candidate.get("classification") == "DROPPED"}
+        if generation:
+            patch["generation"] = generation
+        intents = []
+        operation = digest([self.run_id, phase, pr])
+        for target in dict.fromkeys(candidate.get("destinations", [])):
+            target = canonical(target)
+            intents.append({"kind": "projection", "target": target, "gate": "page", "patches": {pr: patch}})
+            intents.append({"kind": "publish", "target": target, "gate": "page",
+                            "dependencies": [delivery_id(pr, operation, "projection", target)]})
+        if intents:
+            self.store.journal(self.run_id, phase, pr, intents)
+
+    def save(self):
+        atomic(self.directory / "state.json", self.states)
+        debts = [read(p) for p in sorted((self.store.root / "outbox").glob("*.json"))]
+        for pr, state in self.states.items():
+            generation = state.get("generation")
+            if not generation:
+                continue
+            for receipt in (read(p) for p in (self.store.root / "receipts").glob("*.json")):
+                if receipt["pr"] != pr or receipt["generation"] != generation:
+                    continue
+                if receipt["kind"] == "publish":
+                    state["publish"][receipt["target"]] = receipt["state"]
+                elif receipt["kind"] in ("comment", "board"):
+                    state[receipt["kind"]] = receipt["state"]
+        atomic(self.directory / "summary.json", {"schema": 1, "run": self.run_id, **identity(),
+               "state": "running" if any(s["review"] in ("pending", "claimed", "reviewing", "reconciling") for s in self.states.values()) else "complete",
+               "heartbeat": time.time(), "prs": self.states,
+               "delivery_deferred": [x["id"] for x in debts if x["pr"] in self.states],
+               "attempts": [str(p.parent) for p in (self.directory / "attempts").glob("*/job.json")]})
+
+    def inputs(self, candidate):
+        return {k: candidate.get(k) for k in ("repository", "number", "node_id", "head", "base", "merge_base", "rules", "configuration")}
+
+    def finish(self, pr, review, reason=None):
+        state = self.states[pr]
+        state["review"] = review
+        if reason:
+            state["reason"] = reason
+        lock = self.owned.pop(pr, None)
+        if lock:
+            claim = self.store.claim(pr)
+            if claim and claim["run"] == self.run_id and review == "deferred":
+                claim["status"] = "deferred"
+                self.store.save_claim(lock, pr, claim)
+            lock.close()
+
+    def claim_candidate(self, candidate):
+        pr = candidate["pr"]
+        state = self.states[pr]
+        if time.time() < self.next_claim.get(pr, 0):
+            return
+        lock = try_lock(self.store.locks, pr)
+        if lock is None:
+            delay = min(30, self.backoff.get(pr, 0) + 1)
+            self.backoff[pr] = delay
+            self.next_claim[pr] = time.time() + delay
+            state["reason"] = "PR busy"
+            return
+        self.owned[pr] = lock
+        if not self.store.clean_owner(lock):
+            self.finish(pr, "deferred", "previous payload not empty")
+            return
+        self.store.recover_pr(lock, pr)
+        current = self.store.bundle(pr)
+        existing = self.store.claim(pr)
+        if existing and existing["node_id"] != candidate["node_id"]:
+            self.finish(pr, "deferred", "stored node id changed")
+            return
+        try:
+            self.store.ticket()
+            fresh = refresh(candidate)
+        except OSError as error:
+            self.finish(pr, "deferred", str(error))
+            return
+        if fresh.get("node_id") != candidate["node_id"]:
+            self.finish(pr, "deferred", "node id changed")
+            return
+        if fresh.get("classification") == "DROPPED" or fresh.get("open", True) is False or fresh.get("draft", False):
+            self.finish(pr, "dropped")
+            return
+        if fresh.get("classification") == "DEFERRED":
+            self.finish(pr, "deferred", fresh.get("reason", "candidate deferred"))
+            return
+        same_request = current and current["request"] == self.config["request"]
+        if current and (same_request or (self.config["mode"] != "pr" and current["inputs"]["head"] == fresh["head"])):
+            state["generation"] = current["generation"]
+            self.project(fresh, "reuse", current["generation"])
+            self.finish(pr, "accepted" if same_request else "reused")
+            return
+        claim = self.store.claim(pr)
+        inputs = self.inputs(fresh)
+        if (claim and claim["run"] == self.run_id and claim["request"] == self.config["request"] and
+                claim["status"] == "active"):
+            # An admitted generation keeps its pinned inputs across controller death.
+            inputs = claim["inputs"]
+            fresh.update(inputs)
+        if not (claim and claim["run"] == self.run_id and claim["request"] == self.config["request"] and
+                claim["status"] == "active" and claim["inputs"] == inputs):
+            claim = self.store.allocate(lock, pr, self.run_id, self.config["request"], inputs)
+        state.update(review="claimed", generation=claim["generation"], candidate=fresh, attempts={})
+        for path in claim["attempts"]:
+            job = read(Path(path) / "job.json")
+            if job and job["input_digest"] == digest(inputs):
+                state["attempts"].setdefault(job["kind"], []).append(path)
+
+    def attempt_state(self, path):
+        status = read(Path(path) / "status.json", {})
+        if alive(status):
+            return "live"
+        if status.get("state") == "terminal" and status.get("empty"):
+            return "done"
+        job = read(Path(path) / "job.json")
+        manager = read(Path(path) / "manager.json", {})
+        if alive(manager) or time.time() - job["registered"] < 1:
+            return "live"
+        return "failed" if cleanup_attempt(Path(path), time.monotonic() + 5) else "blocked"
+
+    def start_attempt(self, candidate, kind, claim):
+        pr = candidate["pr"]
+        state = self.states[pr]
+        attempt_id = uuid.uuid4().hex
+        path = self.directory / "attempts" / attempt_id
+        mkdir(path)
+        job = {**claim["inputs"], "schema": 1, "run": self.run_id, "job": pr + ":" + kind,
+               "attempt": attempt_id, "generation": claim["generation"], "kind": kind, "pr": pr,
+               "provider": "claude" if kind in ("primary", "reconciliation") else "codex",
+               "account": "stub", "input_digest": digest(claim["inputs"]),
+               "abort_path": str(self.directory / "abort.json"), "registered": time.time(),
+               "env": {k: v for k, v in os.environ.items()
+                       if k.startswith("REVIEW_") or k in ("PATH", "HOME", "LANG", "PYTHONPATH")},
+               "wall_timeout": self.config["wall"] or WALL[kind], "pool_size": self.config["pool_size"],
+               "permit_timeout": self.config["permit_timeout"],
+               "command": [sys.executable, str(Path(__file__).with_name("review_stub.py"))]}
+        behavior = candidate.get("stub", {}).get(kind, {})
+        if isinstance(behavior, list):
+            index = len(state["attempts"].get(kind, []))
+            behavior = behavior[min(index, len(behavior) - 1)] if behavior else {}
+        job["stub"] = behavior
+        if kind == "validation":
+            result = read_result(Path(claim["selected"]["primary"]) / "review.json", read(Path(claim["selected"]["primary"]) / "job.json"))
+            job["primary_ids"] = [x["id"] for x in result["findings"]]
+            job["primary_result"] = result
+        if kind == "reconciliation":
+            job["fresh_snapshot"] = reconciliation_snapshot(refresh(candidate))
+            job["finding_ids"] = []
+            job["results"] = {}
+            for previous in ("primary", "cold", "validation"):
+                source = Path(claim["selected"][previous])
+                result = read_result(source / FILES[previous], read(source / "job.json"))
+                job["results"][previous] = result
+                job["finding_ids"] += [x["id"] for x in result.get("findings", result.get("new", []))]
+        atomic(path / "job.json", job)
+        claim["attempts"].append(str(path))
+        self.store.save_claim(self.owned[pr], pr, claim)
+        state["attempts"].setdefault(kind, []).append(str(path))
+        self.save()
+        child = launch(self.store.root, path, self.owned[pr])
+        if child:
+            self.children.append(child)
+
+    def advance(self, pr):
+        state = self.states[pr]
+        candidate = state["candidate"]
+        claim = self.store.claim(pr)
+        live = False
+        failed = False
+        failed_reason = "pass failed after retry"
+        retryable = set()
+        for kind, attempts in state["attempts"].items():
+            if kind in claim["selected"]:
+                continue
+            path = attempts[-1]
+            outcome = self.attempt_state(path)
+            if outcome == "live":
+                live = True
+                continue
+            status = read(Path(path) / "status.json", {})
+            if (outcome == "done" and status.get("exit") == 0 and not status.get("timed_out") and
+                    not status.get("aborted") and status.get("result_status") == "complete"):
+                try:
+                    read_result(Path(path) / FILES[kind], read(Path(path) / "job.json"))
+                except (ValueError, OSError, KeyError):
+                    pass
+                else:
+                    claim["selected"][kind] = path
+                    self.store.save_claim(self.owned[pr], pr, claim)
+                    continue
+            if len(attempts) >= 2 or status.get("quota_blocked") or outcome == "blocked":
+                failed = True
+                if status.get("quota_blocked"):
+                    failed_reason = "quota paused"
+                elif outcome == "blocked":
+                    failed_reason = "payload cleanup blocked"
+            else:
+                retryable.add(kind)
+        abort = (self.directory / "abort.json").exists()
+        if failed or abort:
+            if not live:
+                self.finish(pr, "deferred", "aborted" if abort else failed_reason)
+            return
+        if len(claim["selected"]) == 4:
+            intents = self.intents(candidate, claim["generation"])
+            pointer = self.store.accept(self.owned[pr], pr, claim, intents)
+            state["publish"].update({x["target"]: "owed" for x in intents if x["kind"] == "publish"})
+            state["generation"] = pointer["generation"]
+            self.finish(pr, "accepted")
+            return
+        ready = ["primary", "cold"]
+        if "primary" in claim["selected"]:
+            ready.append("validation")
+        if all(k in claim["selected"] for k in ("primary", "cold", "validation")):
+            ready.append("reconciliation")
+        for kind in ready:
+            if kind in claim["selected"]:
+                continue
+            attempts = state["attempts"].get(kind, [])
+            if attempts and kind not in retryable:
+                continue
+            try:
+                self.start_attempt(candidate, kind, claim)
+            except (OSError, ValueError) as error:
+                state["reason"] = str(error)
+                if not any(self.attempt_state(paths[-1]) == "live" for paths in state["attempts"].values()):
+                    self.finish(pr, "deferred", str(error))
+                return
+            state["review"] = "reconciling" if kind == "reconciliation" else "reviewing"
+
+    def intents(self, candidate, generation):
+        pr = candidate["pr"]
+        targets = list(candidate.get("destinations", []))
+        retained = "page:stub/PRReviews/%s/%d/%d.html" % (candidate["repository"], candidate["number"], generation)
+        targets.append(retained)
+        intents = [{"kind": "publish", "target": canonical(t), "retained": t == retained} for t in dict.fromkeys(targets)]
+        publication_ids = [delivery_id(pr, generation, "publish", x["target"]) for x in intents]
+        comment = {"kind": "comment", "target": pr, "dependencies": publication_ids,
+                   "payload": {"report": retained}, "outcome": "posted" if candidate.get("post", False) else "not_applicable"}
+        intents.append(comment)
+        intents.append({"kind": "board", "target": "stub-board", "outcome": "synced" if candidate.get("post", False) else "not_applicable",
+                        "dependencies": [delivery_id(pr, generation, "comment", pr)]})
+        for target in candidate.get("destinations", []):
+            target = canonical(target)
+            operation = digest([self.run_id, "discovery", pr])
+            intents.append({"kind": "projection", "target": target, "patches": {pr: {"generation": generation}},
+                            "dependencies": [delivery_id(pr, operation, "projection", target)]})
+            for intent in intents:
+                if intent["kind"] == "publish" and intent["target"] == target:
+                    intent["dependencies"] = [delivery_id(pr, generation, "projection", target)]
+        return intents
+
+    def bounded_drain(self, startup=False):
+        start = time.monotonic()
+        budget = self.startup_budget if startup else 100
+        seconds = max(0, self.startup_deadline - start) if startup else 60
+        cursor = read(self.directory / "recovery.json")
+        if startup and cursor is None:
+            cursor = self.startup_work
+        pending = self.store.recover(cursor, limit=min(50, budget), seconds=seconds)
+        atomic(self.directory / "recovery.json", pending or None)
+        self.store.drain(self.adapter, limit=budget - self.store.last_recovered,
+                         seconds=max(0, seconds - (time.monotonic() - start)),
+                         snapshot=self.startup_delivery if startup else None)
+
+    def recover_controllers(self):
+        deadline = self.startup_deadline
+        pending = list(self.startup_runs)
+        for _ in range(min(100, len(pending))):
+            if time.monotonic() >= deadline:
+                break
+            directory = Path(pending.pop(0))
+            self.startup_budget -= 1
+            if directory == self.directory:
+                continue
+            summary = read(directory / "summary.json", {})
+            if summary.get("state") == "complete":
+                continue
+            lock = try_lock(self.store.locks, "run:" + str(directory))
+            if lock is None:
+                continue
+            lock.close()
+            # The child arbitrates the final race with other coordinators.
+            with open(directory / "recovery.log", "ab") as log:
+                self.children.append(subprocess.Popen(
+                    [sys.executable, str(Path(__file__).resolve()), "--data", str(self.store.root),
+                     "--resume", str(directory), "--no-coordinator"],
+                    stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True))
+        self.startup_runs = pending
+
+    def run(self, coordinate=True):
+        # Snapshot first; never acquire another controller's run while owning ours.
+        self.startup_runs = sorted(str(p.parent) for p in (self.store.root / "runs").glob("*/run.json"))
+        self.startup_work = self.store.snapshot()
+        self.startup_delivery = self.store.delivery_snapshot()
+        self.startup_budget = 100
+        self.startup_deadline = time.monotonic() + 60
+        if coordinate:
+            self.recover_controllers()
+        self.lock = try_lock(self.store.locks, "run:" + self.run_id)
+        if self.lock is None:
+            return 75
+        try:
+            self.config = read(self.directory / "run.json")
+            self.states = read(self.directory / "state.json", {})
+            self.initialize()
+            os.environ["REVIEW_GUARDIAN_PLAIN"] = "1" if self.config["plain_guardians"] else "0"
+            atomic(self.directory / "startup-runs.json", self.startup_runs)
+            for candidate in self.config["candidates"]:
+                self.project(candidate, "discovery")
+                self.states.setdefault(candidate["pr"], {"review": "pending", "publish": {}, "comment": "owed", "board": "owed"})
+                state = self.states[candidate["pr"]]
+                if state["review"] in ("claimed", "reviewing", "reconciling"):
+                    state["review"] = "pending"
+            self.bounded_drain(startup=True)
+            next_drain = time.monotonic() + 1
+            while any(s["review"] in ("pending", "claimed", "reviewing", "reconciling") for s in self.states.values()):
+                for child in self.children:
+                    child.poll()
+                pause = try_lock(self.store.locks, "pause", shared=True)
+                paused = pause is None
+                if pause:
+                    pause.close()
+                for candidate in self.config["candidates"]:
+                    pr = candidate["pr"]
+                    state = self.states[pr]
+                    if state["review"] == "pending":
+                        old_claim = self.store.claim(pr)
+                        continuing = (old_claim and old_claim["run"] == self.run_id and
+                                      old_claim["status"] == "active")
+                        if (self.directory / "abort.json").exists():
+                            if continuing:
+                                self.claim_candidate(candidate)
+                            else:
+                                self.finish(pr, "deferred", "aborted")
+                        elif time.time() >= self.config["admission_deadline"] and not continuing:
+                            self.finish(pr, "deferred", "paused" if paused else state.get("reason", "admission deadline"))
+                        elif not paused or continuing:
+                            self.claim_candidate(candidate)
+                    if pr in self.owned:
+                        self.advance(pr)
+                if time.monotonic() >= next_drain:
+                    self.bounded_drain()
+                    next_drain = time.monotonic() + 1
+                self.save()
+                time.sleep(0.05)
+            self.bounded_drain()
+            self.save()
+            return 0
+        finally:
+            for lock in self.owned.values():
+                lock.close()
+            self.owned.clear()
+            self.lock.close()
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("mode", nargs="?", default="candidates")
+    parser.add_argument("--data", type=Path, default=os.environ.get("REVIEW_DATA"))
+    parser.add_argument("--run", type=Path)
+    parser.add_argument("--resume", type=Path)
+    parser.add_argument("--candidates", type=Path)
+    parser.add_argument("--admission", type=float, default=14400)
+    parser.add_argument("--wall", type=float)
+    parser.add_argument("--request")
+    parser.add_argument("--pool-size", type=int, default=4)
+    parser.add_argument("--permit-timeout", type=float, default=120)
+    parser.add_argument("--no-coordinator", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args()
+    if not args.data or not (args.resume or (args.run and args.candidates)):
+        parser.error("--data and either --resume or --run with --candidates required")
+    return Supervisor(args.data, args.resume or args.run, read(args.candidates) if args.candidates else None,
+                      admission=args.admission, wall=args.wall, request=args.request, mode=args.mode,
+                      pool_size=args.pool_size, permit_timeout=args.permit_timeout).run(coordinate=not args.no_coordinator)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
