@@ -1,0 +1,553 @@
+"""Publication, comment and board leaves of the durable outbox protocol."""
+
+from contextlib import ExitStack
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import time
+from urllib.request import urlopen, Request
+from urllib.parse import quote
+
+from review_discovery import POST, module
+from review_lock import acquire, canonical, region
+from review_render import Renderer, anchor, bundle_at, sha, verify
+from review_store import atomic, digest, mkdir, read
+
+# Line 1 of every comment, verbatim what the command writes today: the tools
+# match "AI-generated" and readers know the sentence.
+MARKER = ("**Automated review note — AI-generated (Claude), validated against the "
+          "live diff.** Please sanity-check before acting.")
+
+
+def delivery_marker(ident):
+    if not re.fullmatch("[0-9a-f]{64}", ident):
+        raise ValueError("invalid delivery id")
+    return "<!-- apreview-delivery:v1:" + ident + " -->"
+
+
+def comment_body(entry, bundle, url, observed):
+    final, head = bundle["results"]["reconciliation"], bundle["inputs"]["head"]
+    verdict = "" if entry["kind"] == "note" else "**Verdict: " + final["verdict"] + "**"
+    body = (
+        "\n".join(
+            [
+                MARKER,
+                verdict,
+                delivery_marker(entry["id"]),
+                # ten hex characters, the form every told-head reader expects,
+                # including the old followup's sed until cutover
+                "Reviewed at head `" + head[:10] + "`.",
+                "Full report: " + url,
+                "",
+                final["comment_md"],
+            ]
+        )
+        + "\n"
+    )
+    if observed != head:
+        body += (
+            "\nHead moved during review: observed `"
+            + observed
+            + "`. This review covers only `"
+            + head
+            + "`; followup eligible.\n"
+        )
+    return body
+
+
+def timeout(deadline):
+    seconds = min(20, deadline - time.monotonic())
+    if seconds <= 0:
+        raise TimeoutError("delivery deadline")
+    return seconds
+
+
+def run_external(*args, **kwargs):
+    try:
+        return subprocess.run(*args, **kwargs)
+    except subprocess.TimeoutExpired as error:
+        raise TimeoutError("external delivery deadline") from error
+
+
+class Publication:
+    def __init__(self, store, config):
+        self.store, self.config = store, config
+        self.renderer = Renderer(store)
+
+    def endpoint(self, target):
+        target = canonical(target)
+        endpoint, path = target[5:].split("/", 1)
+        try:
+            return self.config["endpoints"][endpoint], path
+        except KeyError as error:
+            raise OSError("publication endpoint is not configured: " + endpoint) from error
+
+    def url(self, target):
+        endpoint, path = self.endpoint(target)
+        return endpoint["url"].rstrip("/") + "/" + quote(path, safe="/")
+
+    def fetch(self, target, deadline, expected=()):
+        request = Request(self.url(target), headers={"Cache-Control": "no-cache"})
+        with urlopen(request, timeout=timeout(deadline)) as response:
+            raw = response.read(16 * 1024 * 1024 + 1)
+        if len(raw) > 16 * 1024 * 1024:
+            raise OSError("served page exceeds bound")
+        return verify(raw, expected)
+
+    def deliver(self, entry, deadline):
+        target = entry["target"]
+        endpoint, path = self.endpoint(target)
+        retained = (
+            bundle_at(self.store, entry["pr"], entry["generation"])
+            if entry.get("retained")
+            else None
+        )
+        if re.fullmatch(r"DevCallReviews/\d{4}-\d{2}-\d{2}/devcall_pr_reviews.html", path):
+            date = path.split("/")[1]
+            pages = {}
+            revisions = {}
+            for receipt_path in (self.store.root / "receipts").glob("*.json"):
+                receipt = read(receipt_path)
+                match = re.fullmatch(
+                    r"page:([^/]+)/DevCallReviews/" + date + r"/([^/]+)/devcall_pr_reviews.html",
+                    receipt["target"],
+                )
+                if (
+                    match
+                    and receipt["state"] in ("published", "superseded")
+                    and receipt.get("revision", 0) >= revisions.get(match[2], -1)
+                ):
+                    revisions[match[2]] = receipt.get("revision", 0)
+                    pages[match[2]] = dict(
+                        path=match[2] + "/devcall_pr_reviews.html",
+                        anchors=receipt.get("anchors", []),
+                    )
+            raw = self.renderer.landing(date, pages)
+        else:
+            raw = self.renderer.render(target, retained)
+        expected = verify(raw)
+        directory = self.store.root / "pages" / digest(target)
+        mkdir(directory)
+        source = directory / Path(path).name
+        source.write_bytes(raw)
+        publish = endpoint.get("publish") or os.environ.get("REVIEW_PUBLISH")
+        if not publish:
+            raise OSError("no REVIEW_PUBLISH endpoint")
+        # rsync's normal temp-file + rename, never --inplace. One page per transfer.
+        destination = publish.rstrip("/") + "/" + str(Path(path).parent) + "/"
+        result = run_external(
+            ["rsync", "--mkpath", "--delay-updates", "--", str(source), destination],
+            capture_output=True,
+            timeout=timeout(deadline),
+        )
+        if result.returncode:
+            raise OSError("rsync failed: " + result.stderr.decode(errors="replace")[:500])
+        served = self.fetch(target, deadline, expected["sections"])
+        if served["page_digest"] != expected["page_digest"]:
+            raise OSError("served page differs from rendered page")
+        revision = read(directory / "revision.json", 0) + 1
+        atomic(directory / "revision.json", revision)
+        rows = read(self.store.root / "membership" / (digest(target) + ".json"), {})
+        removed = (
+            isinstance(entry["generation"], int)
+            and not entry.get("retained")
+            and rows.get(entry["pr"], {}).get("removed")
+        )
+        return dict(
+            state="superseded" if removed else "published",
+            **served,
+            revision=revision,
+            anchors=re.findall(r'<section id="([^"]+)"', raw.decode()),
+            url=self.url(target),
+        )
+
+    def verify_comment(self, entry, deadline):
+        bundle = bundle_at(self.store, entry["pr"], entry["generation"])
+        expected = dict(
+            pr=entry["pr"],
+            generation=entry["generation"],
+            digest=sha(__import__("review_render").core(bundle).encode()),
+        )
+        retained_ok = False
+        for intent in bundle["intents"]:
+            if intent["kind"] != "publish" or intent.get("landing"):
+                continue
+            if not intent.get("retained"):
+                rows = read(
+                    self.store.root / "membership" / (digest(intent["target"]) + ".json"), {}
+                )
+                if rows.get(entry["pr"], {}).get("removed"):
+                    continue
+            try:
+                self.fetch(intent["target"], deadline, [expected])
+            except OSError:
+                # The caller holds every required page region. Repair from the
+                # authoritative store; a newer section still cannot satisfy this one.
+                repair = dict(intent, pr=entry["pr"], generation=entry["generation"])
+                self.deliver(repair, deadline)
+                self.fetch(intent["target"], deadline, [expected])
+            retained_ok |= bool(intent.get("retained"))
+        if not retained_ok:
+            raise OSError("retained section did not verify")
+
+
+class Posting:
+    def __init__(self, store, github, publication, config, now=time.time):
+        self.store, self.gh, self.pages, self.config, self.now = (
+            store,
+            github,
+            publication,
+            config,
+            now,
+        )
+
+    def live(self, entry, deadline):
+        repo, number = entry["pr"][3:].split("#")
+        live = self.gh.request(f"repos/{repo}/pulls/{number}", account="comment", deadline=deadline)
+        thread = self.gh.thread(repo, int(number), account="comment", deadline=deadline)
+        return live, thread
+
+    def prepare(self, entry, deadline):
+        bundle = bundle_at(self.store, entry["pr"], entry["generation"])
+        inputs = bundle["inputs"]
+        if inputs.get("held"):
+            retained = next(i["target"] for i in bundle["intents"] if i.get("retained"))
+            body = comment_body(
+                entry, bundle, self.pages.url(retained) + "#" + anchor(inputs), inputs["head"]
+            )
+            path = self.store.root / "held" / (entry["id"] + ".md")
+            mkdir(path.parent)
+            atomic(path, body, encode=lambda text: text.encode("utf-8"))
+            return dict(
+                state="held",
+                manual_command="gh pr comment "
+                + shlex.quote(
+                    "https://github.com/" + inputs["repository"] + "/pull/" + str(inputs["number"])
+                )
+                + " --body-file "
+                + shlex.quote(str(path)),
+            )
+        if not inputs.get("post"):
+            return dict(state="not_applicable")
+        live, thread = self.live(entry, deadline)
+        self.pages.verify_comment(entry, deadline)
+        accounts = self.config.get("comment_accounts", [])
+        if not accounts:
+            raise OSError("no frozen comment account configured")
+        retained = next(i["target"] for i in bundle["intents"] if i.get("retained"))
+        body = comment_body(
+            entry, bundle, self.pages.url(retained) + "#" + anchor(inputs), live["head"]["sha"]
+        )
+        note = entry["kind"] == "note"
+        action, target = POST.decide(
+            thread, body, accounts, head=inputs["head"], mode=inputs.get("mode", "label"), note=note
+        )
+        if action == "edit" and any(
+            c["id"] == target and c["login"] != accounts[0] for c in thread
+        ):
+            action = "repost"
+        predecessors = (
+            []
+            if note
+            else [
+                c
+                for c in thread
+                if c["kind"] == "comment"
+                and c["login"] in accounts
+                and POST.MARKER in c["body"]
+                and POST.states_verdict(c["body"])
+                and not c["body"].startswith(POST.DEPRECATED_PREFIX)
+                and c["id"]
+                != (target if action in ("edit", "unchanged", "deprecate-stale") else None)
+            ]
+        )
+        entry["payload"] = dict(
+            body=body,
+            body_digest=sha(body.encode()),
+            action=action,
+            target_id=target,
+            account=accounts[0],
+            predecessors=predecessors,
+            observed_head=live["head"]["sha"],
+            repository=inputs["repository"],
+            number=inputs["number"],
+            url=self.pages.url(retained),
+        )
+        entry["sent_at"] = self.now()
+        return None
+
+    def check_account(self, expected, deadline):
+        identity = self.gh.request("user", account="comment", deadline=deadline)
+        if identity.get("login") != expected:
+            raise OSError("comment identity differs from frozen account")
+
+    def deliver(self, entry, deadline):
+        payload = entry["payload"]
+        if payload["action"] in ("unchanged", "deprecate-stale"):
+            return self.receipt(entry, payload["target_id"])
+        self.check_account(payload["account"], deadline)
+        repo, number = payload["repository"], payload["number"]
+        edit = payload["action"] == "edit"
+        endpoint = (
+            f"repos/{repo}/issues/comments/{payload['target_id']}"
+            if edit
+            else f"repos/{repo}/issues/{number}/comments"
+        )
+        response = self.gh.request(
+            endpoint,
+            method="PATCH" if edit else "POST",
+            account="comment",
+            payload={"body": payload["body"]},
+            deadline=deadline,
+        )
+        if not response.get("id"):
+            raise OSError("write returned no comment id")
+        return self.receipt(entry, response["id"], response.get("html_url"))
+
+    def receipt(self, entry, comment_id, url=None):
+        return dict(
+            state="posted",
+            comment_id=comment_id,
+            url=url,
+            payload_digest=entry["payload"]["body_digest"],
+            predecessors=entry["payload"]["predecessors"],
+            account=entry["payload"]["account"],
+        )
+
+    def reconcile(self, entry, deadline):
+        payload = entry["payload"]
+        live, thread = self.live(entry, deadline)
+        marker = delivery_marker(entry["id"])
+        matches = [
+            c
+            for c in thread
+            if c["kind"] == "comment" and c["login"] == payload["account"] and marker in c["body"]
+        ]
+        if matches:
+            body = matches[0]["body"]
+            exact = sha(body.encode()) == payload["body_digest"]
+            if body.startswith(POST.DEPRECATED_PREFIX):
+                exact = body == POST.deprecate_body(payload["body"], matches[0]["at"])
+            if len(matches) == 1 and exact:
+                return self.receipt(entry, matches[0]["id"], matches[0].get("url"))
+            entry.update(
+                state="uncertain",
+                failures=5,
+                error="delivery marker duplicated or body changed; inspect thread",
+            )
+            atomic(self.store.root / "outbox" / (entry["id"] + ".json"), entry)
+            return None
+        now = self.now()
+        path = self.store.root / "outbox" / (entry["id"] + ".json")
+        if now < entry["sent_at"] + 120:
+            entry["next_attempt"] = entry["sent_at"] + 120
+            atomic(path, entry)
+            return None
+        if not entry.get("absent_at"):
+            entry["absent_at"] = now
+            entry["next_attempt"] = now + 60
+            atomic(path, entry)
+            return None
+        if now - entry["absent_at"] < 60:
+            return None
+        if entry.get("superseded"):
+            return dict(state="superseded")
+        if live["head"]["sha"] != payload["observed_head"]:
+            return dict(
+                state="held", reason="head differs from frozen observed head; repair required"
+            )
+        self.pages.verify_comment(entry, deadline)
+        # Persist a new grace window before retrying identical bytes/action.
+        entry["sent_at"] = now
+        entry.pop("absent_at", None)
+        atomic(path, entry)
+        return self.deliver(entry, deadline)
+
+    def deprecate(self, entry, deadline):
+        receipt = read(self.store.root / "receipts" / (entry["dependencies"][0] + ".json"))
+        if receipt["state"] != "posted":
+            return dict(state="not_applicable")
+        self.check_account(receipt.get("account", self.config["comment_accounts"][0]), deadline)
+        repo = entry["pr"][3:].split("#")[0]
+        for old in receipt.get("predecessors", []):
+            # Targets and original bytes are frozen at first send, never newest-thread selection.
+            self.gh.request(
+                f"repos/{repo}/issues/comments/{old['id']}",
+                method="PATCH",
+                account="comment",
+                payload={"body": POST.deprecate_body(old["body"], old["at"])},
+                deadline=deadline,
+            )
+        return dict(state="deprecated", comment_id=receipt["comment_id"])
+
+
+class Board:
+    def __init__(self, github, config):
+        self.gh, self.config = github, config
+
+    def deliver(self, entry, deadline):
+        board = module("project-sync")
+        board.gh = lambda query, **variables: self.gh.graphql(query, deadline=deadline, **variables)
+        project = self.config.get("project_id")
+        if not project:
+            raise OSError("no frozen project ID configured")
+        repo, number = entry["pr"][3:].split("#")
+        live = self.gh.request(f"repos/{repo}/pulls/{number}", account="project", deadline=deadline)
+        if entry.get("node_id") and live["node_id"] != entry["node_id"]:
+            raise OSError("board PR node changed")
+        thread = self.gh.thread(repo, int(number), account="project", deadline=deadline)
+        accounts = self.config["comment_accounts"]
+        comments = sorted(
+            (
+                c
+                for c in thread
+                if c["kind"] == "comment"
+                and c["login"] in accounts
+                and POST.MARKER in c["body"]
+                and not c["body"].startswith(POST.DEPRECATED_PREFIX)
+            ),
+            key=lambda c: (c["at"] or "", c["id"]),
+            reverse=True,
+        )
+        comment = next((c for c in comments if board.V.of_comment(c["body"])[0]), None)
+        if comment is None:
+            raise OSError("unknown board verdict")
+        verdict = board.V.of_comment(comment["body"])[0]
+        fields, options, _ = board.ensure_field(project)
+        author_field, _ = board.ensure_author_field(project)
+        rows = board.project_items(project)
+        row = next((r for r in rows.values() if r["content"] == live["node_id"]), None)
+        item = (
+            row["item"]
+            if row
+            else board.gh(board.ADD_ITEM, project=project, content=live["node_id"])[
+                "addProjectV2ItemById"
+            ]["item"]["id"]
+        )
+        board.gh(board.SET_FIELD, project=project, item=item, field=fields, option=options[verdict])
+        board.gh(
+            board.SET_TEXT,
+            project=project,
+            item=item,
+            field=author_field,
+            text=live["user"]["login"],
+        )
+        verified = next(
+            (
+                r
+                for r in board.project_items(project).values()
+                if r["item"] == item and r["content"] == live["node_id"]
+            ),
+            None,
+        )
+        if (
+            not verified
+            or verified["result"] != verdict
+            or verified["author"] != live["user"]["login"]
+        ):
+            raise OSError("board acknowledgement mismatch")
+        return dict(
+            state="synced",
+            delivery_id=entry["id"],
+            node_id=live["node_id"],
+            item=item,
+            comment_id=comment["id"],
+            fields=dict(result=verdict, author=live["user"]["login"]),
+        )
+
+
+class Delivery:
+    def __init__(self, store, github, config):
+        self.store, self.gh, self.config = store, github, config
+        self.publication = Publication(store, config)
+        self.posting = Posting(store, github, self.publication, config)
+        self.board = Board(github, config)
+
+    def selected(self, entry):
+        config = entry.get("configuration")
+        if config is None and isinstance(entry["generation"], int):
+            bundle = bundle_at(self.store, entry["pr"], entry["generation"])
+            config = bundle["inputs"].get("configuration") if bundle else None
+        if not config or config == self.config:
+            return self
+        from review_github import GitHub
+
+        github = GitHub(
+            config.get("github_recordings"),
+            config.get("github_mode", "live"),
+            config.get("github_accounts"),
+            writes=config.get("github_writes", False),
+        )
+        return Delivery(self.store, github, config)
+
+    def credentials(self, entry, deadline):
+        selected = self.selected(entry)
+        if selected is not self:
+            return selected.credentials(entry, deadline)
+        stack = ExitStack()
+        roles = (
+            ["project"]
+            if entry["kind"] == "board"
+            else ["comment"]
+            if entry["kind"] in ("comment", "note", "deprecate")
+            else []
+        )
+        keys = {
+            self.config.get("github_accounts", {}).get(role, {}).get("id", role) for role in roles
+        }
+        try:
+            for key in sorted(("account:github/" + k for k in keys), key=region):
+                lock = acquire(
+                    self.store.locks, key, min(deadline, time.monotonic() + 5), shared=True
+                )
+                if lock is None:
+                    raise TimeoutError("GitHub credential lease busy")
+                stack.enter_context(lock)
+            return stack
+        except BaseException:
+            stack.close()
+            raise
+
+    def prepare(self, entry, deadline):
+        selected = self.selected(entry)
+        if selected is not self:
+            return selected.prepare(entry, deadline)
+        if entry["kind"] in ("comment", "note"):
+            return self.posting.prepare(entry, deadline)
+        if entry["kind"] in ("board", "deprecate"):
+            dependencies = [
+                read(self.store.root / "receipts" / (ident + ".json"), {})
+                for ident in entry.get("dependencies", [])
+            ]
+            if any(
+                receipt.get("state") in ("held", "not_applicable", "superseded")
+                for receipt in dependencies
+            ):
+                return dict(state="not_applicable")
+        if entry["kind"] == "board" and entry.get("outcome") == "not_applicable":
+            return dict(state="not_applicable")
+        return None
+
+    def deliver(self, entry, deadline):
+        selected = self.selected(entry)
+        if selected is not self:
+            return selected.deliver(entry, deadline)
+        if entry["kind"] in ("publish", "annotation"):
+            return self.publication.deliver(entry, deadline)
+        if entry["kind"] in ("comment", "note"):
+            return self.posting.deliver(entry, deadline)
+        if entry["kind"] == "deprecate":
+            return self.posting.deprecate(entry, deadline)
+        if entry["kind"] == "board":
+            return self.board.deliver(entry, deadline)
+        raise OSError("unknown delivery kind")
+
+    def reconcile(self, entry, deadline):
+        selected = self.selected(entry)
+        if selected is not self:
+            return selected.reconcile(entry, deadline)
+        if entry["kind"] in ("comment", "note"):
+            return self.posting.reconcile(entry, deadline)
+        return self.deliver(entry, deadline)

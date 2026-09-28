@@ -975,7 +975,7 @@ class GhCalls(unittest.TestCase):
 
 
 class SyncWrapper(unittest.TestCase):
-    """project-sync.sh: one sync at a time, and never a failed run.
+    """project-sync.sh: one sync at a time, with contention and failure visible.
 
     Run against a fixture home with a stub in place of project-sync.py, so what
     is checked is the shell around it - the lock, the descriptors, the exit
@@ -987,7 +987,12 @@ class SyncWrapper(unittest.TestCase):
 import os, sys, time
 d = os.environ["STUB_DIR"]
 open(os.path.join(d, "ran"), "a").write("x")
-open(os.path.join(d, "fds"), "w").write(" ".join(sorted(os.listdir("/proc/self/fd"))))
+def inode(fd):
+    try:
+        return "%s:%s" % (fd, os.fstat(int(fd)).st_ino)
+    except OSError:
+        return fd
+open(os.path.join(d, "fds"), "w").write(" ".join(inode(f) for f in sorted(os.listdir("/proc/self/fd"))))
 while os.environ.get("STUB_HOLD") and os.path.exists(os.path.join(d, "hold")):
     time.sleep(0.02)
 sys.exit(int(os.environ.get("STUB_RC", "0")))
@@ -1009,7 +1014,10 @@ sys.exit(int(os.environ.get("STUB_RC", "0")))
         os.makedirs(self.stub)
         self.env = {"HOME": self.home, "PATH": "/usr/bin:/bin", "STUB_DIR": self.stub}
         self.log = os.path.join(root, "logs", "project-sync.log")
-        self.lock = os.path.join(root, "etc", "project-sync.lock")
+        os.makedirs(os.path.join(root, "data"))
+        self.lock = os.path.join(root, "data", "locks")
+        for name in ("review_board_sweep.py", "review_lock.py"):
+            shutil.copyfile(os.path.join(BIN, name), os.path.join(root, "bin", name))
 
     def run_wrapper(self, **kw):
         return subprocess.run(["bash", self.WRAPPER], env=dict(self.env, **kw),
@@ -1047,7 +1055,7 @@ sys.exit(int(os.environ.get("STUB_RC", "0")))
         # only the first is told to hold, so a second that wrongly runs
         # finishes at once and is counted rather than hanging the test
         second = self.run_wrapper()
-        self.assertEqual(second.returncode, 0)
+        self.assertEqual(second.returncode, 75)
         self.assertEqual(self.runs(), 1, "both syncs ran")
         self.assertIn("another project sync is running", self.logged())
         os.unlink(hold)
@@ -1058,7 +1066,10 @@ sys.exit(int(os.environ.get("STUB_RC", "0")))
         # lock, killing the shell would free it while python was still writing
         self.assertEqual(self.run_wrapper().returncode, 0)
         self.assertEqual(self.runs(), 1)
-        self.assertIn("9", self.read(os.path.join(self.stub, "fds")).split())
+        # the descriptor number is whatever pass_fds gave it; what matters is
+        # that one of python's descriptors is open on the lock file
+        held = {f.split(":")[-1] for f in self.read(os.path.join(self.stub, "fds")).split()}
+        self.assertIn(str(os.stat(self.lock).st_ino), held, "python holds no descriptor on the lock file")
 
     def test_a_wrapper_killed_under_python_does_not_free_the_lock(self):
         hold = os.path.join(self.stub, "hold")
@@ -1070,7 +1081,7 @@ sys.exit(int(os.environ.get("STUB_RC", "0")))
         first.kill()
         first.wait()
         second = self.run_wrapper()
-        self.assertEqual(second.returncode, 0)
+        self.assertEqual(second.returncode, 75)
         self.assertEqual(self.runs(), 1, "a second sync ran beside the orphaned first")
         os.unlink(hold)
         for _ in range(500):            # the orphaned stub exits on its own
@@ -1087,13 +1098,13 @@ sys.exit(int(os.environ.get("STUB_RC", "0")))
         r = subprocess.run(
             ["bash", "-c", 'exec 9>"$1"; flock 9; bash "$2"', "_", runlock, self.WRAPPER],
             env=self.env, capture_output=True, text=True, timeout=30)
-        self.assertEqual(r.returncode, 0)
+        self.assertNotEqual(r.returncode, 0)
         self.assertEqual(self.runs(), 0, "it ran with no sync lock at all")
         self.assertIn("cannot open the sync lock", self.logged())
 
-    def test_a_failed_sync_does_not_fail_the_run(self):
+    def test_a_failed_sync_returns_failure(self):
         r = self.run_wrapper(STUB_RC="1")
-        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.returncode, 1)
         self.assertEqual(self.runs(), 1)
 
     def test_the_bot_token_is_not_used(self):

@@ -239,7 +239,7 @@ def run(data, attempt, fd):
         heartbeat = time.monotonic() + 30
         while time.monotonic() < deadline and not aborted():
             slot = permit(store.locks, job["provider"], job.get("pool_size", 4),
-                          reserved=job["kind"] in ("primary", "cold"))
+                          skip_finishing_slot=job["kind"] in ("primary", "cold"))
             if slot:
                 if not store.clean_owner(slot):
                     slot.close()
@@ -364,5 +364,10 @@ def run(data, attempt, fd):
             raise RuntimeError("payload cleanup blocked")
         for lock in reversed(owned):
             lock.close()
-        pr.close()
+        try:
+            if job.get("worktree"):
+                from review_inference import cleanup
+                cleanup(store, job)
+        finally:
+            pr.close()
     return 0

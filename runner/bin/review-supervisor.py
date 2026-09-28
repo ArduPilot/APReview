@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """A finite candidate snapshot and durable claims drive four independent tracks."""
+
 import argparse
 import os
 from pathlib import Path
@@ -12,6 +13,10 @@ from review_guardian import alive, cleanup_attempt, identity, launch
 from review_lock import canonical, try_lock
 from review_schema import FILES, read_result
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, mkdir, read
+from review_discovery import Discovery, LABELS
+from review_github import GitHub
+from review_delivery import Delivery
+from review_inference import prepare as prepare_inference
 
 KINDS = ("primary", "cold", "validation", "reconciliation")
 WALL = {"primary": 5400, "cold": 1800, "validation": 1800, "reconciliation": 2700}
@@ -27,15 +32,49 @@ def refresh(candidate):
 def reconciliation_snapshot(candidate):
     if candidate.get("reconciliation_error"):
         raise OSError("reconciliation snapshot failed")
-    return {"title": candidate.get("title", ""), "head": candidate["head"],
-            "thread": candidate.get("thread", [])}
+    return {
+        "title": candidate.get("title", ""),
+        "head": candidate["head"],
+        "thread": candidate.get("thread", []),
+    }
 
 
 class Supervisor:
-    def __init__(self, data, directory, candidates=None, admission=14400, wall=None, request=None,
-                 mode="candidates", pool_size=4, permit_timeout=120):
-        if os.environ.get("REVIEW_AI_STUB") != "1":
-            raise ValueError("this slice requires REVIEW_AI_STUB=1")
+    def __init__(
+        self,
+        data,
+        directory,
+        candidates=None,
+        admission=14400,
+        wall=None,
+        request=None,
+        mode="candidates",
+        pool_size=4,
+        permit_timeout=120,
+        configuration=None,
+    ):
+        self.configuration = dict(configuration or {})
+        if self.configuration:
+            from datetime import datetime
+            from zoneinfo import ZoneInfo
+
+            now = datetime.now(ZoneInfo("Australia/Canberra"))
+            import repos
+            from review_inference import COMMANDS, PROMPTS
+
+            self.configuration.setdefault("repos", repos.load())
+            self.configuration.setdefault(
+                "prompts",
+                {
+                    kind: (COMMANDS / ("review-" + name + ".md")).read_text()
+                    for kind, name in PROMPTS.items()
+                },
+            )
+            self.configuration.setdefault("date", now.date().isoformat())
+            self.configuration.setdefault("stamp", now.strftime("%Y-%m-%d_%H-%M-%S"))
+        self.last_save = 0
+        self.last_summary = 0
+        self.saved_state = None
         self.store = Store(Path(data).resolve())
         self.directory = Path(directory).resolve()
         mkdir(self.directory)
@@ -48,7 +87,8 @@ class Supervisor:
         self.config = read(self.directory / "run.json")
         self.initial = (candidates, admission, wall, request, mode, pool_size, permit_timeout)
         self.states = read(self.directory / "state.json", {})
-        self.adapter = StubAdapter(self.store.root)
+        self.adapter = None
+        self.discovery = None
 
     def initialize(self):
         if self.config is not None:
@@ -57,13 +97,15 @@ class Supervisor:
             return
         candidates, admission, wall, request, mode, pool, permit_timeout = self.initial
         if candidates is None:
-            raise ValueError("missing frozen run configuration")
+            candidates = []
         if pool < 2 or pool > 256:
             raise ValueError("reserved finishing slots require a pool of 2..256")
         unique = {}
         for candidate in candidates:
             candidate = dict(candidate)
-            pr = canonical(candidate.get("pr", "pr:%s#%s" % (candidate["repository"], candidate["number"])))
+            pr = canonical(
+                candidate.get("pr", "pr:%s#%s" % (candidate["repository"], candidate["number"]))
+            )
             candidate["pr"] = pr
             candidate["repository"] = pr[3:].split("#")[0]
             candidate["number"] = int(pr.split("#")[1])
@@ -74,55 +116,150 @@ class Supervisor:
                 raise ValueError("conflicting duplicate candidate")
             unique[pr] = candidate
         ordered = sorted(unique.values(), key=lambda c: (c["created_at"], c["pr"]))
-        self.config = {"schema": 1, "run": self.run_id, "data": str(self.store.root), "request": request or uuid.uuid4().hex,
-                       "mode": mode, "created": time.time(), "admission_deadline": time.time() + admission,
-                       "pool_size": pool, "permit_timeout": permit_timeout, "wall": wall,
-                       "candidates": ordered, "stub": True,
-                       "plain_guardians": os.environ.get("REVIEW_GUARDIAN_PLAIN") == "1",
-                       "observation": self.store.ticket()}
+        self.config = {
+            "schema": 1,
+            "run": self.run_id,
+            "data": str(self.store.root),
+            "request": request or uuid.uuid4().hex,
+            "mode": mode,
+            "created": time.time(),
+            "admission_deadline": time.time() + admission,
+            "pool_size": pool,
+            "permit_timeout": permit_timeout,
+            "wall": wall,
+            "candidates": ordered,
+            "stub": os.environ.get("REVIEW_AI_STUB") == "1",
+            "configuration": self.configuration,
+            "phases": (
+                {"initial": {"state": "admitted", "snapshots": {mode: ordered}}}
+                if self.initial[0] is not None
+                else {}
+            ),
+            "plain_guardians": os.environ.get("REVIEW_GUARDIAN_PLAIN") == "1",
+            "observation": self.store.ticket(),
+        }
         atomic(self.directory / "run.json", self.config)
+
+    def phase_name(self, phase):
+        return phase + (
+            ":followup"
+            if self.config.get("mode") == "all" and "followup" in self.config.get("phases", {})
+            else ""
+        )
 
     def project(self, candidate, phase, generation=None):
         pr = candidate["pr"]
-        patch = {"ticket": self.config["observation"], "removed": candidate.get("classification") == "DROPPED"}
+        patch = {
+            "ticket": candidate.get("observation", self.config["observation"]),
+            "ci": candidate.get("ci"),
+            "progress": phase,
+            "candidate": candidate,
+            "removed": candidate.get("classification") == "DROPPED",
+        }
         if generation:
             patch["generation"] = generation
         intents = []
-        operation = digest([self.run_id, phase, pr])
+        if phase != "discovery":
+            phase += "-" + str(patch["ticket"]) + "-" + str(generation or 0)
+        operation = digest([self.run_id, self.phase_name(phase), pr])
         for target in dict.fromkeys(candidate.get("destinations", [])):
             target = canonical(target)
-            intents.append({"kind": "projection", "target": target, "gate": "page", "patches": {pr: patch}})
-            intents.append({"kind": "publish", "target": target, "gate": "page",
-                            "dependencies": [delivery_id(pr, operation, "projection", target)]})
+            intents.append(
+                {
+                    "kind": "projection",
+                    "target": target,
+                    "gate": "page",
+                    "patches": {
+                        pr: dict(
+                            patch,
+                            removed=candidate.get("membership_removed", {}).get(
+                                target, patch["removed"]
+                            ),
+                        )
+                    },
+                    "configuration": self.config["configuration"],
+                }
+            )
+            intents.append(
+                {
+                    "kind": "publish",
+                    "target": target,
+                    "gate": "page",
+                    "configuration": self.config["configuration"],
+                    "dependencies": [delivery_id(pr, operation, "projection", target)],
+                }
+            )
         if intents:
-            self.store.journal(self.run_id, phase, pr, intents)
+            intents.extend(self.landing_intents(pr, operation, intents, gate="page"))
+            self.store.journal(self.run_id, self.phase_name(phase), pr, intents)
 
-    def save(self):
-        atomic(self.directory / "state.json", self.states)
-        debts = [read(p) for p in sorted((self.store.root / "outbox").glob("*.json"))]
+    def save(self, force=False):
+        now = time.monotonic()
+        if not force and now - self.last_save < 3:
+            return
+        receipts = self.store.receipt_index()
+        indexed = {}
+        for receipt in receipts.values():
+            indexed.setdefault((receipt["pr"], receipt["generation"]), []).append(receipt)
         for pr, state in self.states.items():
-            generation = state.get("generation")
-            if not generation:
-                continue
-            for receipt in (read(p) for p in (self.store.root / "receipts").glob("*.json")):
-                if receipt["pr"] != pr or receipt["generation"] != generation:
-                    continue
+            for receipt in indexed.get((pr, state.get("generation")), []):
                 if receipt["kind"] == "publish":
                     state["publish"][receipt["target"]] = receipt["state"]
                 elif receipt["kind"] in ("comment", "board"):
                     state[receipt["kind"]] = receipt["state"]
-        atomic(self.directory / "summary.json", {"schema": 1, "run": self.run_id, **identity(),
-               "state": "running" if any(s["review"] in ("pending", "claimed", "reviewing", "reconciling") for s in self.states.values()) else "complete",
-               "heartbeat": time.time(), "prs": self.states,
-               "delivery_deferred": [x["id"] for x in debts if x["pr"] in self.states],
-               "attempts": [str(p.parent) for p in (self.directory / "attempts").glob("*/job.json")]})
+        changed = digest(self.states) != self.saved_state
+        if changed:
+            atomic(self.directory / "state.json", self.states)
+            self.saved_state = digest(self.states)
+        if changed or force or now - self.last_summary >= 30:
+            self.last_summary = now
+            debts = [read(p) for p in (self.store.root / "outbox").glob("*.json")]
+            atomic(
+                self.directory / "summary.json",
+                {
+                    "schema": 1,
+                    "run": self.run_id,
+                    **identity(),
+                    "state": "complete" if self.summary_finished() else "running",
+                    "heartbeat": time.time(),
+                    "prs": self.states,
+                    "phases": self.config.get("phases", {}),
+                    "delivery_deferred": [x["id"] for x in debts if x["pr"] in self.states],
+                    "attempts": [
+                        str(p.parent) for p in (self.directory / "attempts").glob("*/job.json")
+                    ],
+                },
+            )
+        self.last_save = now
+
+    def summary_finished(self):
+        phase_done = (
+            self.config["mode"] != "all"
+            or self.config.get("phases", {}).get("followup", {}).get("state") == "complete"
+        )
+        return not self.active() and phase_done
+
+    def active(self):
+        return any(
+            s["review"] in ("pending", "claimed", "reviewing", "reconciling")
+            for s in self.states.values()
+        )
 
     def inputs(self, candidate):
-        return {k: candidate.get(k) for k in ("repository", "number", "node_id", "head", "base", "merge_base", "rules", "configuration")}
+        return {k: v for k, v in candidate.items() if k not in ("live", "stub")}
 
     def finish(self, pr, review, reason=None):
         state = self.states[pr]
         state["review"] = review
+        candidate = state.get("candidate") or next(
+            (c for c in self.config["candidates"] if c["pr"] == pr), None
+        )
+        if candidate:
+            self.project(
+                candidate,
+                review,
+                state.get("generation") if review in ("accepted", "reused") else None,
+            )
         if reason:
             state["reason"] = reason
         lock = self.owned.pop(pr, None)
@@ -156,36 +293,68 @@ class Supervisor:
             self.finish(pr, "deferred", "stored node id changed")
             return
         try:
-            self.store.ticket()
-            fresh = refresh(candidate)
+            fresh = self.discovery.refresh(candidate) if self.discovery else refresh(candidate)
         except OSError as error:
             self.finish(pr, "deferred", str(error))
             return
         if fresh.get("node_id") != candidate["node_id"]:
             self.finish(pr, "deferred", "node id changed")
             return
-        if fresh.get("classification") == "DROPPED" or fresh.get("open", True) is False or fresh.get("draft", False):
+        fresh["destinations"] = list(
+            dict.fromkeys(candidate.get("destinations", []) + fresh.get("destinations", []))
+        )
+        fresh["post"] = fresh.get("post", False) or candidate.get("post", False)
+        if (
+            fresh.get("classification") == "DROPPED"
+            or fresh.get("open", True) is False
+            or fresh.get("draft", False)
+        ):
+            self.project(fresh, "refresh-" + str(fresh.get("observation", 0)))
             self.finish(pr, "dropped")
             return
         if fresh.get("classification") == "DEFERRED":
             self.finish(pr, "deferred", fresh.get("reason", "candidate deferred"))
             return
-        same_request = current and current["request"] == self.config["request"]
-        if current and (same_request or (self.config["mode"] != "pr" and current["inputs"]["head"] == fresh["head"])):
+        same_request = (
+            current
+            and current["request"] == self.config["request"]
+            and current["inputs"]["head"] == fresh["head"]
+        )
+        if current and (
+            same_request
+            or (
+                fresh.get("mode", self.config["mode"]) != "pr"
+                and current["inputs"]["head"] == fresh["head"]
+            )
+        ):
             state["generation"] = current["generation"]
             self.project(fresh, "reuse", current["generation"])
             self.finish(pr, "accepted" if same_request else "reused")
             return
+        if fresh.get("classification") == "REUSE":
+            self.project(fresh, "reuse")
+            self.finish(pr, "reused", fresh.get("reason"))
+            return
         claim = self.store.claim(pr)
         inputs = self.inputs(fresh)
-        if (claim and claim["run"] == self.run_id and claim["request"] == self.config["request"] and
-                claim["status"] == "active"):
+        if (
+            claim
+            and claim["run"] == self.run_id
+            and claim["request"] == self.config["request"]
+            and claim["status"] == "active"
+        ):
             # An admitted generation keeps its pinned inputs across controller death.
             inputs = claim["inputs"]
             fresh.update(inputs)
-        if not (claim and claim["run"] == self.run_id and claim["request"] == self.config["request"] and
-                claim["status"] == "active" and claim["inputs"] == inputs):
+        if not (
+            claim
+            and claim["run"] == self.run_id
+            and claim["request"] == self.config["request"]
+            and claim["status"] == "active"
+            and claim["inputs"] == inputs
+        ):
             claim = self.store.allocate(lock, pr, self.run_id, self.config["request"], inputs)
+        self.project(fresh, "refresh-" + str(fresh.get("observation", 0)))
         state.update(review="claimed", generation=claim["generation"], candidate=fresh, attempts={})
         for path in claim["attempts"]:
             job = read(Path(path) / "job.json")
@@ -210,39 +379,74 @@ class Supervisor:
         attempt_id = uuid.uuid4().hex
         path = self.directory / "attempts" / attempt_id
         mkdir(path)
-        job = {**claim["inputs"], "schema": 1, "run": self.run_id, "job": pr + ":" + kind,
-               "attempt": attempt_id, "generation": claim["generation"], "kind": kind, "pr": pr,
-               "provider": "claude" if kind in ("primary", "reconciliation") else "codex",
-               "account": "stub", "input_digest": digest(claim["inputs"]),
-               "abort_path": str(self.directory / "abort.json"), "registered": time.time(),
-               "env": {k: v for k, v in os.environ.items()
-                       if k.startswith("REVIEW_") or k in ("PATH", "HOME", "LANG", "PYTHONPATH")},
-               "wall_timeout": self.config["wall"] or WALL[kind], "pool_size": self.config["pool_size"],
-               "permit_timeout": self.config["permit_timeout"],
-               "command": [sys.executable, str(Path(__file__).with_name("review_stub.py"))]}
+        job = {
+            **claim["inputs"],
+            "schema": 1,
+            "run": self.run_id,
+            "job": pr + ":" + kind,
+            "attempt": attempt_id,
+            "generation": claim["generation"],
+            "kind": kind,
+            "pr": pr,
+            "provider": "claude" if kind in ("primary", "reconciliation") else "codex",
+            "account": "stub",
+            "input_digest": digest(claim["inputs"]),
+            "abort_path": str(self.directory / "abort.json"),
+            "registered": time.time(),
+            "env": {
+                k: v
+                for k, v in os.environ.items()
+                if k.startswith("REVIEW_") or k in ("PATH", "HOME", "LANG", "PYTHONPATH")
+            },
+            "wall_timeout": self.config["wall"] or WALL[kind],
+            "pool_size": self.config["pool_size"],
+            "permit_timeout": self.config["permit_timeout"],
+            "command": [sys.executable, str(Path(__file__).with_name("review_stub.py"))],
+        }
         behavior = candidate.get("stub", {}).get(kind, {})
         if isinstance(behavior, list):
             index = len(state["attempts"].get(kind, []))
             behavior = behavior[min(index, len(behavior) - 1)] if behavior else {}
         job["stub"] = behavior
         if kind == "validation":
-            result = read_result(Path(claim["selected"]["primary"]) / "review.json", read(Path(claim["selected"]["primary"]) / "job.json"))
+            result = read_result(
+                Path(claim["selected"]["primary"]) / "review.json",
+                read(Path(claim["selected"]["primary"]) / "job.json"),
+            )
             job["primary_ids"] = [x["id"] for x in result["findings"]]
             job["primary_result"] = result
         if kind == "reconciliation":
-            job["fresh_snapshot"] = reconciliation_snapshot(refresh(candidate))
+            if self.discovery:
+                repo, number = candidate["repository"], candidate["number"]
+                live = self.discovery.gh.request(f"repos/{repo}/pulls/{number}")
+                job["fresh_snapshot"] = dict(
+                    title=live["title"],
+                    head=live["head"]["sha"],
+                    thread=self.discovery.gh.thread(repo, number),
+                )
+            else:
+                job["fresh_snapshot"] = reconciliation_snapshot(refresh(candidate))
             job["finding_ids"] = []
             job["results"] = {}
             for previous in ("primary", "cold", "validation"):
                 source = Path(claim["selected"][previous])
                 result = read_result(source / FILES[previous], read(source / "job.json"))
                 job["results"][previous] = result
-                job["finding_ids"] += [x["id"] for x in result.get("findings", result.get("new", []))]
+                job["finding_ids"] += [
+                    x["id"] for x in result.get("findings", result.get("new", []))
+                ]
+        job["previous_ids"] = [
+            f["id"] for f in (candidate.get("previous_comment") or {}).get("findings", [])
+        ]
+        if kind == "reconciliation":
+            job["finding_ids"] += job["previous_ids"]
+        if not self.config["stub"]:
+            prepare_inference(self.store, path, job, self.config["configuration"])
         atomic(path / "job.json", job)
         claim["attempts"].append(str(path))
         self.store.save_claim(self.owned[pr], pr, claim)
         state["attempts"].setdefault(kind, []).append(str(path))
-        self.save()
+        self.save(force=True)
         child = launch(self.store.root, path, self.owned[pr])
         if child:
             self.children.append(child)
@@ -264,8 +468,13 @@ class Supervisor:
                 live = True
                 continue
             status = read(Path(path) / "status.json", {})
-            if (outcome == "done" and status.get("exit") == 0 and not status.get("timed_out") and
-                    not status.get("aborted") and status.get("result_status") == "complete"):
+            if (
+                outcome == "done"
+                and status.get("exit") == 0
+                and not status.get("timed_out")
+                and not status.get("aborted")
+                and status.get("result_status") == "complete"
+            ):
                 try:
                     read_result(Path(path) / FILES[kind], read(Path(path) / "job.json"))
                 except (ValueError, OSError, KeyError):
@@ -290,7 +499,9 @@ class Supervisor:
         if len(claim["selected"]) == 4:
             intents = self.intents(candidate, claim["generation"])
             pointer = self.store.accept(self.owned[pr], pr, claim, intents)
-            state["publish"].update({x["target"]: "owed" for x in intents if x["kind"] == "publish"})
+            state["publish"].update(
+                {x["target"]: "owed" for x in intents if x["kind"] == "publish"}
+            )
             state["generation"] = pointer["generation"]
             self.finish(pr, "accepted")
             return
@@ -309,7 +520,9 @@ class Supervisor:
                 self.start_attempt(candidate, kind, claim)
             except (OSError, ValueError) as error:
                 state["reason"] = str(error)
-                if not any(self.attempt_state(paths[-1]) == "live" for paths in state["attempts"].values()):
+                if not any(
+                    self.attempt_state(paths[-1]) == "live" for paths in state["attempts"].values()
+                ):
                     self.finish(pr, "deferred", str(error))
                 return
             state["review"] = "reconciling" if kind == "reconciliation" else "reviewing"
@@ -317,24 +530,192 @@ class Supervisor:
     def intents(self, candidate, generation):
         pr = candidate["pr"]
         targets = list(candidate.get("destinations", []))
-        retained = "page:stub/PRReviews/%s/%d/%d.html" % (candidate["repository"], candidate["number"], generation)
+        endpoint = (
+            "stub"
+            if self.config["stub"]
+            else self.config["configuration"].get("endpoint", "review")
+        )
+        retained = "page:%s/PRReviews/%s/%d/%d.html" % (
+            endpoint,
+            candidate["repository"],
+            candidate["number"],
+            generation,
+        )
         targets.append(retained)
-        intents = [{"kind": "publish", "target": canonical(t), "retained": t == retained} for t in dict.fromkeys(targets)]
+        intents = [
+            {"kind": "publish", "target": canonical(t), "retained": t == retained}
+            for t in dict.fromkeys(targets)
+        ]
         publication_ids = [delivery_id(pr, generation, "publish", x["target"]) for x in intents]
-        comment = {"kind": "comment", "target": pr, "dependencies": publication_ids,
-                   "payload": {"report": retained}, "outcome": "posted" if candidate.get("post", False) else "not_applicable"}
+        comment = {
+            "kind": "comment",
+            "target": pr,
+            "dependencies": publication_ids,
+            "payload": {"report": retained},
+            "outcome": "posted" if candidate.get("post", False) else "not_applicable",
+        }
         intents.append(comment)
-        intents.append({"kind": "board", "target": "stub-board", "outcome": "synced" if candidate.get("post", False) else "not_applicable",
-                        "dependencies": [delivery_id(pr, generation, "comment", pr)]})
+        if not self.config["stub"]:
+            for target in dict.fromkeys(candidate.get("destinations", [])):
+                intents.append(
+                    {
+                        "kind": "annotation",
+                        "target": canonical(target),
+                        "dependencies": [delivery_id(pr, generation, "comment", pr)],
+                    }
+                )
+            intents.append(
+                {
+                    "kind": "deprecate",
+                    "target": pr,
+                    "dependencies": [delivery_id(pr, generation, "comment", pr)],
+                }
+            )
+        intents.append(
+            {
+                "kind": "board",
+                "target": self.config["configuration"].get("project_id", "stub-board"),
+                "outcome": "synced" if candidate.get("post", False) else "not_applicable",
+                "node_id": candidate["node_id"],
+                "dependencies": [delivery_id(pr, generation, "comment", pr)],
+            }
+        )
         for target in candidate.get("destinations", []):
             target = canonical(target)
-            operation = digest([self.run_id, "discovery", pr])
-            intents.append({"kind": "projection", "target": target, "patches": {pr: {"generation": generation}},
-                            "dependencies": [delivery_id(pr, operation, "projection", target)]})
+            operation = digest([self.run_id, self.phase_name("discovery"), pr])
+            intents.append(
+                {
+                    "kind": "projection",
+                    "target": target,
+                    "patches": {pr: {"generation": generation}},
+                    "dependencies": [delivery_id(pr, operation, "projection", target)],
+                }
+            )
             for intent in intents:
                 if intent["kind"] == "publish" and intent["target"] == target:
                     intent["dependencies"] = [delivery_id(pr, generation, "projection", target)]
+        intents.extend(self.landing_intents(pr, generation, intents))
         return intents
+
+    def landing_intents(self, pr, generation, intents, gate=None):
+        import re
+
+        if self.config["stub"]:
+            return []
+        destinations = {}
+        for intent in intents:
+            match = re.fullmatch(
+                r"(page:[^/]+/DevCallReviews/\d{4}-\d{2}-\d{2})/[^/]+/devcall_pr_reviews.html",
+                intent["target"],
+            )
+            if intent["kind"] == "publish" and match:
+                target = match[1] + "/devcall_pr_reviews.html"
+                destinations.setdefault(target, []).append(
+                    delivery_id(pr, generation, "publish", intent["target"])
+                )
+        return [
+            dict(
+                kind="publish",
+                target=target,
+                landing=True,
+                dependencies=dependencies,
+                configuration=self.config["configuration"],
+                **({"gate": gate} if gate else {}),
+            )
+            for target, dependencies in destinations.items()
+        ]
+
+    def setup_adapters(self):
+        cfg = self.config["configuration"]
+        github = GitHub(
+            cfg.get("github_recordings"),
+            cfg.get("github_mode", "live"),
+            cfg.get("github_accounts"),
+            writes=cfg.get("github_writes", False),
+        )
+        self.adapter = (
+            StubAdapter(self.store.root)
+            if self.config["stub"]
+            else Delivery(self.store, github, cfg)
+        )
+        self.discovery = Discovery(github, cfg, self.store) if cfg else None
+
+    def phase_summaries(self, phase):
+        summaries = {}
+        for mode, candidates in phase.get("snapshots", {}).items():
+            states = {c["pr"]: phase.get("outcomes", {}).get(c["pr"], {}) for c in candidates}
+            summaries[mode] = {
+                "classification": {
+                    name: sum(c.get("classification", "REVIEW") == name for c in candidates)
+                    for name in ("REVIEW", "REUSE", "DROPPED", "DEFERRED")
+                },
+                "outcomes": states,
+                "deferrals": {
+                    pr: state.get("reason", "delivery deferred")
+                    for pr, state in states.items()
+                    if state.get("review") == "deferred"
+                    or state.get("comment") in ("owed", "delivery_deferred")
+                },
+            }
+        return summaries
+
+    def discover_phase(self, phase):
+        if phase in self.config["phases"]:
+            return
+        from concurrent.futures import ThreadPoolExecutor
+
+        modes = (
+            LABELS if phase == "labels" else [self.config["mode"] if phase == "initial" else phase]
+        )
+        snapshots = {}
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            futures = {mode: pool.submit(self.discovery.discover, mode) for mode in modes}
+            for mode, future in futures.items():
+                snapshots[mode] = future.result()
+        merged = {}
+        for mode, rows in snapshots.items():
+            for row in rows:
+                old = merged.get(row["pr"])
+                row["selection_modes"] = [mode]
+                if old:
+                    destinations = list(dict.fromkeys(old["destinations"] + row["destinations"]))
+                    post = old["post"] or row["post"]
+                    selection_modes = list(dict.fromkeys(old["selection_modes"] + [mode]))
+                    membership = {
+                        **old.get("membership_removed", {}),
+                        **row.get("membership_removed", {}),
+                    }
+                    if (
+                        old["classification"] in ("DROPPED", "REUSE")
+                        and row["classification"] == "REVIEW"
+                    ):
+                        merged[row["pr"]] = row
+                    merged[row["pr"]].update(
+                        destinations=destinations,
+                        post=post,
+                        selection_modes=selection_modes,
+                        membership_removed=membership,
+                    )
+                else:
+                    merged[row["pr"]] = row
+        self.config["active_phase"] = phase
+        self.config["phases"][phase] = {"snapshots": snapshots, "state": "admitted"}
+        self.config["candidates"] = sorted(
+            merged.values(), key=lambda row: (row["created_at"], row["pr"])
+        )
+        atomic(self.directory / "run.json", self.config)
+        self.admit_snapshot()
+
+    def admit_snapshot(self):
+        for candidate in self.config["candidates"]:
+            self.project(candidate, "discovery")
+            self.states[candidate["pr"]] = {
+                "review": "pending",
+                "phase": self.config.get("active_phase", "initial"),
+                "publish": {},
+                "comment": "owed",
+                "board": "owed",
+            }
 
     def bounded_drain(self, startup=False):
         start = time.monotonic()
@@ -345,9 +726,12 @@ class Supervisor:
             cursor = self.startup_work
         pending = self.store.recover(cursor, limit=min(50, budget), seconds=seconds)
         atomic(self.directory / "recovery.json", pending or None)
-        self.store.drain(self.adapter, limit=budget - self.store.last_recovered,
-                         seconds=max(0, seconds - (time.monotonic() - start)),
-                         snapshot=self.startup_delivery if startup else None)
+        self.store.drain(
+            self.adapter,
+            limit=budget - self.store.last_recovered,
+            seconds=max(0, seconds - (time.monotonic() - start)),
+            snapshot=self.startup_delivery if startup else None,
+        )
 
     def recover_controllers(self):
         deadline = self.startup_deadline
@@ -368,15 +752,30 @@ class Supervisor:
             lock.close()
             # The child arbitrates the final race with other coordinators.
             with open(directory / "recovery.log", "ab") as log:
-                self.children.append(subprocess.Popen(
-                    [sys.executable, str(Path(__file__).resolve()), "--data", str(self.store.root),
-                     "--resume", str(directory), "--no-coordinator"],
-                    stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True))
+                self.children.append(
+                    subprocess.Popen(
+                        [
+                            sys.executable,
+                            str(Path(__file__).resolve()),
+                            "--data",
+                            str(self.store.root),
+                            "--resume",
+                            str(directory),
+                            "--no-coordinator",
+                        ],
+                        stdin=subprocess.DEVNULL,
+                        stdout=log,
+                        stderr=log,
+                        start_new_session=True,
+                    )
+                )
         self.startup_runs = pending
 
     def run(self, coordinate=True):
         # Snapshot first; never acquire another controller's run while owning ours.
-        self.startup_runs = sorted(str(p.parent) for p in (self.store.root / "runs").glob("*/run.json"))
+        self.startup_runs = sorted(
+            str(p.parent) for p in (self.store.root / "runs").glob("*/run.json")
+        )
         self.startup_work = self.store.snapshot()
         self.startup_delivery = self.store.delivery_snapshot()
         self.startup_budget = 100
@@ -390,17 +789,48 @@ class Supervisor:
             self.config = read(self.directory / "run.json")
             self.states = read(self.directory / "state.json", {})
             self.initialize()
+            self.setup_adapters()
             os.environ["REVIEW_GUARDIAN_PLAIN"] = "1" if self.config["plain_guardians"] else "0"
             atomic(self.directory / "startup-runs.json", self.startup_runs)
             for candidate in self.config["candidates"]:
                 self.project(candidate, "discovery")
-                self.states.setdefault(candidate["pr"], {"review": "pending", "publish": {}, "comment": "owed", "board": "owed"})
+                self.states.setdefault(
+                    candidate["pr"],
+                    {"review": "pending", "publish": {}, "comment": "owed", "board": "owed"},
+                )
                 state = self.states[candidate["pr"]]
+                phase = self.config.get("active_phase", "initial")
+                if state.get("phase", "initial") != phase:
+                    state.update(review="pending", phase=phase)
                 if state["review"] in ("claimed", "reviewing", "reconciling"):
                     state["review"] = "pending"
             self.bounded_drain(startup=True)
+            if self.discovery and not self.config["phases"]:
+                self.discover_phase("labels" if self.config["mode"] == "all" else "initial")
             next_drain = time.monotonic() + 1
-            while any(s["review"] in ("pending", "claimed", "reviewing", "reconciling") for s in self.states.values()):
+            while True:
+                if not self.active():
+                    self.bounded_drain()
+                    self.save(force=True)
+                    if (
+                        self.discovery
+                        and self.config["mode"] == "all"
+                        and "followup" not in self.config["phases"]
+                    ):
+                        phase = self.config["phases"]["labels"]
+                        phase.update(state="complete", outcomes=dict(self.states))
+                        for state in phase["outcomes"].values():
+                            if state["comment"] == "owed":
+                                state["comment"] = "delivery_deferred"
+                        phase["summaries"] = self.phase_summaries(phase)
+                        self.discover_phase("followup")
+                        continue
+                    for phase in self.config["phases"].values():
+                        if phase["state"] != "complete":
+                            phase.update(state="complete", outcomes=dict(self.states))
+                        phase["summaries"] = self.phase_summaries(phase)
+                    atomic(self.directory / "run.json", self.config)
+                    break
                 for child in self.children:
                     child.poll()
                 pause = try_lock(self.store.locks, "pause", shared=True)
@@ -412,15 +842,22 @@ class Supervisor:
                     state = self.states[pr]
                     if state["review"] == "pending":
                         old_claim = self.store.claim(pr)
-                        continuing = (old_claim and old_claim["run"] == self.run_id and
-                                      old_claim["status"] == "active")
+                        continuing = (
+                            old_claim
+                            and old_claim["run"] == self.run_id
+                            and old_claim["status"] == "active"
+                        )
                         if (self.directory / "abort.json").exists():
                             if continuing:
                                 self.claim_candidate(candidate)
                             else:
                                 self.finish(pr, "deferred", "aborted")
                         elif time.time() >= self.config["admission_deadline"] and not continuing:
-                            self.finish(pr, "deferred", "paused" if paused else state.get("reason", "admission deadline"))
+                            self.finish(
+                                pr,
+                                "deferred",
+                                "paused" if paused else state.get("reason", "admission deadline"),
+                            )
                         elif not paused or continuing:
                             self.claim_candidate(candidate)
                     if pr in self.owned:
@@ -430,8 +867,7 @@ class Supervisor:
                     next_drain = time.monotonic() + 1
                 self.save()
                 time.sleep(0.05)
-            self.bounded_drain()
-            self.save()
+            self.save(force=True)
             return 0
         finally:
             for lock in self.owned.values():
@@ -447,6 +883,8 @@ def main():
     parser.add_argument("--run", type=Path)
     parser.add_argument("--resume", type=Path)
     parser.add_argument("--candidates", type=Path)
+    parser.add_argument("--config", type=Path)
+    parser.add_argument("--interactive", action="store_true")
     parser.add_argument("--admission", type=float, default=14400)
     parser.add_argument("--wall", type=float)
     parser.add_argument("--request")
@@ -454,11 +892,20 @@ def main():
     parser.add_argument("--permit-timeout", type=float, default=120)
     parser.add_argument("--no-coordinator", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if not args.data or not (args.resume or (args.run and args.candidates)):
+    if not args.data or not (args.resume or (args.run and (args.candidates or args.config))):
         parser.error("--data and either --resume or --run with --candidates required")
-    return Supervisor(args.data, args.resume or args.run, read(args.candidates) if args.candidates else None,
-                      admission=args.admission, wall=args.wall, request=args.request, mode=args.mode,
-                      pool_size=args.pool_size, permit_timeout=args.permit_timeout).run(coordinate=not args.no_coordinator)
+    return Supervisor(
+        args.data,
+        args.resume or args.run,
+        read(args.candidates) if args.candidates else None,
+        admission=args.admission,
+        wall=args.wall,
+        request=args.request,
+        mode=args.mode,
+        pool_size=args.pool_size,
+        permit_timeout=args.permit_timeout,
+        configuration=read(args.config) if args.config else None,
+    ).run(coordinate=not args.no_coordinator)
 
 
 if __name__ == "__main__":

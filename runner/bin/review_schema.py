@@ -171,10 +171,15 @@ def canned(job):
     result = {k: job[k] for k in IDENTITY}
     result.update(schema=1, status="complete", gaps=[], heavy=False)
     if job["kind"] in ("primary", "cold"):
-        result.update(verdict="ACCEPT", findings=[], clean=["stub"], previous=[])
+        result.update(verdict="ACCEPT", findings=[], clean=["stub"],
+                      previous=[{"id": ident, "disposition": "RESOLVED", "rationale": "stub"}
+                                for ident in job.get("previous_ids", [])])
     elif job["kind"] == "validation":
         result.update(outcomes=[], new=[])
     else:
-        result.update(verdict="ACCEPT", outcomes=[], section_md="Stub review.",
+        result.update(verdict="ACCEPT", outcomes=[
+            {"id": ident, "blocking": False, "actionable": False, "disposition": "refuted",
+             "rationale": "stub", "evidence": {"commands": [], "artifacts": [], "configuration": "stub"}}
+            for ident in job.get("finding_ids", [])], section_md="Stub review.",
                       comment_md="Stub review.", summary="Stub complete")
     return result

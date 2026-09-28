@@ -41,12 +41,12 @@ def mkdir(path):
         fsync_dir(path.parent)
 
 
-def atomic(path, value, crash=lambda point: None, prefix="record"):
+def atomic(path, value, crash=lambda point: None, prefix="record", *, encode=encoded):
     path = Path(path)
     mkdir(path.parent)
     temp = path.with_name("." + path.name + "." + uuid.uuid4().hex)
     with open(temp, "xb") as stream:
-        stream.write(encoded(value))
+        stream.write(encode(value))
         stream.flush()
         os.fsync(stream.fileno())
     crash(prefix + "_file")
@@ -223,7 +223,7 @@ class Store:
         for old in self.chain(pr):
             for intent in old["intents"]:
                 identity = intent["kind"], intent["target"]
-                if intent["kind"] in ("publish", "projection") and not intent.get("retained") and identity not in seen:
+                if intent["kind"] in ("publish", "projection", "annotation") and not intent.get("retained") and identity not in seen:
                     inherited = copy.deepcopy({k: v for k, v in intent.items() if k != "id"})
                     if inherited["kind"] == "projection" and pr in inherited.get("patches", {}):
                         inherited["patches"][pr]["generation"] = generation
@@ -231,9 +231,16 @@ class Store:
                     seen.add(identity)
         for intent in intents:
             intent["id"] = delivery_id(pr, generation, intent["kind"], intent["target"])
+        publications = [intent["id"] for intent in intents
+                        if intent["kind"] == "publish" and not intent.get("landing")]
+        for intent in intents:
+            if intent["kind"] in ("comment", "note") and "dependencies" in intent:
+                intent["dependencies"] = list(dict.fromkeys(intent.get("dependencies", []) + publications))
         bundle = {"schema": 1, "pr": canonical(pr), "generation": generation,
                   "run": claim["run"], "request": claim["request"], "inputs": claim["inputs"],
-                  "selected": claim["selected"], "results": results, "previous": current, "intents": intents}
+                  "selected": claim["selected"],
+                  "reconciliation_snapshot": read(Path(claim["selected"]["reconciliation"]) / "job.json").get("fresh_snapshot", {}),
+                  "results": results, "previous": current, "intents": intents}
         parent = self.pr_dir(pr) / "generations"
         mkdir(parent)
         dest = parent / str(generation)
@@ -272,6 +279,15 @@ class Store:
         atomic(self.pr_dir(pr) / "current", pointer, self.crash, "current")
         self.rebuild(lock, pr)
         return pointer
+
+    def receipt_index(self):
+        """Receipts are immutable; parse only newly observed files."""
+        if not hasattr(self, "_receipts"):
+            self._receipts = {}
+        for path in (self.root / "receipts").glob("*.json"):
+            if path.stem not in self._receipts:
+                self._receipts[path.stem] = read(path)
+        return self._receipts
 
     def receipt(self, entry, state, **details):
         record = {"id": entry["id"], "pr": entry["pr"], "generation": entry["generation"],
@@ -346,6 +362,9 @@ class Store:
             row = dict(old)
             if "ticket" in patch and patch["ticket"] > old["ticket"]:
                 row.update(ticket=patch["ticket"], removed=patch["removed"])
+                for field in ("ci", "progress", "candidate"):
+                    if field in patch:
+                        row[field] = patch[field]
                 current = self.current(pr)
                 if not row["removed"] and current:
                     row["generation"] = max(row.get("generation", 0), current["generation"])
@@ -422,7 +441,7 @@ class Store:
         if entry.get("gate") == "page":
             return stack, {gate.region: gate}
         keys = []
-        if entry["kind"] in ("publish", "projection"):
+        if entry["kind"] in ("publish", "projection", "annotation"):
             keys.append(entry["target"])
         elif entry["kind"] in ("comment", "note"):
             keys += [dep["target"] for dep in dependencies if dep["kind"] == "publish"]
@@ -464,15 +483,19 @@ class Store:
                 if entry["failures"] >= 5 or entry["next_attempt"] > time.time():
                     continue
                 dependencies = [read(self.root / "receipts" / (dep + ".json")) for dep in entry.get("dependencies", [])]
-                if any(not dep or dep["state"] not in ("published", "posted", "not_applicable", "synced") for dep in dependencies):
+                if any(not dep or dep["state"] not in ("published", "posted", "not_applicable", "synced", "held", "superseded") for dep in dependencies):
                     continue
-                if entry["kind"] == "comment":
+                if entry["kind"] in ("comment", "note"):
                     older = [read(p) for p in (self.root / "outbox").glob("*.json")]
-                    if any(x["pr"] == entry["pr"] and x["kind"] == "comment" and x["generation"] < entry["generation"] and x["state"] in ("sending", "uncertain") for x in older):
+                    if any(x["pr"] == entry["pr"] and x["kind"] in ("comment", "note") and x["generation"] < entry["generation"] and x["state"] in ("sending", "uncertain") for x in older):
                         continue
+                credentials = ExitStack()
                 try:
+                    if hasattr(adapter, "credentials"):
+                        credentials = adapter.credentials(entry, deadline)
                     side_stack, side_locks = self.side_locks(entry, dependencies, lock)
                 except TimeoutError:
+                    credentials.close()
                     continue
                 try:
                     if entry["kind"] == "projection":
@@ -487,8 +510,12 @@ class Store:
                                 continue
                         else:
                             current = self.current(entry["pr"])
-                            if current and entry["kind"] in ("publish", "board"):
+                            if current and entry["kind"] in ("publish", "board", "annotation"):
                                 entry["effective_generation"] = entry["generation"] if entry.get("retained") else current["generation"]
+                            prepared = adapter.prepare(entry, deadline) if hasattr(adapter, "prepare") else None
+                            if prepared is not None:
+                                self.receipt(entry, **prepared)
+                                continue
                             entry["state"] = "sending"
                             entry["payload_digest"] = digest(entry.get("payload", {}))
                             atomic(path, entry)
@@ -505,6 +532,7 @@ class Store:
                     atomic(path, entry)
                 finally:
                     side_stack.close()
+                    credentials.close()
         return [read(p) for p in sorted((self.root / "outbox").glob("*.json"))]
 
 

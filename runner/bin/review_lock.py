@@ -213,7 +213,7 @@ def adopt(path, key, fd):
         return lock
 
 
-def permit(path, provider, size=4, reserved=False):
+def permit(path, provider, size=4, skip_finishing_slot=False):
     if provider not in POOLS or not 1 <= size <= 256:
         raise ValueError("invalid permit pool")
     with _mutex:
@@ -236,7 +236,7 @@ def permit(path, provider, size=4, reserved=False):
                 for probe in probes:
                     os.close(probe)
                 probes.clear()
-            for slot in range(1 if reserved else 0, size):
+            for slot in range(1 if skip_finishing_slot else 0, size):
                 lock = try_lock(path, "permit:%s:%d" % (provider, slot), _layout_held=True)
                 if lock is not None:
                     return lock

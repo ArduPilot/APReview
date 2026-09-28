@@ -105,7 +105,7 @@ def told_head(body):
     return m.group(1) if m else None
 
 
-def decide(thread, body, accounts, head=None, mode="label"):
+def decide(thread, body, accounts, head=None, mode="label", note=None):
     """What to do with `body` given the PR's thread. Pure; see the tests.
 
     head  the head this review is of, so a moved head can be noticed
@@ -116,6 +116,16 @@ def decide(thread, body, accounts, head=None, mode="label"):
     ours = [c for c in thread
             if c["kind"] == "comment" and c["login"] in accounts
             and MARKER in c["body"]]
+    if note is False:
+        ours = [c for c in ours if states_verdict(c["body"])]
+    if note:
+        marker = re.search(r"^<!-- apreview-delivery:v1:[0-9a-f]{64} -->$", body, re.M)
+        same = [c for c in ours if not states_verdict(c["body"])
+                and marker and marker[0] in c["body"]]
+        if not same:
+            return "post", None
+        mine = max(same, key=lambda c: c["at"] or "")
+        return ("unchanged" if mine["body"].strip() == body.strip() else "edit"), mine["id"]
     if not ours:
         return "post", None
     mine = max(ours, key=lambda c: c["at"] or "")
@@ -244,8 +254,12 @@ def main():
             count("failed"); failed += 1
             continue
 
-        action, cid = decide(thread, body, accounts,
-                             head=entry.get("head"), mode=mode)
+        if entry.get("type") == "note":
+            action, cid = decide(thread, body, accounts,
+                                 head=entry.get("head"), mode=mode, note=True)
+        else:
+            action, cid = decide(thread, body, accounts,
+                                 head=entry.get("head"), mode=mode)
         if args.dry_run:
             # same words a real run prints, so the two can be compared
             print("  would %-9s %s%s" % (
@@ -288,7 +302,8 @@ def main():
         # Collapse every live review of ours, not only the newest: an earlier run
         # whose deprecation failed leaves one behind, and with a changed body
         # that older one used to stay live for good.
-        collapse_stale(repo, thread, accounts, keep=None, what=what)
+        if entry.get("type") != "note":
+            collapse_stale(repo, thread, accounts, keep=None, what=what)
         print("  %-8s %s" % (posted, what))
         count(posted)
 
@@ -353,16 +368,20 @@ def patch(repo, cid, body):
     return _gh_write(["-X", "PATCH", "repos/%s/issues/comments/%s" % (repo, cid)], body)
 
 
-def post(repo, num, body):
-    return _gh_write(["repos/%s/issues/%d/comments" % (repo, num)], body)
+def post(repo, num, body, return_response=False):
+    return _gh_write(["repos/%s/issues/%d/comments" % (repo, num)], body, return_response=return_response)
 
 
-def _gh_write(args, body):
+def _gh_write(args, body, return_response=False):
     out = subprocess.run(["gh", "api", *args, "--input", "-"],
                          input=json.dumps({"body": body}),
                          capture_output=True, text=True)
     if out.returncode != 0:
         sys.stderr.write("    gh: %s\n" % (out.stderr.strip().splitlines() or [""])[0])
+    if return_response:
+        if out.returncode:
+            return None
+        return json.loads(out.stdout)
     return out.returncode == 0
 
 

@@ -124,10 +124,10 @@ class ReviewLocks(unittest.TestCase):
         other.close()
 
     def test_reserved_slot_is_only_for_finishing_jobs(self):
-        primary = permit(self.path, "claude", 2, reserved=True)
+        primary = permit(self.path, "claude", 2, skip_finishing_slot=True)
         self.addCleanup(primary.close)
         self.assertEqual(primary.key, "permit:claude:1")
-        self.assertIsNone(permit(self.path, "claude", 2, reserved=True))
+        self.assertIsNone(permit(self.path, "claude", 2, skip_finishing_slot=True))
         final = permit(self.path, "claude", 2)
         self.addCleanup(final.close)
         self.assertEqual(final.key, "permit:claude:0")

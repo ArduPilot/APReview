@@ -1,9 +1,10 @@
 #!/bin/bash
 # Update the APReview Results project. Safe to call from anywhere, including a
-# run's exit path - like publish-runs-page.sh, it must never fail the run that
-# invoked it, and it takes no arguments because the sync works out for itself
-# what is labelled, open and reviewed.
-. "$HOME/review/bin/review-env.sh" 2>/dev/null || exit 0
+# run's exit path (which ignores its status). It takes no arguments because the
+# sync works out for itself what is labelled, open and reviewed. Exits 75 when
+# another sync holds the board, non-zero on failure, so a caller that cares
+# can tell.
+. "${REVIEW_ENV:-$HOME/review/bin/review-env.sh}" 2>/dev/null || exit 2
 
 # Not as the bot. review-env.sh exports GH_TOKEN so reviews are posted as
 # AP-Review, and that token is deliberately narrow - public_repo, nothing else.
@@ -14,31 +15,18 @@
 # project items carry no author.
 unset GH_TOKEN GITHUB_TOKEN
 
-# One sync at a time. The cron sweep and a run's exit path can fire together,
-# and two in flight interleave: the first reads the board, the second adds a
-# row, the first then deletes it as "not in my search". -n rather than a wait,
-# because the next sweep is fifteen minutes away and this must never hold up
-# the run that called it.
-#
-# Called from a run's EXIT trap, fd 9 arrives already open: it is the run lock,
-# inherited from run-reviewprs.sh. It has to go first. If it stayed and the open
-# below failed, flock would be asked about the run lock instead, succeed, and
-# the sync would run with no lock at all. Closing this copy does not release
-# the run's own hold on it.
+# Called from a run's EXIT trap, fd 9 arrives already open on the run lock,
+# inherited from run-reviewprs.sh. Close this copy first: it must not be
+# mistaken for anything here, and closing it does not release the run's hold.
 exec 9>&-
-if ! exec 9>"$REVIEW_ROOT/etc/project-sync.lock"; then
-    echo "$(date -Is) skipped: cannot open the sync lock" \
-        >>"$REVIEW_LOGS/project-sync.log"
-    exit 0
-fi
-if ! flock -n 9; then
-    echo "$(date -Is) skipped: another project sync is running" \
-        >>"$REVIEW_LOGS/project-sync.log"
-    exit 0
-fi
 
-# fd 9 is deliberately inherited: python is the process doing the work, so it
-# holds the lock for as long as it runs, even if this shell is killed under it.
-# Its own children (gh) do not inherit it - subprocess closes descriptors.
-python3 "$REVIEW_ROOT/bin/project-sync.py" "$@" >>"$REVIEW_LOGS/project-sync.log" 2>&1
-exit 0
+# One sync at a time, on the `board` region of the shared lock file rather
+# than a flock of its own, so the review supervisor's deliveries and this
+# sweep exclude each other. The sweep takes only that leaf; a drain claims PRs
+# before the board and so runs through review-drain.py, never under the board
+# lock, or a PR owner waiting for the board would deadlock against it.
+if [ "${1:-}" = --drain ]; then
+    shift
+    exec python3 "$REVIEW_ROOT/bin/review-drain.py" "$@" >>"$REVIEW_LOGS/project-sync.log" 2>&1
+fi
+exec python3 "$REVIEW_ROOT/bin/review_board_sweep.py" "$@" >>"$REVIEW_LOGS/project-sync.log" 2>&1
