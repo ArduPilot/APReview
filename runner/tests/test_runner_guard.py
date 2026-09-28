@@ -16,6 +16,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+import time
 from test_runs_page import build_page
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,6 +40,13 @@ class Guard(unittest.TestCase):
             os.makedirs(os.path.join(r, d), exist_ok=True)
         os.makedirs(os.path.join(r, "bin"))
         shutil.copy(os.path.join(BIN, "review-env.sh"), os.path.join(r, "bin"))
+        # Routing is now an admission prerequisite. Install real helpers in the
+        # isolated home, exactly as on the runner, without weakening guards.
+        for name in os.listdir(BIN):
+            if name.endswith(".py"):
+                shutil.copy(os.path.join(BIN, name), os.path.join(r, "bin"))
+        shutil.copy(os.path.join(BIN, "../../repos.json"), self.home)
+
         # Whole-script refusals run the EXIT trap. None of its helpers may
         # inspect processes, spend quota or publish from the developer's box.
         for name in ("reap-orphans.sh", "claude-usage-probe.sh", "publish-runs-page.sh"):
@@ -128,10 +136,156 @@ print(o.get('accessToken') or '')" 2>/dev/null)
 else
     echo unexpected-launch > "$HOME/launched"
     echo "$@" > "$HOME/launch-args"
+    # which files the agent was handed open, by inode: locks must not be among them
+    for f in /proc/$$/fd/*; do stat -Lc %i "$f" 2>/dev/null; done > "$HOME/launch-fds"
     exit 97
 fi''')
         stub(os.path.join(self.stubs, "gh"), 'exit 0')
         stub(os.path.join(self.stubs, "codex"), 'exit 0')
+
+    def test_route_recheck_precedes_global_lock(self):
+        # The first read is old-owned. A handoff lands between admission and
+        # the lock check, so no legacy lock file or CLI may be opened.
+        helper = os.path.join(self.home, "review/bin/review-route.py")
+        original = open(helper).read()
+        marker = os.path.join(self.home, "route-seen")
+        with open(helper, "w") as f:
+            f.write("import os,sys\n"
+                    "p=" + repr(marker) + "\n"
+                    "if os.path.exists(p): raise SystemExit(75)\n"
+                    "open(p,'w').close()\n" + original.replace('#!/usr/bin/env python3', ''))
+        out = self.whole_run("followup")
+        self.assertEqual(out.returncode, 75)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "review/etc/reviewprs.lock")))
+
+    def test_route_is_rechecked_after_legacy_lock_wait(self):
+        self.settings(self.AUTH_DENY)
+        lock_path = os.path.join(self.home, "review/etc/reviewprs.lock")
+        with open(lock_path, "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            child = subprocess.Popen([os.path.join(BIN, "run-reviewprs.sh"), "followup"],
+                env={"HOME": self.home, "PATH": self.stubs + ":/usr/bin:/bin", "REVIEWPRS_LOCK_WAIT": "4"},
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(lambda: child.kill() if child.poll() is None else None)
+            deadline = time.monotonic() + 3
+            waiting = False
+            while time.monotonic() < deadline:
+                logs = os.listdir(os.path.join(self.home, "review/logs"))
+                if any(n.startswith('reviewprs-') and 'waiting up to' in open(os.path.join(self.home, 'review/logs', n)).read() for n in logs):
+                    waiting = True
+                    break
+                time.sleep(.02)
+            self.assertTrue(waiting)
+            json.dump({"schema": 1, "repositories": [], "labels": [], "modes": ["followup"]},
+                      open(os.path.join(self.home, "review/etc/routing.json"), "w"))
+            fcntl.flock(lock, fcntl.LOCK_UN)
+        self.assertEqual(child.wait(timeout=8), 75)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "cli-env")))
+
+    def new_routing(self):
+        self.settings(self.AUTH_DENY)
+        with open(os.path.join(self.auth, "codex-personal/config.toml"), "w") as f:
+            f.write('model="test-codex-pin"\nmodel_reasoning_effort="xhigh"\nsandbox_mode="workspace-write"\n')
+        json.dump({"schema": 1, "repositories": ["rsyncproject/rsync"], "labels": [], "modes": []},
+                  open(os.path.join(self.home, "review/etc/routing.json"), "w"))
+
+    def supervisor_stub(self):
+        path = os.path.join(self.home, "review/bin/review-supervisor.py")
+        with open(path, "w") as f:
+            f.write("import json,os,pathlib,sys\n"
+                    "p=pathlib.Path(os.environ['HOME'])\n"
+                    "(p/'supervisor-args').write_text(json.dumps(sys.argv))\n"
+                    "i=sys.argv.index('--config')+1 if '--config' in sys.argv else None\n"
+                    "(p/'frozen.json').write_text(pathlib.Path(sys.argv[i]).read_text() if i else '{}')\n"
+                    "from review_lock import try_lock\n"
+                    "cfg=json.loads((p/'frozen.json').read_text())\n"
+                    "for tool,v in cfg.get('providers',{}).items():\n"
+                    " lock=try_lock(pathlib.Path(os.environ['REVIEW_DATA'])/'locks','account:'+tool+'/'+v['home'])\n"
+                    " assert lock is not None, 'preflight lease leaked into supervisor'\n"
+                    " lock.close()\n")
+
+    def test_new_route_skips_global_lock_and_freezes_settings(self):
+        self.new_routing()
+        self.supervisor_stub()
+        with open(os.path.join(self.home, "review/etc/reviewprs.lock"), "w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            out = self.whole_run("rsync", REVIEW_PUBLIC_URL="https://example.test", REVIEW_PUBLISH="host:pages",
+                                 RSYNC_AUTH="--password-file=/outside/password", REVIEW_COMMENT_ACCOUNTS="bot old")
+        self.assertEqual(out.returncode, 0, self.run_log("rsync"))
+        frozen = os.path.join(self.home, "frozen.json")
+        self.assertTrue(os.path.exists(frozen), self.run_log("rsync"))
+        cfg = json.load(open(frozen))
+        self.assertEqual(cfg["providers"]["claude"]["home"], os.path.join(self.auth, "claude-personal"))
+        self.assertEqual(cfg["providers"]["claude"]["permission_mode"], "auto")
+        self.assertEqual(cfg["providers"]["claude"]["model"], "claude-opus-5-5")
+        self.assertEqual(cfg["providers"]["codex"]["model"], "test-codex-pin")
+        self.assertEqual(cfg["providers"]["codex"]["effort"], "xhigh")
+        self.assertEqual(cfg["providers"]["codex"]["permission_mode"], "workspace-write")
+        self.assertEqual(cfg["wall_timeouts"]["primary"], 5400)
+        self.assertEqual(cfg["pool_size"], 4)
+        self.assertEqual(cfg["admission"], 14400)
+        self.assertEqual(cfg["providers"]["claude"]["granted_directories"], [os.path.join(self.home, "review")])
+        self.assertEqual(cfg["comment_accounts"], ["bot", "old"])
+        self.assertEqual(cfg["endpoints"]["review"]["publish"], "host:pages")
+        self.assertEqual(cfg["endpoints"]["review"]["rsync_args"], ["--password-file=/outside/password"])
+        self.assertIn("/data/references/rsync", cfg["reference_clones"]["rsyncproject/rsync"])
+        self.assertNotIn(os.path.join(self.home, "review/repositories/ardupilot/Tools/autotest"),
+                         cfg["path"].split(os.pathsep))
+        self.assertFalse(os.path.exists(os.path.join(self.home, "launched")))
+
+    def test_new_manual_rsync_alias_uses_rsync_account(self):
+        self.new_routing()
+        self.supervisor_stub()
+        out = self.whole_run("rsync#1", REVIEW_COMMENT_ACCOUNTS="bot")
+        self.assertEqual(out.returncode, 0, out.stderr)
+        path = os.path.join(self.home, "frozen.json")
+        self.assertTrue(os.path.exists(path))
+        self.assertEqual(json.load(open(path))["providers"]["claude"]["home"],
+                         os.path.join(self.auth, "claude-personal"))
+
+    def test_new_quota_exhaustion_still_starts_supervisor(self):
+        self.new_routing()
+        self.supervisor_stub()
+        stub(os.path.join(self.home, "review/bin/claude-usage-probe.sh"), 'echo exhausted; exit 2')
+        out = self.whole_run("rsync", REVIEW_COMMENT_ACCOUNTS="bot")
+        self.assertEqual(out.returncode, 0, self.run_log("rsync"))
+        frozen = os.path.join(self.home, "frozen.json")
+        self.assertTrue(os.path.exists(frozen), self.run_log("rsync"))
+        self.assertTrue(json.load(open(frozen))["quota"]["paused"])
+
+    def test_new_policy_exhaustion_still_starts_supervisor(self):
+        self.new_routing()
+        self.supervisor_stub()
+        json.dump({}, open(os.path.join(self.auth, "policy.json"), "w"))
+        stub(os.path.join(self.home, "review/bin/accounts.py"), 'exit 3')
+        out = self.whole_run("rsync", REVIEW_COMMENT_ACCOUNTS="bot")
+        frozen = os.path.join(self.home, "frozen.json")
+        self.assertEqual(out.returncode, 0, self.run_log("rsync"))
+        self.assertTrue(os.path.exists(frozen), self.run_log("rsync"))
+        self.assertTrue(json.load(open(frozen))["quota"]["paused"])
+
+    def test_routing_refuses_wrong_path_before_lock_or_accounts(self):
+        self.new_routing()
+        out = self.whole_run("https://github.com/RsyncProject/rsync/pull/1", REVIEW_EXPECT_PATH="old")
+        self.assertEqual(out.returncode, 75)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "review/etc/reviewprs.lock")))
+        self.assertFalse(os.path.exists(os.path.join(self.home, "cli-env")))
+
+    def test_new_dry_run_never_creates_run(self):
+        self.new_routing()
+        out = self.whole_run("rsync", "--dry-run", REVIEW_COMMENT_ACCOUNTS="bot")
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertIn("supervisor configuration", out.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.home, "review/data/runs")))
+
+    def test_new_codex_model_must_be_pinned(self):
+        self.new_routing()
+        self.supervisor_stub()
+        os.remove(os.path.join(self.auth, "codex-personal/config.toml"))
+        out = self.whole_run("rsync", REVIEW_COMMENT_ACCOUNTS="bot")
+        self.assertEqual(out.returncode, 1, self.run_log("rsync"))
+        self.assertFalse(os.path.exists(os.path.join(self.home, "supervisor-args")))
+        self.assertIn("pin model", self.run_log("rsync"))
 
     def link(self, name, target):
         p = os.path.join(self.auth, name)
@@ -360,6 +514,20 @@ fi''')
         args = os.path.join(self.home, "launch-args")
         self.assertTrue(os.path.exists(args), "claude was never launched")
         self.assertIn("--model claude-opus-5-5", open(args).read())
+
+    def test_the_agent_inherits_no_lock_or_lease_descriptor(self):
+        # the shell keeps the run lock and the account leases for the run; the
+        # agent and everything it spawns get none of them, or a leaked SITL
+        # would hold the lock or keep the account busy after the run
+        self.settings(self.AUTH_DENY)
+        self.whole_run("followup")
+        fds = os.path.join(self.home, "launch-fds")
+        self.assertTrue(os.path.exists(fds), "claude was never launched")
+        held = set(open(fds).read().split())
+        for name in ("review/etc/reviewprs.lock", "review/data/locks"):
+            path = os.path.join(self.home, name)
+            if os.path.exists(path):
+                self.assertNotIn(str(os.stat(path).st_ino), held, name + " was inherited")
 
     def test_a_dry_run_reports_a_choice_without_recording_it(self):
         self.policy({"default": {"claude": ["claude-ardupilot"]}},
@@ -1537,6 +1705,71 @@ review_auth() {
         out = self.run_mode("followup")
         self.assertEqual(out.returncode, 1)
 
+
+
+class Reaper(unittest.TestCase):
+    """reap-orphans.sh: the old runner's leaks go, the supervisor's attempts stay.
+
+    The path scan exists because agents leave SITL, ffmpeg and test servers
+    running under $REVIEW_DATA and nothing registers them. Supervisor attempts
+    are registered and reconciled by identity, and must not be killed for
+    merely working under the same tree.
+    """
+
+    def setUp(self):
+        base = "/data/review/supervisor-tests" if os.path.isdir("/data/review") else None
+        if base:
+            os.makedirs(base, exist_ok=True)
+        self.home = tempfile.mkdtemp(dir=base)
+        self.addCleanup(shutil.rmtree, self.home, True)
+        root = os.path.join(self.home, "review")
+        for d in ("bin", "etc", "logs", "data", "data/work"):
+            os.makedirs(os.path.join(root, d))
+        with open(os.path.join(root, "bin", "review-env.sh"), "w") as f:
+            f.write('export REVIEW_ROOT="$HOME/review"\nexport REVIEW_DATA="$REVIEW_ROOT/data"\n'
+                    'export REVIEW_LOGS="$REVIEW_ROOT/logs"\n')
+        self.work = os.path.join(root, "data", "work")
+        self.env = {"HOME": self.home, "PATH": "/usr/bin:/bin"}
+        self.children = []
+        self.addCleanup(self.stop_all)
+
+    def stop_all(self):
+        for c in self.children:
+            if c.poll() is None:
+                c.kill()
+            c.wait(timeout=5)
+
+    def leak(self, **env):
+        c = subprocess.Popen(["sleep", "300"], cwd=self.work, env=dict(self.env, **env),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.children.append(c)
+        return c
+
+    def reap(self):
+        return subprocess.run([os.path.join(BIN, "reap-orphans.sh")], env=self.env,
+                              capture_output=True, text=True, timeout=60)
+
+    def gone(self, c):
+        for _ in range(200):
+            if c.poll() is not None:
+                return True
+            time.sleep(0.05)
+        return False
+
+    def test_an_unregistered_leak_under_the_review_tree_is_killed(self):
+        old = self.leak()
+        r = self.reap()
+        self.assertTrue(self.gone(old), "the old runner's leak survived: " + r.stdout)
+        self.assertIn("reap: TERM", r.stdout)
+
+    def test_a_supervisor_payload_under_the_same_tree_is_left_alone(self):
+        # a payload carries REVIEW_JOB_DIR; its guardian's unit cgroup is the
+        # other mark, which a plain child process cannot fake here
+        kept = self.leak(REVIEW_JOB_DIR=os.path.join(self.work, "attempt"))
+        old = self.leak()
+        self.reap()
+        self.assertTrue(self.gone(old))
+        self.assertIsNone(kept.poll(), "a supervisor payload was reaped by path")
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

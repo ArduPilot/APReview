@@ -347,6 +347,13 @@ export PATH="$REVIEW_ROOT/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 clear_stale_oauth_lock() {
     local dir="${1:-${CLAUDE_CONFIG_DIR:-$HOME/.claude}}"
     local lock="$dir/.oauth_refresh.lock" p env inuse=0
+    # A fully installed supervisor uses the same account region for cleanup,
+    # probes and CLI lifetimes. Keep the legacy implementation for old installs
+    # which have not deployed the integration helpers yet.
+    if [ -f "$REVIEW_ROOT/bin/review-credential.py" ]; then
+        python3 "$REVIEW_ROOT/bin/review-credential.py" "$dir"
+        return $?
+    fi
     [ -e "$lock" ] || return 0
     for p in $(pgrep -x claude 2>/dev/null); do
         env=$(tr "\0" "\n" < "/proc/$p/environ" 2>/dev/null) || continue

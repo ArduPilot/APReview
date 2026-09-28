@@ -8,9 +8,9 @@ from review_delivery import Delivery
 
 p = argparse.ArgumentParser()
 p.add_argument("--data", required=True)
-p.add_argument("--config", required=True)
+p.add_argument("--config", help="optional defaults; intents retain their frozen delivery settings")
 a = p.parse_args()
-c = read(a.config)
+c = read(a.config) if a.config else {}
 s = Store(a.data)
 g = GitHub(
     c.get("github_recordings"),

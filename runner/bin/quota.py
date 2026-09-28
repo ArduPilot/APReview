@@ -219,7 +219,9 @@ def read(tool, directory):
     rec = {"at": datetime.datetime.now().astimezone().isoformat(),
            "tool": tool, "dir": directory, "account": identity(tool, directory)}
     try:
-        rec.update(READERS[tool](directory))
+        from review_credentials import lease
+        with lease(tool, directory):
+            rec.update(READERS[tool](directory))
     except subprocess.TimeoutExpired:
         rec["error"] = "timed out after %ds" % TIMEOUT
     except Exception as e:                       # observation must not raise

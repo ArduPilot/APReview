@@ -67,6 +67,8 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
     m = re.search(r'^reviewprs mode=(\S+)\s+host=\S+\s+start=(\S+)', txt, re.M)
     if not m:
         continue
+    if re.search(r'^supervisor run=', txt, re.M):
+        continue  # the atomic summary owns this row and its usage
     mode, start = m.group(1), parse_iso(m.group(2))
     if not start or start < cutoff:
         continue
@@ -831,6 +833,10 @@ doc = (doc.replace('__DAYS__', str(DAYS))
           .replace('__SROWS__', '\n'.join(srows))
           .replace('__ROWS__', '\n'.join(rows))
           .replace('__BOX__', html.escape(BOX)))
+
+from review_dashboard import summaries, render
+supervisor_runs = summaries(os.environ.get('REVIEW_DATA', os.path.join(HOME, 'review', 'data')))
+doc = doc.replace('<h2>By run type</h2>', render(supervisor_runs) + '<h2>By run type</h2>')
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 open(OUT, 'w').write(doc)

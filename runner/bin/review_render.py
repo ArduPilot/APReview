@@ -69,6 +69,10 @@ def bundle_at(store, pr, generation):
 
 
 def core(bundle):
+    if bundle.get("legacy"):
+        raw = bundle["results"]["reconciliation"]["section_md"]
+        inner = re.sub(r'^<section\b[^>]*>|</section>\s*$', '', raw)
+        return '<p>Imported legacy review; original coverage retained.</p>\n' + inner
     inputs, final = bundle["inputs"], bundle["results"]["reconciliation"]
     validation = bundle["results"]["validation"]
     counts = {
@@ -224,7 +228,7 @@ class Renderer:
                 if row.get("removed"):
                     continue
                 bundle = (
-                    bundle_at(self.store, pr, row["generation"]) if row.get("generation") else None
+                    bundle_at(self.store, pr, row["generation"]) if row.get("generation") is not None else None
                 )
                 if bundle:
                     bundles.append(bundle)
@@ -282,7 +286,7 @@ class Renderer:
         contents = []
         for b in bundles:
             i, final = b["inputs"], b["results"]["reconciliation"]
-            rank = {"ACCEPT": 0, "COMMENT": 1, "REQUEST CHANGES": 2}[final["verdict"]]
+            rank = {"ACCEPT": 0, "COMMENT": 1, "REQUEST CHANGES": 2}.get(final.get("verdict"), 3)
             ci = rows.get(b["pr"], {}).get("ci") or i.get("ci") or {"state": "unknown"}
             ci_rank = {"none": -1, "unknown": 0, "passing": 1, "pending": 2, "failing": 3}[
                 ci["state"]
@@ -298,7 +302,7 @@ class Renderer:
                         + "</a>",
                     ),
                     (i.get("author", ""), escape(i.get("author", ""))),
-                    (rank, final["verdict"]),
+                    (rank, final.get("verdict", "LEGACY")),
                     (ci_rank, escape(ci["state"])),
                 ]
             )
@@ -338,7 +342,7 @@ class Renderer:
             body += section(b, annotation)
         body += "".join(pending)
         totals = {
-            v: sum(b["results"]["reconciliation"]["verdict"] == v for b in bundles)
+            v: sum(b["results"]["reconciliation"].get("verdict") == v for b in bundles)
             for v in ("ACCEPT", "COMMENT", "REQUEST CHANGES")
         }
         body += "<h2>Summary</h2>" + table(

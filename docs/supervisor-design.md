@@ -1,6 +1,7 @@
 # Review supervisor: orchestration in Python, inference per PR
 
-Status: design, revision 4, 2026-09-28. Nothing here is built yet. Revisions
+Status: design, revision 4, 2026-09-28. Slices one and two implement the core
+and adapters; slice three supplies opt-in integration and migration. Revisions
 1 through 3 were reviewed by Codex (reviews kept under
 `/data/review/supervisor-design/` on the development machine); this
 revision answers the third review. Out-of-scope decisions are listed at the
@@ -887,6 +888,97 @@ new code: old paths must honour the ownership boundary too.
 6. Retire orchestration from `commands/reviewprs.md`, keeping the four prompts
    and review rules. Remove old refresh/global-lock paths only after their
    last reader and writer have retired.
+
+### Slice-three commands and transfer format
+
+Installing this slice changes no ownership. The only live routing file is
+`$REVIEW_ROOT/etc/routing.json`; absence means old ownership. Start with the
+empty `runner/etc/routing.json.example`. Its `repositories`, `labels` and
+`modes` arrays name new owners, not exclusions from new ownership. `modes`
+accepts `all`, `followup`, `rsync`, `pr`, `author`; `all` transfers every mode.
+For partial transfers, repositories are the PR boundary and labels/modes name
+shared report destinations: transferring a label/mode alone does not authorize
+old-owned repositories. Repository names are canonical, case-insensitive
+`owner/repo`. Ownership of a
+repository applies even in an old-owned followup or author sweep. It does not
+transfer those sweeps' shared publication destinations. Use `@name` for an
+author request. A repository canary defers cross-owner report requests.
+
+On the runner, after installing the code and setting up separate full clones
+under `REVIEW_NEW_REPOS` (default `$REVIEW_DATA/references`):
+
+```bash
+. "$HOME/review/bin/review-env.sh"
+cp runner/etc/routing.json.example "$REVIEW_ROOT/etc/routing.json"  # first install only
+loginctl enable-linger "$USER"
+loginctl show-user "$USER" -p Linger
+python3 "$REVIEW_ROOT/bin/review-route.py" rsync
+```
+
+Run the concurrent-account and real systemd guardian spikes before enabling
+production overlap. Accounts default to exclusive leases; wrapper preflight,
+legacy CLI lifetimes, quota probes and cleanup participate in those leases.
+Legacy unregistered descendants cannot be safely killed automatically; the
+handoff waits for them and times out for manual inspection.
+
+The handoff consumes a **complete publication mirror**, not just the rsync
+page. Keep it under `/data/review/`. For dry-run planning fetch a mirror first;
+the actual handoff refreshes it again *after* draining, using `REVIEW_PUBLISH`
+and `RSYNC_AUTH`, so an old run cannot publish a newer head between the mirror
+fetch and import. If publishing is unset, `--pages` must name the actual local
+publication tree. None of these commands posts GitHub comments:
+
+```bash
+mkdir -p /data/review/canary-pages
+rsync -a $RSYNC_AUTH "$REVIEW_PUBLISH/" /data/review/canary-pages/
+python3 "$REVIEW_ROOT/bin/review-handoff.py" new --pages /data/review/canary-pages --dry-run
+python3 "$REVIEW_ROOT/bin/review-handoff.py" new --pages /data/review/canary-pages --wait 900
+"$REVIEW_ROOT/bin/run-reviewprs.sh" rsync --dry-run
+```
+
+The handoff takes `pause`, waits boundedly for the old global lock, live
+attempts, unregistered legacy readers and delivery debt to drain, imports
+the manifest and sections, removes rsync rows from shared label/author pages,
+publishes those replacements under their page locks, then atomically replaces
+routing.json. It records changed pages and backups under
+`$REVIEW_DATA/handoff/rsyncproject/rsync/`. A durable pending-page journal makes
+a failed publication retryable even after its local mirror was rewritten.
+Rerun the same command after interruption before requesting the reverse.
+
+Imported reviews occupy **generation zero**, explicitly marked `legacy`, with
+their original sections preserved. They are not fabricated successes of the
+four inference passes. Import receipts prevent re-delivery of already served
+pages; inherited page intents ensure a later accepted review updates the
+transferred report too. No old comment is reposted by import. A missing section
+or a conflicting already accepted head stops the transfer.
+
+Replace the old rsync cron line with its adjacent commented new-path line only
+after validating the canary, and enable the commented outbox drain. Nothing
+installs a crontab. `REVIEW_EXPECT_PATH=new` refuses an accidentally old-owned
+slot. The board sweep stays the existing shared serialized adapter.
+
+Before rollback, abort unfinished target runs with
+`review-now.sh --abort <run>`, including queued runs without attempts. A paused
+controller can still create page intents, so absence of live guardians alone
+is not a drained transfer. The handoff refuses to cross that boundary.
+
+Rollback is the same fenced operation and is blocked by any outstanding debt,
+including uncertain comment writes. First drain it, or resolve it with an
+explicit receipt using the delivery protocol; the handoff never cancels debt:
+
+```bash
+"$REVIEW_ROOT/bin/review-outbox.sh"
+python3 "$REVIEW_ROOT/bin/review-handoff.py" old --pages /data/review/canary-pages --dry-run
+python3 "$REVIEW_ROOT/bin/review-handoff.py" old --pages /data/review/canary-pages --wait 900
+```
+
+Rollback exports the accepted rsync page with a compatible manifest before
+returning ownership. It keeps bundles, receipts and backups; it does not
+restore stale rows into shared reports. Their next old sweep rebuilds them.
+The automated handoff intentionally supports only the rsync repository
+boundary. The remaining all-at-once transfer still requires the full manifest
+inventory and destination plan described in step 4; it is not inferred from
+labels or performed by installing this slice.
 
 ## Decisions taken
 

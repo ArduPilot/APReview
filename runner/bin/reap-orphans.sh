@@ -12,7 +12,12 @@
 #   reap-orphans.sh --from-run   # called from a run's own exit trap
 #
 # A process is a candidate only if its cwd, exe or argv references $REVIEW_DATA.
-# The user's own inspection tools are never touched.
+# The user's own inspection tools are never touched, and neither is anything
+# the review supervisor owns: its attempts run in their own systemd units and
+# cgroups, survive their controller on purpose, and are reconciled by identity
+# (review-control.py reap) rather than by path. Paths say where a process
+# works, not which run owns it, so the scan below is for the old runner's
+# unregistered leaks only, and goes when the old runner does.
 set -u
 . "$HOME/review/bin/review-env.sh" 2>/dev/null || exit 0
 LOCK="$REVIEW_ROOT/etc/reviewprs.lock"
@@ -43,6 +48,12 @@ for d in /proc/[0-9]*; do
     case " $(ps -o ppid= -p $ME 2>/dev/null) " in *" $p "*) continue;; esac
     comm=$(cat "$d/comm" 2>/dev/null) || continue
     echo "$comm" | grep -qE "$SAFE_RE" && continue
+    # supervisor-owned: a guardian's unit cgroup, or a payload's job directory
+    grep -q "review-attempt-" "$d/cgroup" 2>/dev/null && continue
+    tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -q '^REVIEW_JOB_DIR=' && continue
+    case "$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)" in
+        *review-supervisor.py*|*review-guardian.py*|*review-drain.py*|*review_board_sweep.py*|*review-resume.py*) continue ;;
+    esac
     hit=0
     cwd=$(readlink "$d/cwd" 2>/dev/null); case "$cwd" in "$REVIEW_DATA"*) hit=1;; esac
     exe=$(readlink "$d/exe" 2>/dev/null); case "$exe" in "$REVIEW_DATA"*) hit=1;; esac
@@ -52,6 +63,9 @@ for d in /proc/[0-9]*; do
     fi
     [ $hit -eq 1 ] && candidates="$candidates $p"
 done
+
+# The supervisor's own dead attempts, by recorded identity, whatever the scan found.
+[ -f "$REVIEW_ROOT/bin/review-control.py" ] && python3 "$REVIEW_ROOT/bin/review-control.py" reap 2>&1
 
 [ -z "$candidates" ] && { echo "reap: nothing to reap"; exit 0; }
 

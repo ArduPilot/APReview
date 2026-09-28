@@ -1,3 +1,15 @@
+<!-- routing-contract:v1 -->
+Before discovery in **every mode, including followup, author and manual PRs**,
+set `MODE` to this phase’s resolved mode (each label separately within all), then run `python3 "$REVIEW_ROOT/bin/review-route.py" "$MODE"`. If it prints `new`,
+stop and use `run-reviewprs.sh` for that target. For every candidate source
+(search, board, manifest and submodules), write a JSON array with a `repository`
+(`owner/repo`) field in each row, then call
+`python3 "$REVIEW_ROOT/bin/review-route.py" "$MODE" --filter old < candidates.json > admitted.json`.
+Use only `admitted.json` for review, reuse, followup, manifest merging, rendering
+and publication. In all mode repeat the filter for each label and for followup.
+A helper error stops the run; never fall back to the unfiltered list.
+<!-- /routing-contract -->
+
 # Review PRs by Label, Author, or Follow-up
 
 Review a set of GitHub PRs and generate an HTML report. Checks every repo in `repos.json` — the main ArduPilot repo, the wiki, all ArduPilot-owned submodule repos, the standalone ArduPilot repos and the upstream `mavlink/mavlink` — so adding a repo is an edit to that file, not to this one.

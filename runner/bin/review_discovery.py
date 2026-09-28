@@ -11,6 +11,7 @@ from urllib.parse import quote
 from zoneinfo import ZoneInfo
 
 import repos
+from review_routing import DEFAULT, owner, validate
 from review_lock import acquire, canonical
 import time
 import threading
@@ -180,7 +181,7 @@ class Discovery:
                             ),
                             None,
                         )
-                        if row.get("generation")
+                        if row.get("generation") is not None
                         else None
                     )
                     manifests.setdefault(label, {})[pr] = dict(
@@ -320,7 +321,15 @@ class Discovery:
             if mode in LABELS or mode == "rsync":
                 keys |= set(manifests.get(mode, {}))
         out = []
+        routing = validate(self.config.get("routing", DEFAULT))
         for pr in sorted(keys):
+            repository = pr[3:].split("#")[0]
+            if owner(routing, mode, repository) != "new":
+                continue
+            # During a repository canary, shared label/author destinations
+            # still belong to old publication. Do not partially overwrite them.
+            if mode not in ("pr", "rsync") and owner(routing, mode) != "new":
+                continue
             candidate = self.candidate(pr, mode, manifests)
             candidate["observation"] = ticket
             out.append(candidate)
@@ -371,7 +380,9 @@ class Discovery:
             old = manifests[memberships[0]][pr]
         old = dict(head=old) if isinstance(old, str) else old
         destinations = [
-            target for label in memberships if label in LABELS for target in self.destination(label)
+            target for label in memberships if label in LABELS
+            and owner(self.config.get("routing", DEFAULT), label) == "new"
+            for target in self.destination(label)
         ]
         endpoint = self.config.get("endpoint", "review")
         if mode in LABELS or mode in self.config.get("labels", []):

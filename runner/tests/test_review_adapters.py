@@ -137,6 +137,7 @@ class DiscoveryContract(unittest.TestCase):
         self.root = workspace(self)
         self.store = Store(self.root)
         self.config = dict(
+            routing={"schema": 1, "repositories": [], "labels": [], "modes": ["all"]},
             comment_accounts=["new-bot", "old-bot"],
             stamp="2026-09-28_12-00",
             date="2026-09-28",
@@ -502,6 +503,22 @@ class LocalPublication(unittest.TestCase):
         path.write_bytes(Renderer(self.store).render("page:test/empty.html"))
         self.publisher.verify_comment(comment, time.monotonic() + 5)
         self.assertEqual(verify(path.read_bytes())["sections"][0]["generation"], 1)
+
+    def test_publication_uses_frozen_rsync_auth_options(self):
+        from review_delivery import run_external
+        option = "--password-file=/outside/credentials with spaces"
+        self.config["endpoints"]["test"]["rsync_args"] = [option]
+        seen = []
+        def transport(argv, **kwargs):
+            seen.extend(argv)
+            # The local rsync fixture needs no password file. Verify the exact
+            # argument at the boundary, then exercise the real local transfer.
+            return run_external([x for x in argv if x != option], **kwargs)
+        entry = entry_of(self.store, self.bundle, "publish")
+        with patch("review_delivery.run_external", side_effect=transport):
+            with try_lock(self.store.locks, entry["target"]):
+                self.publisher.deliver(entry, time.monotonic() + 10)
+        self.assertIn(option, seen)
 
     def test_held_comment_annotation_has_its_own_locked_publication(self):
         target = "page:test/report.html"

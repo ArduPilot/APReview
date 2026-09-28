@@ -23,7 +23,23 @@ set -u
 # same account - as the run it is about to start.
 . "$HOME/review/bin/review-env.sh"
 export REVIEWPRS_LOCK_WAIT="${REVIEWPRS_LOCK_WAIT:-14400}"
+# Flags are not targets. Preserve them for the wrapper after resolving the
+# actual mode, including the usual `review-now.sh --interactive rsync` form.
+FORWARD=()
+TARGET_ARGS=()
+for a in "$@"; do
+    case "$a" in
+        --interactive|--dry-run) FORWARD+=("$a") ;;
+        *) TARGET_ARGS+=("$a") ;;
+    esac
+done
+set -- "${TARGET_ARGS[@]}"
+if [ "${1:-}" = --abort ]; then
+    exec python3 "$REVIEW_ROOT/bin/review-control.py" abort "${2:?--abort needs a run}"
+fi
 ARG="${1:-all}"
+# Ownership is checked even for a manual URL, before gh or any lock wait.
+python3 "$REVIEW_ROOT/bin/review-route.py" "$ARG" >/dev/null || exit 1
 shift 2>/dev/null || true      # anything else is passed through, e.g. --dry-run
 
 resolve_pr() {
@@ -74,4 +90,4 @@ else
     MODE="$ARG"
 fi
 
-exec "$HOME/review/bin/run-reviewprs.sh" "$MODE" "$@"
+exec "$HOME/review/bin/run-reviewprs.sh" "$MODE" "$@" "${FORWARD[@]}"

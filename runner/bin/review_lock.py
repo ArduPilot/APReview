@@ -158,8 +158,12 @@ def try_lock(path, key, shared=False, _layout_held=False):
         _order(key)
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
         try:
-            # flock is only the layout initializer, never a region ownership lock.
-            if not _layout_held:
+            # Pool resize/claim operations share the initializer gate. Once
+            # the layout exists, unrelated run/PR/page regions must not appear
+            # busy just because another process is resizing a permit pool.
+            # That false contention made an independent supervisor exit 75.
+            needs_gate = key.startswith("permit:") or os.pread(fd, 4, LAYOUT) != MAGIC
+            if not _layout_held and needs_gate:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             try:
                 _layout(fd)
@@ -170,7 +174,7 @@ def try_lock(path, key, shared=False, _layout_held=False):
                         raise ValueError("slot outside configured pool")
                 _flock(fd, region(key), shared)
             finally:
-                if not _layout_held:
+                if not _layout_held and needs_gate:
                     fcntl.flock(fd, fcntl.LOCK_UN)
             if not shared:
                 digest = hashlib.sha256(key.encode()).digest()

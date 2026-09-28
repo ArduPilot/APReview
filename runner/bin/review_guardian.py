@@ -12,6 +12,7 @@ import time
 import uuid
 
 from review_lock import acquire, adopt, boot_id, permit, start_time, try_lock
+from review_usage import sessions
 from review_schema import FILES, IDENTITY, evidence_paths, read_result
 from review_store import Store, atomic, fsync_dir, mkdir, read
 
@@ -211,6 +212,14 @@ def manager(data, attempt, fd):
     return 0 if empty else 1
 
 
+def record_usage(status, attempt):
+    observed = sessions(attempt / "payload.log")
+    status["sessions"] = observed
+    status["session_id"] = next(iter(observed)) if len(observed) == 1 else None
+    status["usage"] = {key: sum(row.get(key, 0) for row in observed.values())
+                       for key in {k for row in observed.values() for k in row}}
+
+
 def run(data, attempt, fd):
     subreaper()
     store = Store(data)
@@ -219,7 +228,7 @@ def run(data, attempt, fd):
     plain = read(attempt / "launch.json")["backend"] == "plain"
     status = {k: job[k] for k in IDENTITY}
     status.update(schema=1, **identity(), pr=job["pr"], provider=job["provider"],
-                  account=job.get("account"), session_id=job["attempt"], cgroup=None,
+                  account=job.get("account"), session_id=None, cgroup=None,
                   state="starting", heartbeat=time.time(), exit=None, timed_out=False,
                   aborted=False, result_status="missing", empty=False, slots=[], usage={}, quota={})
     atomic(attempt / "status.json", status)
@@ -266,6 +275,7 @@ def run(data, attempt, fd):
                         owned.append(account)
                         break
                     if time.monotonic() >= heartbeat:
+                        record_usage(status, attempt)
                         status["heartbeat"] = time.time()
                         atomic(attempt / "status.json", status)
                         heartbeat = time.monotonic() + 30
@@ -335,6 +345,7 @@ def run(data, attempt, fd):
             except subprocess.TimeoutExpired:
                 empty = False
         reap()
+        record_usage(status, attempt)
         status["empty"] = empty
         status["aborted"] = status["aborted"] or aborted()
         try:

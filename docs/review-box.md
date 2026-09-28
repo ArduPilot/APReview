@@ -761,3 +761,95 @@ on GitHub and cannot be rewritten. The path after the module name is carried
 over unchanged, so deep links and their `#pr<number>` anchors still land in the
 right place. The old files are deliberately left in place underneath; nothing
 serves them now, but they are the fallback if the new site has to be rebuilt.
+## Supervisor operations (opt-in)
+
+The legacy runner remains the default. A missing
+`$REVIEW_ROOT/etc/routing.json` means everything is old-owned; an invalid file
+stops admission. Copy `runner/etc/routing.json.example` only on first install.
+The three arrays list new-owned canonical repositories, labels and modes.
+Repository ownership applies to manual URLs, bare/qualified PR references,
+followup, author and all-label discovery. Query it without starting a run:
+
+```bash
+. "$HOME/review/bin/review-env.sh"
+python3 "$REVIEW_ROOT/bin/review-route.py" rsync
+python3 "$REVIEW_ROOT/bin/review-route.py" 'RsyncProject/rsync#123'
+"$REVIEW_ROOT/bin/run-reviewprs.sh" rsync --dry-run
+```
+
+The prompt's `review-route.py --filter old` step is mandatory for every
+candidate source, including manifests and board rows. New discovery applies
+the inverse ownership boundary in code. During the rsync canary, shared label
+and author report destinations remain old-owned and new cross-owner requests
+are deferred. Use `@author` for author mode. Do not transfer a mutable PR label
+as a substitute for the drained repository handoff.
+
+The shared lock file is `$REVIEW_DATA/locks`. **Never replace or unlink it**:
+ownership is on its inode, with separate OFD byte regions for PRs, pages,
+providers, accounts, reference refresh, runs, board and pause. A stale advisory
+header is not a stale kernel lock. New runs do not take
+`$REVIEW_ROOT/etc/reviewprs.lock`; old runs still do. `pause-runs.sh 60` takes
+both pause and the old lock (pause is immediate even while an old run finishes).
+`pause-runs.sh status` and `pause-runs.sh resume` inspect/signal the recorded
+process identity. Delivery continues while admission is paused.
+
+Before production, enable linger and test the real user-systemd backend:
+
+```bash
+loginctl enable-linger "$USER"
+loginctl show-user "$USER" -p Linger
+systemctl --user list-units 'review-attempt-*'
+```
+
+Guardian units run independently of controllers and own the PR/provider/account
+descriptors and delegated payload cgroups. A controller exit does not kill
+another run or its surviving attempts. `reap-orphans.sh` still kills the old
+runner's unregistered leaks by path, since nothing registers them, but skips
+anything the supervisor owns (a `review-attempt-` cgroup or `REVIEW_JOB_DIR`
+in the environment) and reconciles those by recorded identity instead. The
+path scan retires with the old runner. Keep new full reference clones under `REVIEW_NEW_REPOS`
+(default `$REVIEW_DATA/references`) while old mutable clones still exist.
+
+The wrapper freezes account homes (without secrets), model pins, effort,
+permissions, granted directories, endpoints, repositories, limits and admission
+deadline settings. Codex needs a model pin in the selected account's
+`config.toml` or `REVIEW_CODEX_MODEL`; its configured sandbox and effort are
+also frozen. Account leases are exclusive until concurrent-client testing
+justifies changing that policy. Exhausted quota defers inference but still
+starts recovery and drains deliveries. GitHub writes in the new adapter need
+explicit `REVIEW_GITHUB_WRITES=1` in `local.conf`; installation does not enable it.
+
+```bash
+"$REVIEW_ROOT/bin/run-reviewprs.sh" --resume "$REVIEW_DATA/runs/<run>"
+"$REVIEW_ROOT/bin/review-now.sh" --abort '<run>'
+"$REVIEW_ROOT/bin/review-outbox.sh"
+```
+
+Resume uses the frozen run, even after role symlinks or models change, and
+refuses a target transferred back to old ownership. Abort durably records the
+request before signalling verified boot/PID/start-time identities. It never
+waits for the run lock; after a bounded grace it escalates those identities and
+starts bounded cleanup. Accepted results and debts survive. Repeat abort or
+resume after a cleanup timeout. The outbox drain is bounded and does no
+inference; each entry uses its own frozen delivery settings.
+
+For the rsync canary, use the exact mirror, dry-run, handoff and rollback
+commands in [the migration section](supervisor-design.md#slice-three-commands-and-transfer-format).
+The handoff pauses both paths itself; do not first take a separate manual pause
+and then wait on your own pause. It waits for old jobs and new attempts/debts,
+imports previous sections, scrubs shared pages, publishes them under page
+locks and only then switches routing. Both directions are idempotent and have
+`--dry-run`. A pending publication journal must be completed before reversing.
+The new cron alternatives and drain are commented out in
+`runner/etc/crontab.reviewprs`; replace the appropriate old line explicitly,
+never enable both.
+
+When a run is stuck, start with `runs/<run>/summary.json`, then its
+`attempts/<attempt>/status.json`, `job.json`, `payload.log`, `launch.json` and
+the unit journal. The dashboard shows PR states, delivery debt, provider,
+heartbeat and session-attributed usage. A silent log or old heartbeat does
+not prove death: boot/PID/start time and cgroup state decide liveness. Check
+`outbox/*.json` for a dependency, `sending`/`uncertain` write or retry deadline;
+check receipts before retrying a post. Check account/quota and pool ownership
+before assuming a queued PR needs another run. Dashboard generation and rsync
+replacement share `page:review/DevCallReviews/runs.html`.

@@ -43,6 +43,29 @@ def usage_line(when, tokens):
 
 
 class Dashboard(unittest.TestCase):
+    def test_supervisor_summary_replaces_wrapper_log_row(self):
+        from pathlib import Path
+        directory = Path(self.home) / "review/data/runs/supervisor-one"
+        directory.mkdir(parents=True)
+        identity = dict(boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                        pid=os.getpid(), start=int(Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]))
+        (directory / "summary.json").write_text(json.dumps(dict(schema=1, **identity,
+            state="running", heartbeat=0, prs={"pr:owner/repo#1": {"review": "deferred"}},
+            delivery_deferred=["one-debt"])))
+        path = directory / "attempts/a"
+        path.mkdir(parents=True)
+        (path / "status.json").write_text(json.dumps(dict(schema=1, **identity, state="running",
+            attempt="a", provider="codex", heartbeat=0, session_id="session-one", usage={"input_tokens": 13})))
+        self.log("rsync", 'reviewprs mode=rsync host=t start=' + datetime.datetime.now().astimezone().isoformat() +
+                 '\nsupervisor run=' + str(directory) + '\n')
+        page = self.build()
+        self.assertEqual(self.state["runs"], [])
+        self.assertIn("supervisor-one", page)
+        self.assertIn("running: live", page)
+        self.assertIn("session-one", page)
+        self.assertIn("codex / running / live / 0", page)
+        self.assertIn("input_tokens", page)
+
     def setUp(self):
         self.home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.home, True)

@@ -27,6 +27,13 @@ if [ -z "${CLAUDE_CONFIG_DIR:-}" ] && [ -z "${REVIEW_ROLE:-}" ]; then
     [ -z "$PROBE_DIR" ] || export CLAUDE_CONFIG_DIR="$PROBE_DIR"
 fi
 
+# When called by a run, fd 10 already owns this account's region. Otherwise
+# acquire it on our own description before either auth status or /usage.
+if [ -f "$REVIEW_ROOT/bin/review-probe-lease.py" ] && {
+    [ "${REVIEW_PROBE_LEASED:-}" != 1 ] ||
+    ! python3 "$REVIEW_ROOT/bin/review-probe-lease.py" --verify; }; then
+    exec python3 "$REVIEW_ROOT/bin/review-probe-lease.py" "$0" "$@"
+fi
 clear_stale_oauth_lock >/dev/null 2>&1 || true
 
 # Which account this reading belongs to. Runs can use different subscriptions

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real OFD ownership, including exec and colliding stripes."""
 import hashlib
+import fcntl
 import os
 from pathlib import Path
 import signal
@@ -51,6 +52,15 @@ class ReviewLocks(unittest.TestCase):
         self.assertIsNone(try_lock(self.path, PR))
         first.close()
         self.assertIsNotNone(self.take(PR))
+
+    def test_pool_initializer_cannot_make_an_unrelated_run_busy(self):
+        self.take("pause").close()  # establish the immutable layout marker
+        with open(self.path, "r+b") as initializer:
+            fcntl.flock(initializer, fcntl.LOCK_EX)
+            self.assertIsNotNone(self.take("run:" + str(self.root / "independent")))
+            self.assertIsNotNone(self.take(PR))
+            # Permit claims still share the gate with pool resize.
+            self.assertIsNone(try_lock(self.path, "permit:claude:0"))
 
     def test_unknown_layout_refused(self):
         self.path.write_bytes(b"\0" * LAYOUT + b"RVW\x09")

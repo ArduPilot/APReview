@@ -37,16 +37,27 @@ MAILTO=""
 # expired, and the slot was lost for nothing. The next followup is 3h away
 # regardless, so a wait cannot let slots pile up.
 47 1,4,7,10,13,16,19,22 * * *   REVIEWPRS_LOCK_WAIT=7200 $HOME/review/bin/run-reviewprs.sh followup
+# After a drained transfer, replace the line above (do not run both):
+#47 1,4,7,10,13,16,19,22 * * *   REVIEW_EXPECT_PATH=new $HOME/review/bin/run-reviewprs.sh followup
 
 # The full label sweep, every 6 hours.
 13 0,6,12,18 * * *   $HOME/review/bin/run-reviewprs.sh all
+#13 0,6,12,18 * * *   REVIEW_EXPECT_PATH=new $HOME/review/bin/run-reviewprs.sh all
 
 # A separate project, reviewed once a day. It waits up to 2h for the lock rather
 # than skipping: a once-a-day job that loses the race does not run at all that day.
 25 5 * * *   REVIEWPRS_LOCK_WAIT=7200 $HOME/review/bin/run-reviewprs.sh rsync
+#25 5 * * *   REVIEW_EXPECT_PATH=new $HOME/review/bin/run-reviewprs.sh rsync
+
+# Outbox recovery is independent of inference admission and quota. Enable with
+# the first canary; each entry uses its frozen delivery configuration.
+#*/5 * * * *   $HOME/review/bin/review-outbox.sh >> $HOME/review/logs/outbox.log 2>&1
+# Board sweep remains the shared adapter below (no outer lock around a drain).
+#*/15 * * * *   $HOME/review/bin/project-sync.sh
 
 # Backstop reaper: catches anything a run left behind that its own exit trap
-# missed (e.g. a run killed outright). No-ops while a run is active.
+# missed (e.g. a run killed outright). Old-runner leaks by path, supervisor
+# attempts by recorded identity; no-ops while an old run is active.
 50 * * * *   $HOME/review/bin/reap-orphans.sh >> $HOME/review/logs/reap.log 2>&1
 
 # Sample Claude's real usage meter hourly, so the dashboard has a trace even

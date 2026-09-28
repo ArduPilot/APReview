@@ -85,7 +85,9 @@ class Supervisor:
         self.next_claim = {}
         self.backoff = {}
         self.config = read(self.directory / "run.json")
-        self.initial = (candidates, admission, wall, request, mode, pool_size, permit_timeout)
+        self.initial = (candidates, self.configuration.get("admission", admission), wall, request, mode,
+                        self.configuration.get("pool_size", pool_size),
+                        self.configuration.get("permit_timeout", permit_timeout))
         self.states = read(self.directory / "state.json", {})
         self.adapter = None
         self.discovery = None
@@ -127,6 +129,7 @@ class Supervisor:
             "pool_size": pool,
             "permit_timeout": permit_timeout,
             "wall": wall,
+            "wall_timeouts": dict(self.configuration.get("wall_timeouts", WALL)),
             "candidates": ordered,
             "stub": os.environ.get("REVIEW_AI_STUB") == "1",
             "configuration": self.configuration,
@@ -148,6 +151,26 @@ class Supervisor:
         )
 
     def project(self, candidate, phase, generation=None):
+        root = self.config["configuration"].get("routing_root")
+        pause = None
+        if root and candidate["pr"] not in self.owned:
+            # A controller can appear after a handoff's finite process scan.
+            # Its queued/discovery projections are admission too: hold a short
+            # shared fence while checking ownership and creating their intents.
+            pause = try_lock(self.store.locks, "pause", shared=True)
+            if pause is None:
+                return
+        try:
+            if root:
+                from review_routing import load, owner
+                if owner(load(root), candidate.get("mode", self.config["mode"]), candidate["repository"]) != "new":
+                    return
+            self._project(candidate, phase, generation)
+        finally:
+            if pause:
+                pause.close()
+
+    def _project(self, candidate, phase, generation=None):
         pr = candidate["pr"]
         patch = {
             "ticket": candidate.get("observation", self.config["observation"]),
@@ -156,7 +179,7 @@ class Supervisor:
             "candidate": candidate,
             "removed": candidate.get("classification") == "DROPPED",
         }
-        if generation:
+        if generation is not None:
             patch["generation"] = generation
         intents = []
         if phase != "discovery":
@@ -271,6 +294,12 @@ class Supervisor:
             lock.close()
 
     def claim_candidate(self, candidate):
+        routing_root = self.config["configuration"].get("routing_root")
+        if routing_root:
+            from review_routing import load, owner
+            if owner(load(routing_root), candidate.get("mode", self.config["mode"]), candidate["repository"]) != "new":
+                self.finish(candidate["pr"], "deferred", "ownership transferred")
+                return
         pr = candidate["pr"]
         state = self.states[pr]
         if time.time() < self.next_claim.get(pr, 0):
@@ -398,7 +427,7 @@ class Supervisor:
                 for k, v in os.environ.items()
                 if k.startswith("REVIEW_") or k in ("PATH", "HOME", "LANG", "PYTHONPATH")
             },
-            "wall_timeout": self.config["wall"] or WALL[kind],
+            "wall_timeout": self.config["wall"] or self.config.get("wall_timeouts", WALL)[kind],
             "pool_size": self.config["pool_size"],
             "permit_timeout": self.config["permit_timeout"],
             "command": [sys.executable, str(Path(__file__).with_name("review_stub.py"))],
@@ -789,6 +818,12 @@ class Supervisor:
             self.config = read(self.directory / "run.json")
             self.states = read(self.directory / "state.json", {})
             self.initialize()
+            atomic(self.directory / "controller.json", dict(identity(), schema=1, run=self.run_id))
+            atomic(self.directory / "summary.json", dict(
+                identity(), schema=1, run=self.run_id, state="recovering", heartbeat=time.time(),
+                prs=self.states, phases=self.config.get("phases", {}),
+                delivery_deferred=[entry["id"] for entry in self.startup_delivery],
+                attempts=[str(p.parent) for p in (self.directory / "attempts").glob("*/job.json")]))
             self.setup_adapters()
             os.environ["REVIEW_GUARDIAN_PLAIN"] = "1" if self.config["plain_guardians"] else "0"
             atomic(self.directory / "startup-runs.json", self.startup_runs)
@@ -852,6 +887,8 @@ class Supervisor:
                                 self.claim_candidate(candidate)
                             else:
                                 self.finish(pr, "deferred", "aborted")
+                        elif self.config["configuration"].get("quota", {}).get("paused") and not continuing:
+                            self.finish(pr, "deferred", "quota paused")
                         elif time.time() >= self.config["admission_deadline"] and not continuing:
                             self.finish(
                                 pr,

@@ -12,7 +12,7 @@
 # that a bare /reviewprs is the four-label run. Do not change this to default to
 # followup: the two differ by hours of work and the wrong one is silently plausible.
 #
-# All runs are serialised on one lock: the three label sub-runs share
+# Old-owned runs are serialised on one lock: the three label sub-runs share
 # devcall_pr_reviews.html, and followup reads what they publish, so two
 # concurrent runs would corrupt each other's output.
 #
@@ -27,10 +27,15 @@ set -u
 # to start a review and interrupt it - which on 2026-09-16 twice started one for
 # real, against an ArduPilot PR and then an rsync PR.
 DRY=0
+RESUME=""
+INTERACTIVE=""
 ARGS=""
-for a in "$@"; do
+while [ "$#" -gt 0 ]; do
+    a="$1"; shift
     case "$a" in
         --dry-run) DRY=1 ;;
+        --interactive) INTERACTIVE=--interactive ;;
+        --resume) RESUME="${1:?--resume needs a run directory}"; shift ;;
         *) ARGS="${ARGS:+$ARGS }$a" ;;
     esac
 done
@@ -50,6 +55,20 @@ esac
 
 . "$HOME/review/bin/review-env.sh"
 
+# Read ownership before touching any lock or account. Read it again after a
+# wait: a drained handoff may have transferred this target in the meantime.
+ROUTE=$(python3 "$REVIEW_ROOT/bin/review-route.py" "$MODE") || exit 1
+if [ -n "$RESUME" ]; then
+    # Recovery uses the recorded identities and settings, never today's role
+    # selection or quota preflight. It must remain available to drain debt.
+    exec python3 "$REVIEW_ROOT/bin/review-resume.py" "$RESUME" ${DRY:+--dry="$DRY"}
+fi
+if [ -n "${REVIEW_EXPECT_PATH:-}" ] && [ "$REVIEW_EXPECT_PATH" != "$ROUTE" ]; then
+    echo "refused: $MODE is $ROUTE-owned" >&2
+    exit 75
+fi
+QUOTA_BLOCKED=0
+
 # ArduPilot's venv carries pymavlink, empy, pexpect etc.
 [ -f "$HOME/venv-ardupilot/bin/activate" ] && . "$HOME/venv-ardupilot/bin/activate"
 
@@ -63,7 +82,7 @@ esac
 # is `review-auth.sh use claude default personal` and nothing else.
 ROLE=default
 case "$(printf %s "$MODE" | tr "[:upper:]" "[:lower:]")" in
-    rsync|rsyncproject/rsync\#*|https://github.com/rsyncproject/rsync/pull/*) ROLE=rsync ;;
+    rsync|rsync\#*|rsyncproject/rsync\#*|https://github.com/rsyncproject/rsync/pull/*|http://github.com/rsyncproject/rsync/pull/*) ROLE=rsync ;;
 esac
 # Every path sets or unsets both variables. Leaving an inherited value in place
 # was a hole: a CLAUDE_CONFIG_DIR already in the environment survived whenever the
@@ -157,19 +176,25 @@ fi
 WAIT="${REVIEWPRS_LOCK_WAIT:-0}"
 # Keep runs.html current no matter how this run ends - completed, skipped or
 # failed. A skipped slot is exactly the kind of thing the page should show.
-# On the way out: reap anything the run left running under $REVIEW_DATA, take a
-# closing usage reading, then refresh the dashboard. The reaper runs first and
+# On the way out: reconcile recorded dead attempts, take an old-path closing
+# usage reading, then refresh the dashboard. The reaper runs first and
 # its output goes to the run log, so a leak is visible where you would look for
 # it rather than discovered days later by the fans.
 LOCKED=0
 [ "$DRY" = 1 ] || \
 trap 'FR=""; [ "$LOCKED" = 1 ] && FR="--from-run"; \
       "$HOME/review/bin/reap-orphans.sh" $FR 2>&1; \
-      "$HOME/review/bin/claude-usage-probe.sh" end >/dev/null 2>&1; \
+      [ "$ROUTE" = old ] && "$HOME/review/bin/claude-usage-probe.sh" end >/dev/null 2>&1; \
       "$HOME/review/bin/publish-runs-page.sh" >/dev/null 2>&1 || true; \
       "$HOME/review/bin/project-sync.sh" >/dev/null 2>&1 || true' EXIT
 
-if [ "$DRY" = 1 ]; then
+python3 "$REVIEW_ROOT/bin/review-route.py" "$MODE" --expect "$ROUTE" >/dev/null || exit 75
+if [ "$ROUTE" = old ]; then
+    python3 "$REVIEW_ROOT/bin/review-admit.py" pause || exit 75
+fi
+if [ "$ROUTE" = new ]; then
+    echo "routing: supervisor (no global run lock)"
+elif [ "$DRY" = 1 ]; then
     flock -n 9 9>"$LOCK" && echo "  run lock: free" || echo "  run lock: held by a run in flight (a real run would wait or skip)"
 else
 exec 9>"$LOCK"
@@ -191,6 +216,8 @@ fi
 echo $$ >&9
 LOCKED=1
 fi
+[ "$ROUTE" = new ] || python3 "$REVIEW_ROOT/bin/review-admit.py" pause || exit 75
+python3 "$REVIEW_ROOT/bin/review-route.py" "$MODE" --expect "$ROUTE" >/dev/null || exit 75
 
 # Quota-directed selection, after the lock and not before it. A run that waited
 # two hours for the lock would otherwise have chosen on a reading taken before
@@ -227,7 +254,12 @@ select_by_quota() {
     sed 's/^/  /' "$err" 2>/dev/null; rm -f "$err"
     case "$rc" in
         0) ;;
-        3) echo "DEFERRED: no account with quota to spare for role $ROLE"
+        3) if [ "$ROUTE" = new ]; then
+               QUOTA_BLOCKED=3
+               echo "quota: inference deferred; supervisor will drain deliveries"
+               return 0
+           fi
+           echo "DEFERRED: no account with quota to spare for role $ROLE"
            echo "          nothing was started and nothing was spent; the next"
            echo "          scheduled run of this mode will try again"
            echo "finish=$(date -Is) status=deferred-no-quota"
@@ -287,6 +319,11 @@ cd "$REVIEW_ROOT/work" || {
     exit 1
 }
 
+# Separate descriptions, retained by this shell, fence preflight and the old
+# CLI against guardian account leases. New attempts acquire their own leases
+# after these close; neither credential cleanup nor probes may race a CLI.
+exec 10<>"$REVIEW_DATA/locks" 11<>"$REVIEW_DATA/locks"
+python3 "$REVIEW_ROOT/bin/review-admit.py" accounts "$CLAUDE_DIR" "$CODEX_DIR" || exit 75
 clear_stale_oauth_lock "$CLAUDE_DIR"
 
 # Which account is this? Two sources: the directory's own record, and the CLI.
@@ -569,10 +606,35 @@ if [ "$QRC" -ne 2 ] && [ -n "$QMSG" ]; then
     echo "usage probe: $QMSG"           # non-fatal, but never silent
 fi
 if [ "$QRC" -eq 2 ]; then
-    echo "SKIPPED: Claude quota exhausted -- ${QMSG:-weekly limit reached}"
-    echo "finish=$(date -Is) status=quota-exhausted"
-    exit 0
+    if [ "$ROUTE" = old ]; then
+        echo "SKIPPED: Claude quota exhausted -- ${QMSG:-weekly limit reached}"
+        echo "finish=$(date -Is) status=quota-exhausted"
+        exit 0
+    fi
+    echo "quota: inference paused; delivery remains enabled"
+    QUOTA_BLOCKED=2
 fi
+fi
+
+if [ "$ROUTE" = new ]; then
+    # Freeze the selected homes as well as models and permissions. A resume
+    # must not spend a different account just because a role link has moved.
+    CONFIG_ARGS=()
+    [ "$DRY" = 1 ] && CONFIG_ARGS+=(--dry-run)
+    RUN=$(python3 "$REVIEW_ROOT/bin/review-run-config.py" "$MODE" \
+        --tag "$TAG-$STAMP" --claude-home "$CLAUDE_DIR" --codex-home "$CODEX_DIR" \
+        --model "$CLAUDE_MODEL" --comments "$(review_comment_accounts)" \
+        --quota "$QUOTA_BLOCKED" --quota-message "$QMSG" "${CONFIG_ARGS[@]}") || exit 1
+    if [ "$DRY" = 1 ]; then
+        echo "  supervisor configuration: $RUN"
+        echo "DRY RUN: every pre-flight passed; nothing was started."
+        exit 0
+    fi
+    exec 10>&- 11>&-
+    echo "supervisor run=$RUN"
+    python3 "$REVIEW_ROOT/bin/review-supervisor.py" "$MODE" --data "$REVIEW_DATA" \
+        --run "$RUN" --config "$RUN/configuration.json" $INTERACTIVE
+    exit $?
 fi
 
 if [ "$DRY" = 1 ]; then
@@ -590,7 +652,9 @@ fi
 START=$(date +%s)
 # stream-json + the formatter gives one flushed line per event, so the log is
 # monitorable while the run is in flight rather than only at the end.
-# 9>&- closes the lock fd for claude and everything it spawns. Without it every
+# 9>&- closes the lock fd for claude and everything it spawns, and 10>&- 11>&-
+# do the same for the account leases: the shell keeps them for the run, and a
+# leaked SITL must not keep an account busy after the run. Without it every
 # descendant inherits fd 9, so a single orphaned child - and these runs do leave
 # stray sleep timers and codex agents - keeps the lock held long after the run
 # exits, making the *next* run skip for no reason. That silently cost the 07:47
@@ -624,8 +688,8 @@ stdbuf -oL -eL claude -p "$PROMPT" \
     --permission-mode auto \
     --add-dir "$REVIEW_ROOT" \
     --output-format stream-json \
-    --verbose 9>&- \
-  | stdbuf -oL python3 "$REVIEW_ROOT/bin/fmt-stream.py" 9>&-
+    --verbose 9>&- 10>&- 11>&- \
+  | stdbuf -oL python3 "$REVIEW_ROOT/bin/fmt-stream.py" 9>&- 10>&- 11>&-
 RC=${PIPESTATUS[0]}
 END=$(date +%s)
 

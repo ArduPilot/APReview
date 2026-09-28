@@ -138,7 +138,7 @@ class Publication:
         # rsync's normal temp-file + rename, never --inplace. One page per transfer.
         destination = publish.rstrip("/") + "/" + str(Path(path).parent) + "/"
         result = run_external(
-            ["rsync", "--mkpath", "--delay-updates", "--", str(source), destination],
+            ["rsync", "--mkpath", "--delay-updates", *endpoint.get("rsync_args", []), "--", str(source), destination],
             capture_output=True,
             timeout=timeout(deadline),
         )

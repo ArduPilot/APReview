@@ -110,6 +110,7 @@ def _prepare(store, path, job, config):
         command = [
             "codex",
             "exec",
+            "--json",
             "--skip-git-repo-check",
             "--model",
             provider["model"],

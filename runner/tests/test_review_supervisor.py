@@ -58,6 +58,63 @@ class ReviewSupervisor(unittest.TestCase):
             return records if sum(x["state"] == "running" for x in records) >= count else None
         return until(self, active)
 
+    def test_frozen_quota_blocks_inference_but_drains_accepted_delivery(self):
+        from review_fixtures import complete_claim
+        with try_lock(self.store.locks, PR) as lock:
+            claim = complete_claim(self.store, lock)
+            self.store.accept(lock, PR, claim, [dict(kind="publish", target="page:test/index.html")])
+        cfg = self.root / "configuration.json"
+        atomic(cfg, {"quota": {"paused": True}})
+        child, directory, log = self.start("quota", [candidate(2)], extra=["--config", str(cfg)])
+        summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"]["pr:owner/repo#2"].get("reason"), "quota paused")
+        self.assertFalse(list((directory / "attempts").glob("*/job.json")))
+        self.assertTrue(list((self.root / "receipts").glob("*.json")))
+        self.assertFalse(list((self.root / "outbox").glob("*.json")))
+
+    def test_routing_is_rechecked_before_a_new_claim(self):
+        from review_routing import DEFAULT
+        site = self.root / "site"
+        atomic(site / "etc/routing.json", DEFAULT)
+        cfg = self.root / "configuration.json"
+        atomic(cfg, {"routing_root": str(site)})
+        child, directory, log = self.start("transferred", [candidate(destinations=["page:test/index.html"])], extra=["--config", str(cfg)])
+        summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"][PR].get("reason"), "ownership transferred")
+        self.assertFalse(list((self.root / "operations").glob("*.json")))
+        self.assertFalse(list((directory / "attempts").glob("*/job.json")))
+
+    def test_paused_discovery_cannot_create_delivery_debt(self):
+        from review_routing import DEFAULT
+        site = self.root / "site"
+        atomic(site / "etc/routing.json", dict(DEFAULT, repositories=["owner/repo"]))
+        cfg = self.root / "configuration.json"
+        atomic(cfg, {"routing_root": str(site)})
+        with try_lock(self.store.locks, "pause"):
+            child, directory, log = self.start("pause-projection", [candidate(destinations=["page:test/index.html"])],
+                                               admission=.3, extra=["--config", str(cfg)])
+            summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"][PR].get("reason"), "paused")
+        self.assertFalse(list((self.root / "operations").glob("*.json")))
+
+    def test_imported_generation_is_retained_and_next_review_updates_its_page(self):
+        from review_handoff import import_manifest
+        from review_store import digest
+        pr = "pr:rsyncproject/rsync#1"
+        target = "page:review/RsyncReviews/index.html"
+        import_manifest(self.store, "rsyncproject/rsync",
+                        {pr: dict(head="a" * 10, section='<section id="pr1">previous section</section>')}, target, {})
+        row = dict(candidate(), repository="rsyncproject/rsync", head="d" * 40)
+        child, directory, log = self.start("after-import", [row])
+        summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"][pr]["review"], "accepted")
+        chain = list(self.store.chain(pr))
+        self.assertEqual([b["generation"] for b in chain], [1, 0])
+        self.assertTrue(chain[-1]["legacy"])
+        membership = read(self.root / "membership" / (digest(target) + ".json"))
+        self.assertEqual(membership[pr]["generation"], 1)
+        self.assertTrue(any(i["kind"] == "publish" and i["target"] == target for i in chain[0]["intents"]))
+
     def test_four_pass_order_and_independent_delivery_tracks(self):
         child, directory, log = self.start("one", [candidate(post=True, stub={"primary": {"sleep": 0.3}, "cold": {"sleep": 0.7}})])
         self.running(directory, 2)
