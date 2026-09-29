@@ -15,7 +15,7 @@ from review_lock import account_slot, canonical, permit, try_lock
 from review_schema import FILES, read_result
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, mkdir, read
 from review_discovery import Discovery, LABELS
-from review_github import GitHub
+from review_github import GitHub, RateLimited
 from review_delivery import Delivery
 from review_inference import prepare as prepare_inference
 
@@ -397,6 +397,13 @@ class Supervisor:
             fresh = self.prefetched_refresh(pr)
             if fresh is None:
                 fresh = self.discovery.refresh(candidate) if self.discovery else refresh(candidate)
+        except RateLimited as error:
+            # The allowance comes back within the hour: wait for it rather
+            # than defer the PR, which would lose it for this run.
+            self.owned.pop(pr).close()
+            self.next_claim[pr] = max(time.time() + 60, (error.reset or 0) + 5)
+            state["reason"] = "GitHub rate limit; retrying after the reset"
+            return
         except OSError as error:
             self.finish(pr, "deferred", str(error))
             return

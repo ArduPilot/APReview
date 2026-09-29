@@ -15,6 +15,14 @@ from urllib.parse import urlencode
 from review_store import atomic, digest, read
 
 
+class RateLimited(OSError):
+    """GitHub's hourly allowance is spent; it comes back at `reset`."""
+
+    def __init__(self, message, reset=None):
+        super().__init__(message)
+        self.reset = reset
+
+
 class GitHub:
     def __init__(self, directory=None, mode="live", accounts=None, writes=False):
         if mode not in ("live", "record", "replay"):
@@ -86,6 +94,8 @@ class GitHub:
             failure = None
             if result.returncode:
                 failure = result.stderr.strip()[:500]
+                if "rate limit exceeded" in failure.lower():
+                    raise RateLimited(failure, self.rate_reset(env))
                 if re.search(r"HTTP 4\d\d", failure) and "HTTP 429" not in failure:
                     raise OSError(failure)
             else:
@@ -102,6 +112,16 @@ class GitHub:
         if self.mode == "record":
             atomic(path, dict(request=request, response=response))
         return response
+
+    @staticmethod
+    def rate_reset(env):
+        """When the spent allowance returns; the rate endpoint itself is free."""
+        try:
+            out = subprocess.run(["gh", "api", "rate_limit", "--jq", ".resources.core.reset"],
+                                 capture_output=True, text=True, env=env, timeout=20)
+            return float(out.stdout.strip()) if out.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
 
     def pages(self, endpoint, *, field=None, account="read", deadline=None):
         out, seen = [], set()

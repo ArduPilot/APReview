@@ -342,6 +342,26 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.prefetch([dict(candidate(4), pr="pr:owner/repo#4")])
         self.assertIsNone(supervisor.prefetched_refresh("pr:owner/repo#4"))
 
+    def test_a_rate_limited_claim_waits_for_the_reset_instead_of_deferring(self):
+        from review_github import RateLimited
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.config = {"configuration": {}, "stub": False}
+        supervisor.store = self.store
+        supervisor.states = {PR: {"review": "pending", "candidate": dict(candidate(), pr=PR)}}
+        supervisor.owned, supervisor.next_claim, supervisor.backoff = {}, {}, {}
+        supervisor.discovery = Mock()
+        reset = time.time() + 600
+        supervisor.discovery.refresh.side_effect = RateLimited("API rate limit exceeded", reset)
+        supervisor.finish = Mock()
+        supervisor.claim_candidate(dict(candidate(), pr=PR))
+        supervisor.finish.assert_not_called()
+        self.assertGreaterEqual(supervisor.next_claim[PR], reset)
+        self.assertNotIn(PR, supervisor.owned)
+        # the PR's lock was given back for whoever needs it next
+        lock = try_lock(self.store.locks, PR)
+        self.assertIsNotNone(lock)
+        lock.close()
+
     def test_terminal_transition_between_poll_and_schedule_does_not_retry(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root

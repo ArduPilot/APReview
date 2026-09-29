@@ -148,6 +148,16 @@ class GithubTransport(unittest.TestCase):
                 GitHub().request("repos/o/r/pulls/1")
             self.assertEqual(run.call_count, 3)
 
+    def test_a_spent_allowance_is_its_own_error_with_the_reset_time(self):
+        from review_github import RateLimited
+        limited = Mock(returncode=1, stdout="", stderr="gh: API rate limit exceeded for user ID 1. (HTTP 403)")
+        with patch("subprocess.run", return_value=limited) as run, \
+                patch.object(GitHub, "rate_reset", staticmethod(lambda env: 1790000000.0)):
+            with self.assertRaises(RateLimited) as caught:
+                GitHub().request("repos/o/r/pulls/1")
+            self.assertEqual(caught.exception.reset, 1790000000.0)
+            self.assertEqual(run.call_count, 1)
+
     def test_project_identity_does_not_inherit_bot_token(self):
         with patch.dict(os.environ, GH_TOKEN="bot"), patch("subprocess.run") as run:
             run.return_value = Mock(returncode=0, stdout="{}")
