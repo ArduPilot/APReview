@@ -104,7 +104,7 @@ class Publication:
             if entry.get("retained")
             else None
         )
-        if re.fullmatch(r"DevCallReviews/\d{4}-\d{2}-\d{2}/devcall_pr_reviews.html", path):
+        if re.fullmatch(r"DevCallReviews/\d{4}[-_]\d{2}[-_]\d{2}/devcall_pr_reviews.html", path):
             date = path.split("/")[1]
             pages = {}
             revisions = {}
@@ -123,6 +123,7 @@ class Publication:
                     pages[match[2]] = dict(
                         path=match[2] + "/devcall_pr_reviews.html",
                         anchors=receipt.get("anchors", []),
+                        target=receipt["target"],
                     )
             raw = self.renderer.landing(date, pages)
         else:

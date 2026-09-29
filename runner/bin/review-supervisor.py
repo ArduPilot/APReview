@@ -675,7 +675,7 @@ class Supervisor:
         destinations = {}
         for intent in intents:
             match = re.fullmatch(
-                r"(page:[^/]+/DevCallReviews/\d{4}-\d{2}-\d{2})/[^/]+/devcall_pr_reviews.html",
+                r"(page:[^/]+/DevCallReviews/\d{4}[-_]\d{2}[-_]\d{2})/[^/]+/devcall_pr_reviews.html",
                 intent["target"],
             )
             if intent["kind"] == "publish" and match:

@@ -567,6 +567,30 @@ class RenderContract(unittest.TestCase):
         )
         self.assertIn(b"CI changed", self.renderer.render(page))
 
+    def test_the_dated_page_is_the_calls_full_report(self):
+        # people open DevCallReviews/<date>/devcall_pr_reviews.html for a call;
+        # it must hold the reviews, not a list of links
+        target = "page:test/DevCallReviews/2026_09_30/DevCallEU/devcall_pr_reviews.html"
+        self.store.merge_membership(target, {PR: dict(ticket=1, removed=False,
+                                                      generation=self.bundle["generation"])})
+        anchor = verify(self.renderer.render(target))["sections"]
+        self.assertEqual([x["pr"] for x in anchor], [PR])
+        pages = {"DevCallEU": dict(path="DevCallEU/devcall_pr_reviews.html", anchors=["pr1"], target=target),
+                 "AIReview": dict(path="AIReview/devcall_pr_reviews.html", anchors=["pr1", "pr9"])}
+        raw = self.renderer.landing("2026_09_30", pages)
+        self.assertEqual([x["pr"] for x in verify(raw)["sections"]], [PR])
+        self.assertIn(b'label="DevCallEU"', raw)
+        self.assertIn(b'href="AIReview/devcall_pr_reviews.html">AIReview', raw)
+        # an anchor only another label has is still routed there
+        self.assertIn(b'"pr9": "AIReview/devcall_pr_reviews.html"', raw)
+        self.assertNotIn(b'"pr1":', raw)
+
+    def test_dev_call_labels_archive_under_the_commands_dated_name(self):
+        from review_discovery import Discovery
+        discovery = Discovery(None, {"repos": {"repos": []}, "date": "2026-09-29"})
+        self.assertEqual(discovery.destination("DevCallEU")[1],
+                         "page:review/DevCallReviews/2026_09_30/DevCallEU/devcall_pr_reviews.html")
+
     def test_legacy_mapping_priority_retention_and_unavailable(self):
         pages = {
             label: dict(path=label + "/devcall_pr_reviews.html", anchors=["pr1"])

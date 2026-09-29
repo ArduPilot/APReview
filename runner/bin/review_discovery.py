@@ -266,7 +266,9 @@ class Discovery:
             call += timedelta(days=(weekday - today.weekday()) % 7)
         return [
             f"page:{endpoint}/DevCallReviews/{label}/devcall_pr_reviews.html",
-            f"page:{endpoint}/DevCallReviews/{call}/{label}/devcall_pr_reviews.html",
+            # the dated archive keeps the command's DevCallReviews/2026_09_30 name:
+            # it is the link handed out for a call and quoted in old comments
+            f"page:{endpoint}/DevCallReviews/{call:%Y_%m_%d}/{label}/devcall_pr_reviews.html",
         ]
 
     def board_rows(self):

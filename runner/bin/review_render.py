@@ -246,6 +246,9 @@ class Renderer:
         self.store = store
 
     def render(self, target, retained=None):
+        return seal(self.body(target, retained))
+
+    def body(self, target, retained=None):
         rows = read(self.store.root / "membership" / (digest(target) + ".json"), {})
         bundles, annotations, pending = [], {}, []
         if retained:
@@ -375,7 +378,7 @@ class Renderer:
         body += "<h2>Summary</h2>" + table(
             ["Verdict", "PR count"], [[(v, v), (n, str(n))] for v, n in totals.items()]
         )
-        return seal(body)
+        return body
 
     def landing(self, date, pages):
         """Caller owns the landing page region. Keep served old routes."""
@@ -396,12 +399,30 @@ class Renderer:
         for a in previous.keys() - routes.keys():
             routes[a] = None
         atomic(path, routes)
-        body = (
-            '<!-- reviewprs-manifest v1 heads="" -->\n<h1>Reviews for ' + escape(date) + "</h1>\n"
+        # The dated page is the call's report itself, as the command's was:
+        # the highest-priority label's full page, with the others linked and
+        # their anchors routed.
+        top = min(pages, key=lambda l: (priority.get(l, 3), l)) if pages else None
+        nav = "".join(
+            '<p>Also for ' + escape(date) + ': <a href="' + escape(page["path"]) + '">'
+            + escape(label) + "</a></p>\n"
+            for label, page in sorted(pages.items()) if label != top
         )
-        for label, page in sorted(pages.items()):
-            body += '<p><a href="' + escape(page["path"]) + '">' + escape(label) + "</a></p>\n"
+        if top and pages[top].get("target"):
+            body = self.body(pages[top]["target"])
+            head = body.index("</p>\n", body.index("<h1>")) + len("</p>\n")
+            body = body[:head] + nav + body[head:]
+            local = set(pages[top]["anchors"])
+        else:
+            body = (
+                '<!-- reviewprs-manifest v1 heads="" -->\n<h1>Reviews for ' + escape(date) + "</h1>\n"
+            )
+            for label, page in sorted(pages.items()):
+                body += '<p><a href="' + escape(page["path"]) + '">' + escape(label) + "</a></p>\n"
+            local = set()
         for a, target in sorted(routes.items()):
+            if a in local:
+                continue
             body += '<p id="' + escape(a) + '">'
             body += (
                 ('<a href="' + escape(target + "#" + a) + '">Open ' + escape(a) + "</a>")
@@ -409,6 +430,7 @@ class Renderer:
                 else "Review unavailable: " + escape(a)
             )
             body += "</p>\n"
+        routes = {a: t for a, t in routes.items() if a not in local}
         mapping = json.dumps(routes, sort_keys=True).replace("<", "\\u003c")
         body += (
             "<script>const routes="
