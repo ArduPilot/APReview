@@ -148,23 +148,32 @@ def main():
     job = json.loads((Path(os.environ["REVIEW_JOB_DIR"]) / "job.json").read_text())
     os.chdir(job["worktree"])
     # Prefetch dependencies before any test enters an isolated network namespace.
-    if (Path(job["worktree"]) / ".gitmodules").exists():
-        command = [
-            "git",
-            "-c",
-            "submodule.alternateLocation=superproject",
-            "-c",
-            "submodule.alternateErrorStrategy=info",
-            "submodule",
-            "update",
-            "--init",
-            "--jobs",
-            "8",
-        ]
-        if job["repository"] == "ardupilot/ardupilot":
-            command += ["--recursive"]
-        subprocess.run(command, check=True, timeout=120)
+    init_submodules(job["worktree"], job["repository"] == "ardupilot/ardupilot")
     os.execvpe(job["cli_command"][0], job["cli_command"], os.environ)
+
+
+def init_submodules(worktree, recursive):
+    if not (Path(worktree) / ".gitmodules").exists():
+        return
+    # Worktrees share the reference clone's config. A reviewer once pointed
+    # every submodule URL at its own worktree; when that worktree went, every
+    # later attempt failed here. Put the URLs back from .gitmodules first.
+    subprocess.run(["git", "submodule", "sync", "--quiet"], cwd=worktree, check=True, timeout=60)
+    command = [
+        "git",
+        "-c",
+        "submodule.alternateLocation=superproject",
+        "-c",
+        "submodule.alternateErrorStrategy=info",
+        "submodule",
+        "update",
+        "--init",
+        "--jobs",
+        "8",
+    ]
+    if recursive:
+        command += ["--recursive"]
+    subprocess.run(command, cwd=worktree, check=True, timeout=120)
 
 
 if __name__ == "__main__":

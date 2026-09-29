@@ -416,6 +416,34 @@ class PatchHistory(unittest.TestCase):
             normal_patch("index 123..456 100644\n@@ -3,2 +3,2 @@ fn\n+a\n"),
         )
 
+    def test_a_submodule_url_left_pointing_at_a_dead_worktree_is_repaired(self):
+        import subprocess
+        from review_inference import init_submodules
+        env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_ALLOW_PROTOCOL="file",
+                   GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        run = lambda *a, cwd=self.root: subprocess.run(a, cwd=cwd, check=True, capture_output=True, env=env)
+        import shutil
+        sub = self.root.parent / (self.root.name + "-sub")
+        worktree = self.root.parent / (self.root.name + "-wt")
+        for path in (sub, worktree):
+            self.addCleanup(shutil.rmtree, path, True)
+        sub.mkdir()
+        run("git", "init", "-q", cwd=sub)
+        (sub / "f").write_text("x")
+        run("git", "add", ".", cwd=sub)
+        run("git", "commit", "-qm", "s", cwd=sub)
+        run("git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "modules/sub")
+        run("git", "commit", "-qm", "with submodule")
+        run("git", "worktree", "add", "-q", "--detach", str(worktree))
+        # what the reviewer did: the shared config now names a path that is gone
+        run("git", "config", "submodule.modules/sub.url", str(self.root.parent / "gone"))
+        os.environ["GIT_ALLOW_PROTOCOL"] = "file"
+        self.addCleanup(os.environ.pop, "GIT_ALLOW_PROTOCOL", None)
+        init_submodules(worktree, False)
+        self.assertTrue((worktree / "modules/sub/f").exists())
+        url = run("git", "config", "submodule.modules/sub.url").stdout.decode().strip()
+        self.assertEqual(url, str(sub))
+
     def test_an_abbreviated_told_head_is_resolved_not_fetched_by_prefix(self):
         from unittest.mock import Mock
         (self.root / "text").write_text("one\n")
