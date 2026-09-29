@@ -467,6 +467,10 @@ class Supervisor:
                 return True
             key = "account:%s/%s" % (provider, settings["account"])
             cap = 1 if settings.get("exclusive_account") else settings.get("account_slots", 8)
+        # The provider's permit pool bounds it too: primary and cold passes
+        # leave slot 0 for the passes that finish a PR.
+        pool = int(config.get("pool_size", 8)) if config else 8
+        cap = min(cap, max(1, pool - 1) if kind in ("primary", "cold") else pool)
         # A slot probe is a point in time: one scheduling pass must not launch
         # more passes than there are slots, all to wait out the lease.
         live = 0
