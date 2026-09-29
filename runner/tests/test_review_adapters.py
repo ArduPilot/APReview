@@ -416,6 +416,18 @@ class PatchHistory(unittest.TestCase):
             normal_patch("index 123..456 100644\n@@ -3,2 +3,2 @@ fn\n+a\n"),
         )
 
+    def test_an_abbreviated_told_head_is_resolved_not_fetched_by_prefix(self):
+        from unittest.mock import Mock
+        (self.root / "text").write_text("one\n")
+        told = self.commit("told")
+        discovery = Discovery(Mock(), {"repos": {"repos": []}})
+        # present locally: expanded without asking anyone
+        self.assertEqual(discovery.told_commit(self.root, "owner/repo", told[:10]), told)
+        discovery.gh.request.assert_not_called()
+        # gone: the rebase shortcut is lost, the review is not deferred
+        discovery.gh.request.side_effect = OSError("404 No commit found")
+        self.assertIsNone(discovery.told_commit(self.root, "owner/repo", "0123456789"))
+
     def test_rebase_is_skipped_but_binary_regeneration_is_not(self):
         (self.root / "text").write_text("one\n" + "context\n" * 10 + "old\n")
         (self.root / "binary").write_bytes(b"\x00base")

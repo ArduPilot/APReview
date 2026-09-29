@@ -553,10 +553,10 @@ class Discovery:
             if self.store and lock is None:
                 raise TimeoutError("refresh busy")
             # Fetches add objects/refs; they never check out the mutable base.
-            for revision in dict.fromkeys(
-                [candidate["head"], candidate["base"], *([old] if old else [])]
-            ):
+            for revision in dict.fromkeys([candidate["head"], candidate["base"]]):
                 git(clone, "fetch", "--no-tags", "origin", revision)
+            if old:
+                old = self.told_commit(clone, candidate["repository"], old)
             candidate["merge_base"] = git(clone, "merge-base", candidate["base"], candidate["head"])
             files = [
                 x["filename"]
@@ -572,6 +572,22 @@ class Discovery:
         finally:
             if lock:
                 lock.close()
+
+    def told_commit(self, clone, repository, told):
+        """The full commit a comment's told head names, fetched, or None.
+        Comments carry ten hex digits and a server will not fetch by
+        abbreviation. A told head that is gone (force-pushed and collected)
+        only loses the rebase-only shortcut; it is no reason to defer."""
+        try:
+            return git(clone, "rev-parse", "--verify", "--quiet", told + "^{commit}")
+        except OSError:
+            pass
+        try:
+            full = self.gh.request(f"repos/{repository}/commits/{told}")["sha"]
+            git(clone, "fetch", "--no-tags", "origin", full)
+            return full
+        except (OSError, KeyError, TypeError, subprocess.TimeoutExpired):
+            return None
 
     def refresh(self, candidate):
         ticket = self.store.ticket() if self.store else 0
