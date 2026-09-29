@@ -16,7 +16,7 @@ from review_control import abort, reap, signal_identity
 from review_dashboard import render, summaries
 from review_discovery import Discovery
 from review_guardian import identity
-from review_handoff import cutover, handoff, import_manifest, pending
+from review_handoff import cutover, handoff, import_manifest, pending, refresh_mirror
 from review_lock import try_lock
 from review_routing import DEFAULT, candidates, load, route, validate
 from review_store import Store, atomic, digest, read
@@ -359,6 +359,17 @@ class Integration(unittest.TestCase):
         self.assertNotIn('<div class="pr new"', page)
         self.assertIn("<h3>one</h3>", page)
         self.assertFalse(pending(self.data))
+
+    def test_mirror_refresh_copies_a_plain_tree_whole(self):
+        publish = self.root / "publish"
+        (publish / "DevCallReviews").mkdir(parents=True)
+        (publish / "DevCallReviews/a.html").write_text("a")
+        (publish / "UserReviews").mkdir()
+        (publish / "UserReviews/b.html").write_text("b")
+        mirror = self.root / "mirror"
+        refresh_mirror(str(publish), [], mirror, time.monotonic() + 30)
+        self.assertEqual((mirror / "DevCallReviews/a.html").read_text(), "a")
+        self.assertEqual((mirror / "UserReviews/b.html").read_text(), "b")
 
     def test_full_cutover_refuses_a_key_it_cannot_place_or_a_missing_section(self):
         mirror = self.shared_mirror()

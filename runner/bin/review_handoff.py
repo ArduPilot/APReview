@@ -266,8 +266,7 @@ def cutover(root, data, mirror, *, dry=False, wait=300, publish=None, rsync_args
         routing = load(root)
         if publish:
             # Only after draining: an old run may have published until now.
-            subprocess.run(["rsync", "-a", *rsync_args, "--", publish.rstrip('/') + '/', str(mirror) + '/'],
-                           check=True, timeout=max(.1, deadline - time.monotonic()))
+            refresh_mirror(publish, rsync_args, mirror, deadline)
             imports, problems = scan_shared(mirror, parser)
             if problems:
                 raise ValueError("cannot import: " + "; ".join(problems[:20]))
@@ -312,6 +311,20 @@ def scan_mirror(repository, mirror):
         if keys:
             shared.append((path, strip_rows(raw, keys)))
     return source, rows, shared
+
+
+MODULES = ("DevCallReviews", "UserReviews", "RsyncReviews")
+
+
+def refresh_mirror(publish, rsync_args, mirror, deadline):
+    """A publishing host that is an rsync daemon has no root to copy; its
+    modules are the top-level trees. Anything else mirrors as one tree."""
+    sources = ([(publish.rstrip("/") + "/" + m + "/", mirror / m) for m in MODULES]
+               if publish.startswith("rsync://") else [(publish.rstrip("/") + "/", mirror)])
+    for source, dest in sources:
+        dest.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["rsync", "-a", *rsync_args, "--", source, str(dest) + "/"],
+                       check=True, timeout=max(.1, deadline - time.monotonic()))
 
 
 def handoff(root, data, repository, direction, mirror, *, dry=False, wait=300,
@@ -364,8 +377,7 @@ def handoff(root, data, repository, direction, mirror, *, dry=False, wait=300,
         if publish:
             # Refresh only after draining: a mirror fetched while an old run
             # was still publishing could import an obsolete head.
-            subprocess.run(["rsync", "-a", *rsync_args, "--", publish.rstrip('/') + '/', str(mirror) + '/'],
-                           check=True, timeout=max(.1, deadline - time.monotonic()))
+            refresh_mirror(publish, rsync_args, mirror, deadline)
         source, rows, shared = scan_mirror(repository, mirror)
         journal = data / "handoff" / repository / "pending.json"
         previous = read(journal)
