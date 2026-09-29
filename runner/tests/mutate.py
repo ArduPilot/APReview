@@ -512,7 +512,7 @@ M = [
  # --- slice three review -----------------------------------------------------------
  ('leasefds', RUN, '    --verbose 9>&- 10>&- 11>&- \\', '    --verbose 9>&- \\'),
  ('reapscan', "runner/bin/reap-orphans.sh", '    [ $hit -eq 1 ] && candidates="$candidates $p"', '    false && candidates="$candidates $p"'),
- ('reapkeepsjob', "runner/bin/reap-orphans.sh", '    tr \'\\0\' \'\\n\' < "$d/environ" 2>/dev/null | grep -q \'^REVIEW_JOB_DIR=\' && continue\n', ''),
+ ('reapkeepsjob', "runner/bin/reap-orphans.sh", '    [ -r "$d/environ" ] && tr \'\\0\' \'\\n\' < "$d/environ" | grep -q \'^REVIEW_JOB_DIR=\' && continue\n', ''),
  ('manifestlegacy', "runner/bin/review_discovery.py", '        start = re.search(r\'<div class="pr" id="pr\' + re.escape(anchor) + r\'">\', html)', '        start = None'),
 ]
 

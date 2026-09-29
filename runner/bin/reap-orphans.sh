@@ -50,7 +50,7 @@ for d in /proc/[0-9]*; do
     echo "$comm" | grep -qE "$SAFE_RE" && continue
     # supervisor-owned: a guardian's unit cgroup, or a payload's job directory
     grep -q "review-attempt-" "$d/cgroup" 2>/dev/null && continue
-    tr '\0' '\n' < "$d/environ" 2>/dev/null | grep -q '^REVIEW_JOB_DIR=' && continue
+    [ -r "$d/environ" ] && tr '\0' '\n' < "$d/environ" | grep -q '^REVIEW_JOB_DIR=' && continue
     case "$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)" in
         *review-supervisor.py*|*review-guardian.py*|*review-drain.py*|*review_board_sweep.py*|*review-resume.py*) continue ;;
     esac
