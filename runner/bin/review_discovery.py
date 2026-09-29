@@ -414,7 +414,8 @@ class Discovery:
         elif mode == "rsync":
             destinations += [f"page:{endpoint}/RsyncReviews/index.html"]
         elif mode == "pr":
-            destinations += [f"page:{endpoint}/PRReviews/{repo}/{number}/index.html"]
+            prefix = self.config.get("retained_prefix", "PRReviews")
+            destinations += [f"page:{endpoint}/{prefix}/{repo}/{number}/index.html"]
         elif mode == "followup":
             destinations += [
                 f"page:{endpoint}/DevCallReviews/followups/{self.config['stamp']}/devcall_pr_reviews.html"

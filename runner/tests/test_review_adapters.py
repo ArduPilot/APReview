@@ -346,6 +346,13 @@ class DiscoveryContract(unittest.TestCase):
         )
         self.assertEqual(c["classification"], "DROPPED")
 
+    def test_pr_mode_page_lives_under_the_configured_retained_prefix(self):
+        self.assertIn("page:review/PRReviews/owner/repo/1/index.html",
+                      self.discover.candidate(PR, "pr")["destinations"])
+        self.config["retained_prefix"] = "RsyncReviews/PRReviews"
+        self.assertIn("page:review/RsyncReviews/PRReviews/owner/repo/1/index.html",
+                      self.discover.candidate(PR, "pr")["destinations"])
+
     def test_failed_diff_defers_instead_of_claiming_coverage(self):
         self.discover.snapshot_diff.side_effect = OSError("no object")
         c = self.discover.candidate(PR, "pr")
