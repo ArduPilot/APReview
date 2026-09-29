@@ -825,6 +825,19 @@ explicit `REVIEW_GITHUB_WRITES=1` in `local.conf`; installation does not enable 
 "$REVIEW_ROOT/bin/review-outbox.sh"
 ```
 
+A publish entry whose page can never exist again (a renamed prefix, a missing
+rsync module) exhausts its attempts and then blocks the comment behind it,
+because verification repairs the same intent. Take the PR off that page:
+
+```bash
+python3 "$REVIEW_ROOT/bin/review-retire.py" --data "$REVIEW_DATA" \
+    --reason 'PRReviews module never existed' \
+    'page:review/PRReviews/ardupilot/mavproxy/1764/index.html' 'pr:ardupilot/mavproxy#1764'
+```
+
+That marks the membership row removed and writes the superseded receipts
+delivery would have written, so the next drain posts the comment.
+
 Resume uses the frozen run, even after role symlinks or models change, and
 refuses a target transferred back to old ownership. Abort durably records the
 request before signalling verified boot/PID/start-time identities. It never

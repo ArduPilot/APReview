@@ -5,9 +5,9 @@ from pathlib import Path
 import subprocess
 import unittest
 
-from review_fixtures import PR, complete_claim, python, workspace
+from review_fixtures import BIN, PR, complete_claim, python, workspace
 from review_lock import try_lock
-from review_store import Store, StubAdapter, atomic, delivery_id, read
+from review_store import Store, StubAdapter, atomic, delivery_id, digest, read
 
 
 class Crash(Exception):
@@ -92,6 +92,42 @@ class ReviewStore(unittest.TestCase):
         old = delivery_id(PR, 1, "comment", PR)
         self.assertEqual(read(self.root / "receipts" / (old + ".json"))["state"], "superseded")
         self.assertEqual(len(list((self.root / "outbox").glob("*.json"))), 5)
+
+    def test_retiring_a_page_supersedes_its_debts_and_frees_the_comment(self):
+        self.accept()
+        outbox = self.root / "outbox"
+        comment = delivery_id(PR, 1, "comment", PR)
+        ident = delivery_id(PR, 1, "publish", "page:end/a")
+        entry = read(outbox / (ident + ".json"))
+        entry.update(state="uncertain", failures=5, error="rsync failed: Unknown module")
+        atomic(outbox / (ident + ".json"), entry)
+        # the comment waits on the page, and a run-journal republish of the
+        # same page is keyed by operation rather than generation
+        waiting = read(outbox / (comment + ".json"))
+        waiting["dependencies"] = [ident]
+        atomic(outbox / (comment + ".json"), waiting)
+        op = dict(entry, id=delivery_id(PR, "op", "publish", "page:end/a"), generation="op", gate="page")
+        atomic(outbox / (op["id"] + ".json"), op)
+        self.lock.close()
+        self.assertFalse(self.store.drain(StubAdapter(self.root)) == [])
+        self.assertTrue((outbox / (comment + ".json")).exists())
+        child = python((BIN / "review-retire.py").read_text(), "--data", self.root,
+                       "--reason", "module gone", "page:end/a", PR,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, err = child.communicate(timeout=30)
+        self.assertEqual(child.returncode, 0, err)
+        for retired in (ident, op["id"]):
+            receipt = read(self.root / "receipts" / (retired + ".json"))
+            self.assertEqual((receipt["state"], receipt["reason"]), ("superseded", "module gone"))
+            self.assertFalse((outbox / (retired + ".json")).exists())
+        rows = read(self.root / "membership" / (digest("page:end/a") + ".json"))
+        self.assertTrue(rows[PR]["removed"])
+        lock = try_lock(self.store.locks, PR)
+        with lock:
+            self.store.rebuild(lock, PR)
+        self.assertFalse((outbox / (ident + ".json")).exists())
+        self.store.drain(StubAdapter(self.root))
+        self.assertEqual(read(self.root / "receipts" / (comment + ".json"))["state"], "posted")
 
     def test_receipt_wins_at_each_receipt_boundary(self):
         self.accept()
