@@ -125,6 +125,29 @@ class GithubTransport(unittest.TestCase):
             gh.pages("comments")
         self.assertLess(gh.request.call_count, 4)
 
+    def test_a_cut_reply_to_a_read_is_tried_again_but_a_write_is_not(self):
+        cut = Mock(returncode=1, stdout="", stderr="unexpected end of JSON input")
+        good = Mock(returncode=0, stdout='{"ok": 1}', stderr="")
+        with patch("subprocess.run", side_effect=[cut, good]) as run, patch("time.sleep"):
+            self.assertEqual(GitHub().request("repos/o/r/pulls/1"), {"ok": 1})
+            self.assertEqual(run.call_count, 2)
+        # a request GitHub refused is not retried
+        missing = Mock(returncode=1, stdout="", stderr="gh: Not Found (HTTP 404)")
+        with patch("subprocess.run", side_effect=[missing, good]) as run, patch("time.sleep"):
+            with self.assertRaises(OSError):
+                GitHub().request("repos/o/r/pulls/1")
+            self.assertEqual(run.call_count, 1)
+        # a write may have landed; it is never repeated
+        with patch("subprocess.run", side_effect=[cut, good]) as run, patch("time.sleep"):
+            with self.assertRaises(OSError):
+                GitHub(writes=True).request("repos/o/r/issues/1/comments", method="POST", payload={"body": "x"})
+            self.assertEqual(run.call_count, 1)
+        # three cut replies in a row are an error, not a hang
+        with patch("subprocess.run", side_effect=[cut, cut, cut, good]) as run, patch("time.sleep"):
+            with self.assertRaises(OSError):
+                GitHub().request("repos/o/r/pulls/1")
+            self.assertEqual(run.call_count, 3)
+
     def test_project_identity_does_not_inherit_bot_token(self):
         with patch.dict(os.environ, GH_TOKEN="bot"), patch("subprocess.run") as run:
             run.return_value = Mock(returncode=0, stdout="{}")
@@ -205,6 +228,20 @@ class DiscoveryContract(unittest.TestCase):
         self.gh.thread.reset_mock()
         self.discover.candidate(PR, "followup", manifests)
         self.gh.thread.assert_called_once()
+
+    def test_one_pr_github_will_not_describe_is_skipped_not_the_run(self):
+        self.discover.search = lambda mode, swept: {"pr:owner/repo#1", "pr:owner/repo#2"}
+        self.discover.swept = lambda: {"owner/repo": {}}
+        self.discover.manifests = lambda mode=None: {}
+        self.config["routing"] = dict(schema=1, repositories=[], labels=[], modes=["all"])
+        def request(endpoint, **kw):
+            if endpoint.endswith("/pulls/2"):
+                raise OSError("unexpected end of JSON input")
+            return dict(self.meta, number=1) if "/pulls/" in endpoint else {"statuses": []}
+        self.gh.request.side_effect = request
+        rows = self.discover.discover("AIReview")
+        self.assertEqual([r["pr"] for r in rows], [PR])
+        self.assertEqual(self.discover.skipped, ["pr:owner/repo#2"])
 
     def test_candidates_are_discovered_in_parallel_and_returned_in_order(self):
         import threading, time

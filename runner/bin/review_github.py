@@ -5,6 +5,7 @@ Writes require explicit construction with writes=True; discovery cannot write.
 """
 
 import json
+import re
 import os
 from pathlib import Path
 import subprocess
@@ -61,23 +62,41 @@ class GitHub:
             command += ["-H", "Accept: application/vnd.github.raw+json"]
         if payload is not None:
             command += ["--input", "-"]
-        try:
-            result = subprocess.run(
-                command,
-                input=json.dumps(payload) if payload else None,
-                capture_output=True,
-                text=True,
-                env=env,
-                timeout=timeout,
-            )
-        except subprocess.TimeoutExpired as error:
-            raise TimeoutError("GitHub request timed out") from error
-        if result.returncode:
-            raise OSError(result.stderr.strip()[:500])
-        try:
-            response = result.stdout if text else json.loads(result.stdout)
-        except ValueError as error:
-            raise OSError("invalid GitHub JSON") from error
+        # A read that fails for a reason other than the request itself (a cut
+        # reply, a 5xx, a dropped connection) is tried again; a write never is,
+        # since it may have taken effect.
+        for attempt in range(3 if reading else 1):
+            if attempt:
+                time.sleep(2 * attempt)
+                if deadline and time.monotonic() >= deadline:
+                    raise TimeoutError("GitHub deadline")
+            try:
+                result = subprocess.run(
+                    command,
+                    input=json.dumps(payload) if payload else None,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=timeout,
+                )
+            except subprocess.TimeoutExpired as error:
+                if attempt < (2 if reading else 0):
+                    continue
+                raise TimeoutError("GitHub request timed out") from error
+            failure = None
+            if result.returncode:
+                failure = result.stderr.strip()[:500]
+                if re.search(r"HTTP 4\d\d", failure) and "HTTP 429" not in failure:
+                    raise OSError(failure)
+            else:
+                try:
+                    response = result.stdout if text else json.loads(result.stdout)
+                except ValueError:
+                    failure = "invalid GitHub JSON"
+            if failure is None:
+                break
+            if attempt == (2 if reading else 0):
+                raise OSError(failure)
         if isinstance(response, dict) and response.get("errors"):
             raise OSError("GitHub returned partial data with errors")
         if self.mode == "record":

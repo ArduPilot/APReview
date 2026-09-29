@@ -376,8 +376,20 @@ class Discovery:
         # Each candidate is a handful of independent GitHub round trips; one
         # at a time, 170 PRs took a quarter of an hour.
         workers = int(self.config.get("discovery_workers", 8))
+
+        def one(pr):
+            # one PR GitHub will not describe costs that PR this run, not
+            # the run: it keeps its rows and the next run picks it up
+            try:
+                return self.candidate(pr, mode, manifests)
+            except (OSError, TimeoutError, KeyError, subprocess.TimeoutExpired) as error:
+                print("discovery: skipping %s: %s" % (pr, str(error)[:200]), file=sys.stderr)
+                self.skipped.append(pr)
+                return None
+
+        self.skipped = []
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-            out = list(pool.map(lambda pr: self.candidate(pr, mode, manifests), wanted))
+            out = [c for c in pool.map(one, wanted) if c is not None]
         for candidate in out:
             candidate["observation"] = ticket
         if mode == "followup" and not any(c["classification"] == "REVIEW" for c in out):
