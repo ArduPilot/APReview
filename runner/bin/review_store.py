@@ -438,9 +438,13 @@ class Store:
         self.last_recovered = done
         return pending
 
+    # Dependencies first, so a bounded pass over a large outbox is not a
+    # window of publishes all waiting on projections outside it.
+    KIND_ORDER = {"projection": 0, "publish": 1, "comment": 2, "note": 2, "annotation": 3, "deprecate": 3, "board": 4}
+
     def delivery_snapshot(self, limit=100):
         snapshot = sorted((read(p) for p in (self.root / "outbox").glob("*.json")),
-                          key=lambda x: (x["next_attempt"], x["id"]))
+                          key=lambda x: (x["next_attempt"], self.KIND_ORDER.get(x["kind"], 5), x["id"]))
         return [x for x in snapshot if x["next_attempt"] <= time.time() and x["failures"] < 5][:limit]
 
     SETTLED = ("published", "posted", "not_applicable", "synced", "held", "superseded")

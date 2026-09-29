@@ -165,6 +165,22 @@ class ReviewStore(unittest.TestCase):
         self.assertTrue((outbox / "pub9.json").exists())
         self.assertFalse((self.root / "receipts" / "pub9.json").exists())
 
+    def test_a_bounded_pass_takes_projections_before_the_publishes_that_wait_on_them(self):
+        target = "page:end/shared"
+        outbox = self.root / "outbox"
+        # ids chosen so every publish sorts before every projection by id alone
+        for n in range(1, 6):
+            atomic(outbox / f"zzz-proj{n}.json", dict(id=f"zzz-proj{n}", pr=f"pr:owner/repo#{n}", generation=f"op{n}",
+                                                     kind="projection", target=target, gate="page",
+                                                     patches={f"pr:owner/repo#{n}": {"ticket": n, "removed": False}},
+                                                     state="owed", failures=0, next_attempt=0))
+            atomic(outbox / f"aaa-pub{n}.json", dict(id=f"aaa-pub{n}", pr=f"pr:owner/repo#{n}", generation=f"op{n}",
+                                                    kind="publish", target=target, gate="page",
+                                                    dependencies=[f"zzz-proj{n}"], state="owed", failures=0, next_attempt=0))
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root), limit=6)
+        self.assertEqual(list((self.root / "outbox").glob("*.json")), [])
+
     def test_receipt_wins_at_each_receipt_boundary(self):
         self.accept()
         entry = read(next((self.root / "outbox").glob("*.json")))
