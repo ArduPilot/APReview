@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 BIN = os.path.join(os.path.dirname(HERE), "bin")
@@ -147,6 +148,20 @@ class Quota(unittest.TestCase):
         self.assertEqual(r.get("plan"), "pro")
         self.assertIs(r.get("ordinary_usage_allowed"), True)
         self.assertIs(r.get("has_credits"), False)
+
+    def test_reading_the_clis_own_home_does_not_inherit_another_accounts_variable(self):
+        # the runner exports CODEX_HOME for the account it selected; a read of
+        # the personal account (the CLI's own ~/.codex) inherited it and
+        # reported codex-work's meter, so a spent first account hid a live one
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("quota_mod", QUOTA)
+        q = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(q)
+        own = os.path.join(q.HOME, ".codex")
+        other = os.path.join(self.home, "elsewhere")
+        with patch.dict(os.environ, {"CODEX_HOME": other}):
+            self.assertNotIn("CODEX_HOME", q._child_env("codex", own))
+            self.assertEqual(q._child_env("codex", other)["CODEX_HOME"], other)
 
     # --- what it must not do -------------------------------------------------
     def test_a_cli_that_fails_is_recorded_not_raised(self):

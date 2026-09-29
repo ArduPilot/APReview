@@ -517,6 +517,7 @@ M = [
  ('manifesthyphen', "runner/bin/review_discovery.py", '                prefix, number = key.rsplit("-", 1) if "-" in key else (key, "")', '                prefix, number = (key, "")'),
  ('manifestskip', "runner/bin/review_discovery.py", '                self.unparsed.append(key)\n                print("manifest: skipping unknown key " + key, file=sys.stderr)\n                continue', '                raise OSError("unknown manifest key or head: " + key)'),
  ('gapscomplete', "runner/bin/review_schema.py", '    if result["status"] == "incomplete" and not result["gaps"]:', '    if (result["status"] == "complete") == bool(result["gaps"]):'),
+ ('quotaowninherit', QUO, '        env.pop(var, None)', '        pass'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -850,6 +851,7 @@ REGRESSION = {
     'manifesthyphen': 'DiscoveryContract.test_the_hyphen_key_form_the_command_publishes_is_read',
     'manifestskip': 'DiscoveryContract.test_the_hyphen_key_form_the_command_publishes_is_read',
     'gapscomplete': 'ReviewResults.test_a_complete_review_may_name_what_it_could_not_exercise',
+    'quotaowninherit': 'Quota.test_reading_the_clis_own_home_does_not_inherit_another_accounts_variable',
 }
 
 # Slice two: mutations must cause their pinned test to FAIL, never merely ERROR.

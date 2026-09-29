@@ -57,8 +57,7 @@ def account_dirs(tool):
 
 
 def _run(cmd, env):
-    return subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT,
-                          env=dict(os.environ, **env))
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT, env=env)
 
 
 def _env_for(tool, directory):
@@ -78,11 +77,23 @@ def _env_for(tool, directory):
     return var, env
 
 
+def _child_env(tool, directory):
+    """The CLI's environment for reading this account: the variable set to the
+    directory, or absent. Absent means removed, not merely not added - the
+    runner exports the variable for the account it selected, and a reading of
+    the CLI's own home inherited it and reported the other account's meter."""
+    var, override = _env_for(tool, directory)
+    env = dict(os.environ)
+    if override[var]:
+        env[var] = override[var]
+    else:
+        env.pop(var, None)
+    return env
+
+
 def read_claude(directory):
     """usage_report on the stream, rather than the prose /usage prints."""
-    var, env = _env_for("claude", directory)
-    if not env[var]:
-        env.pop(var)
+    env = _child_env("claude", directory)
     cmd = ["claude", "-p", "/usage", "--output-format", "stream-json", "--verbose"]
     out = _run(cmd, env)
     if out.returncode != 0:
@@ -119,9 +130,7 @@ def read_claude(directory):
 
 def read_codex(directory):
     """account/rateLimits/read over the app-server, rather than rollout files."""
-    var, env = _env_for("codex", directory)
-    if not env[var]:
-        env.pop(var)
+    env = _child_env("codex", directory)
     req = "\n".join(json.dumps(m) for m in (
         {"jsonrpc": "2.0", "id": 1, "method": "initialize",
          "params": {"clientInfo": {"name": "review-quota", "title": "review-quota",
@@ -132,7 +141,7 @@ def read_codex(directory):
     # answer arrives - writing the requests and closing loses the reply.
     proc = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                            text=True, bufsize=1, env=dict(os.environ, **env))
+                            text=True, bufsize=1, env=env)
     lines = []
     try:
         proc.stdin.write(req)
