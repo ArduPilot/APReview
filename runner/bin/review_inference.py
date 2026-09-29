@@ -108,15 +108,21 @@ def _prepare(store, path, job, config):
         for directory in grants:
             command += ["--add-dir", directory]
     else:
+        model, effort = provider["model"], provider["effort"]
+        if job.get("refused_before"):
+            # the content filter declined this pass once; ask another model
+            model = provider.get("fallback_model") or model
+            effort = provider.get("fallback_effort") or effort
+            job["fallback"] = dict(model=model, effort=effort)
         command = [
             "codex",
             "exec",
             "--json",
             "--skip-git-repo-check",
             "--model",
-            provider["model"],
+            model,
             "-c",
-            'model_reasoning_effort="' + provider["effort"] + '"',
+            'model_reasoning_effort="' + effort + '"',
             "--sandbox",
             provider["permission_mode"],
         ]
@@ -149,19 +155,41 @@ def main():
     job = json.loads((Path(os.environ["REVIEW_JOB_DIR"]) / "job.json").read_text())
     os.chdir(job["worktree"])
     # Prefetch dependencies before any test enters an isolated network namespace.
-    init_submodules(job["worktree"], job["repository"] == "ardupilot/ardupilot")
+    init_submodules(job["worktree"], job["repository"] == "ardupilot/ardupilot", job.get("reference_clone"))
     os.execvpe(job["cli_command"][0], job["cli_command"], os.environ)
 
 
-def init_submodules(worktree, recursive):
+def local_submodules(reference):
+    """Every submodule the reference clone has checked out, nested ones
+    included, as git -c url rewrites from its upstream URL to the local copy."""
+    if not reference:
+        return []
+    out = subprocess.run(
+        ["git", "submodule", "foreach", "--quiet", "--recursive",
+         'echo "$toplevel/$sm_path $(git config --get remote.origin.url)"'],
+        cwd=reference, capture_output=True, text=True, timeout=60)
+    rewrites = []
+    for line in out.stdout.splitlines():
+        local, _, url = line.rpartition(" ")
+        if url and local and Path(local).is_dir():
+            rewrites += ["-c", "url.%s.insteadOf=%s" % (local, url)]
+    return rewrites
+
+
+def init_submodules(worktree, recursive, reference=None):
     if not (Path(worktree) / ".gitmodules").exists():
         return
     # Worktrees share the reference clone's config. A reviewer once pointed
     # every submodule URL at its own worktree; when that worktree went, every
     # later attempt failed here. Put the URLs back from .gitmodules first.
     subprocess.run(["git", "submodule", "sync", "--quiet"], cwd=worktree, check=True, timeout=60)
+    # Clone them from the local reference, not GitHub: eight passes cloning
+    # ChibiOS from the network at once ran past the time limit.
     command = [
         "git",
+        *local_submodules(reference),
+        "-c",
+        "protocol.file.allow=always",
         "-c",
         "submodule.alternateLocation=superproject",
         "-c",
@@ -174,7 +202,7 @@ def init_submodules(worktree, recursive):
     ]
     if recursive:
         command += ["--recursive"]
-    subprocess.run(command, cwd=worktree, check=True, timeout=120)
+    subprocess.run(command, cwd=worktree, check=True, timeout=600)
 
 
 if __name__ == "__main__":

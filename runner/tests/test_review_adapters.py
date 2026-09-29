@@ -493,32 +493,43 @@ class PatchHistory(unittest.TestCase):
         )
 
     def test_a_submodule_url_left_pointing_at_a_dead_worktree_is_repaired(self):
+        import shutil
         import subprocess
         from review_inference import init_submodules
-        env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_ALLOW_PROTOCOL="file",
+        env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_ALLOW_PROTOCOL="file:https",
                    GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
         run = lambda *a, cwd=self.root: subprocess.run(a, cwd=cwd, check=True, capture_output=True, env=env)
-        import shutil
         sub = self.root.parent / (self.root.name + "-sub")
         worktree = self.root.parent / (self.root.name + "-wt")
-        for path in (sub, worktree):
+        second = self.root.parent / (self.root.name + "-wt2")
+        for path in (sub, worktree, second):
             self.addCleanup(shutil.rmtree, path, True)
         sub.mkdir()
         run("git", "init", "-q", cwd=sub)
         (sub / "f").write_text("x")
         run("git", "add", ".", cwd=sub)
         run("git", "commit", "-qm", "s", cwd=sub)
-        run("git", "-c", "protocol.file.allow=always", "submodule", "add", "-q", str(sub), "modules/sub")
+        # the upstream URL, as .gitmodules names it; reachable only through
+        # the rewrite while the reference is built
+        upstream = "https://example.invalid/sub.git"
+        run("git", "-c", "url.%s.insteadOf=%s" % (sub, upstream), "-c", "protocol.file.allow=always",
+            "submodule", "add", "-q", upstream, "modules/sub")
         run("git", "commit", "-qm", "with submodule")
         run("git", "worktree", "add", "-q", "--detach", str(worktree))
         # what the reviewer did: the shared config now names a path that is gone
         run("git", "config", "submodule.modules/sub.url", str(self.root.parent / "gone"))
-        os.environ["GIT_ALLOW_PROTOCOL"] = "file"
+        shutil.rmtree(sub)   # the upstream is unreachable from here on
+        os.environ["GIT_ALLOW_PROTOCOL"] = "file:https"
         self.addCleanup(os.environ.pop, "GIT_ALLOW_PROTOCOL", None)
-        init_submodules(worktree, False)
+        # the URL is put back from .gitmodules and the clone is made from the
+        # reference's own checkout, never the network
+        init_submodules(worktree, False, self.root)
         self.assertTrue((worktree / "modules/sub/f").exists())
         url = run("git", "config", "submodule.modules/sub.url").stdout.decode().strip()
-        self.assertEqual(url, str(sub))
+        self.assertEqual(url, upstream)
+        run("git", "worktree", "add", "-q", "--detach", str(second))
+        init_submodules(second, False, self.root)
+        self.assertTrue((second / "modules/sub/f").exists())
 
     def test_an_abbreviated_told_head_is_resolved_not_fetched_by_prefix(self):
         from unittest.mock import Mock
