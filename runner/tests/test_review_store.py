@@ -136,6 +136,35 @@ class ReviewStore(unittest.TestCase):
         targets = [i["target"] for i in self.store.bundle(PR)["intents"] if i["kind"] == "publish"]
         self.assertEqual(targets, ["page:end/b"])
 
+    def test_one_page_publish_settles_every_owed_publish_of_that_page(self):
+        # every progress step of every PR on a page journals a publish of it;
+        # the page renders whole, so one delivery answers them all
+        target = "page:end/shared"
+        outbox = self.root / "outbox"
+        entries = []
+        for n in range(1, 4):
+            projection = dict(id=f"proj{n}", pr=f"pr:owner/repo#{n}", generation=f"op{n}", kind="projection",
+                              target=target, gate="page", patches={f"pr:owner/repo#{n}": {"ticket": n + 1, "removed": False}},
+                              state="owed", failures=0, next_attempt=0)
+            publish = dict(id=f"pub{n}", pr=f"pr:owner/repo#{n}", generation=f"op{n}", kind="publish",
+                           target=target, gate="page", dependencies=[f"proj{n}"], state="owed", failures=0, next_attempt=0)
+            for entry in (projection, publish):
+                atomic(outbox / (entry["id"] + ".json"), entry)
+            entries.append(publish)
+        # a publish whose projection has not merged must wait
+        atomic(outbox / "pub9.json", dict(id="pub9", pr="pr:owner/repo#9", generation="op9", kind="publish",
+                                          target=target, gate="page", dependencies=["proj9"], state="owed",
+                                          failures=0, next_attempt=0))
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        self.store.drain(adapter)
+        for entry in entries:
+            self.assertEqual(read(self.root / "receipts" / (entry["id"] + ".json"))["state"], "published")
+        delivered = [read(p)["entry"]["id"] for p in adapter.root.glob("*.json") if read(p)["entry"]["kind"] == "publish"]
+        self.assertEqual(len(delivered), 1)
+        self.assertTrue((outbox / "pub9.json").exists())
+        self.assertFalse((self.root / "receipts" / "pub9.json").exists())
+
     def test_receipt_wins_at_each_receipt_boundary(self):
         self.accept()
         entry = read(next((self.root / "outbox").glob("*.json")))

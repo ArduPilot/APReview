@@ -443,6 +443,27 @@ class Store:
                           key=lambda x: (x["next_attempt"], x["id"]))
         return [x for x in snapshot if x["next_attempt"] <= time.time() and x["failures"] < 5][:limit]
 
+    SETTLED = ("published", "posted", "not_applicable", "synced", "held", "superseded")
+
+    def _coalesce(self, entry, result):
+        """One publish of a page satisfies every other owed publish of it whose
+        projection is already merged: the page renders the whole membership,
+        and every progress step of every PR on it asked for the same thing.
+        Caller holds the page region."""
+        target = canonical(entry["target"])
+        for path in (self.root / "outbox").glob("*.json"):
+            other = read(path)
+            if (not other or other["id"] == entry["id"] or other["kind"] != "publish"
+                    or other.get("gate") != "page" or canonical(other["target"]) != target):
+                continue
+            if (self.root / "receipts" / (other["id"] + ".json")).exists():
+                unlink(path)
+                continue
+            dependencies = [read(self.root / "receipts" / (d + ".json")) for d in other.get("dependencies", [])]
+            if any(not d or d["state"] not in self.SETTLED for d in dependencies):
+                continue
+            self.receipt(other, **result)
+
     def side_locks(self, entry, dependencies, gate):
         """Keep destination ownership through both the adapter call and receipt."""
         stack = ExitStack()
@@ -491,7 +512,7 @@ class Store:
                 if entry["failures"] >= 5 or entry["next_attempt"] > time.time():
                     continue
                 dependencies = [read(self.root / "receipts" / (dep + ".json")) for dep in entry.get("dependencies", [])]
-                if any(not dep or dep["state"] not in ("published", "posted", "not_applicable", "synced", "held", "superseded") for dep in dependencies):
+                if any(not dep or dep["state"] not in self.SETTLED for dep in dependencies):
                     continue
                 if entry["kind"] in ("comment", "note"):
                     older = [read(p) for p in (self.root / "outbox").glob("*.json")]
@@ -530,6 +551,8 @@ class Store:
                             result = adapter.deliver(entry, deadline)
                             self.crash("remote_effect")
                     self.receipt(entry, **result)
+                    if entry["kind"] == "publish" and entry.get("gate") == "page":
+                        self._coalesce(entry, result)
                 except (OSError, TimeoutError) as error:
                     entry["failures"] += 1
                     entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
