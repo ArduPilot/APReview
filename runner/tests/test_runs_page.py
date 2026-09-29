@@ -50,8 +50,11 @@ class Dashboard(unittest.TestCase):
         identity = dict(boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
                         pid=os.getpid(), start=int(Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]))
         (directory / "summary.json").write_text(json.dumps(dict(schema=1, **identity,
-            state="running", heartbeat=0, prs={"pr:owner/repo#1": {"review": "deferred"}},
+            state="running", heartbeat=0, prs={"pr:owner/repo#1": {"review": "deferred"},
+                                               "pr:owner/repo#2": {"review": "accepted"}},
             delivery_deferred=["one-debt"])))
+        (directory / "run.json").write_text(json.dumps(dict(
+            mode="all", created=datetime.datetime.now().timestamp() - 600)))
         path = directory / "attempts/a"
         path.mkdir(parents=True)
         (path / "status.json").write_text(json.dumps(dict(schema=1, **identity, state="running",
@@ -59,12 +62,12 @@ class Dashboard(unittest.TestCase):
         self.log("rsync", 'reviewprs mode=rsync host=t start=' + datetime.datetime.now().astimezone().isoformat() +
                  '\nsupervisor run=' + str(directory) + '\n')
         page = self.build()
-        self.assertEqual(self.state["runs"], [])
-        self.assertIn("supervisor-one", page)
-        self.assertIn("running: live", page)
-        self.assertIn("session-one", page)
-        self.assertIn("codex / running / live / 0", page)
-        self.assertIn("input_tokens", page)
+        # one row in the Runs table, from the run's records, not the wrapper log
+        self.assertEqual(len(self.state["runs"]), 1)
+        row = self.state["runs"][0]
+        self.assertEqual((row["mode"], row["status"], row["prs"], row["tin"]), ("all", "running", 1, 13))
+        self.assertNotIn("Supervisor runs", page)
+        self.assertIn(">all<", page)
 
     def setUp(self):
         self.home = tempfile.mkdtemp()

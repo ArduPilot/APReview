@@ -176,6 +176,40 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
 
     runs.append(r)
 
+# Supervisor runs: one row each from the run's own records, in the same
+# shape as a wrapper log row. Their wrapper log is skipped above.
+from review_dashboard import summaries                         # noqa: E402
+DATA = os.environ.get('REVIEW_DATA', os.path.join(HOME, 'review', 'data'))
+for sv in summaries(DATA):
+    try:
+        cfg = json.load(open(os.path.join(DATA, 'runs', sv['name'], 'run.json')))
+    except Exception:
+        cfg = {}
+    created = cfg.get('created')
+    if not created:
+        continue
+    start = datetime.datetime.fromtimestamp(created).astimezone()
+    if start < cutoff:
+        continue
+    beat = sv.get('heartbeat')
+    last = datetime.datetime.fromtimestamp(beat).astimezone() if beat else None
+    if sv.get('state') == 'complete':
+        status, finish = 'ok', last
+    elif sv['liveness'] == 'dead':
+        status, finish = 'died', last
+    else:
+        status, finish = 'running', None
+    usage = sv.get('usage', {})
+    counts = sv.get('counts', {})
+    runs.append(dict(
+        mode=cfg.get('mode') or sv['name'], start=start, finish=finish,
+        elapsed=int((finish - start).total_seconds() // 60) if finish else None,
+        status=status, rc=None, turns=None,
+        tin=usage.get('input_tokens', 0), tout=usage.get('output_tokens', 0),
+        tcr=usage.get('cache_read_input_tokens', 0) + usage.get('cached_input_tokens', 0),
+        tcw=usage.get('cache_creation_input_tokens', 0), waited=None,
+        prs=counts.get('accepted', 0), supervisor=True))
+
 runs.sort(key=lambda r: r['start'], reverse=True)
 
 # ------------------------------------------------- quotas, as recorded
@@ -833,10 +867,6 @@ doc = (doc.replace('__DAYS__', str(DAYS))
           .replace('__SROWS__', '\n'.join(srows))
           .replace('__ROWS__', '\n'.join(rows))
           .replace('__BOX__', html.escape(BOX)))
-
-from review_dashboard import summaries, render
-supervisor_runs = summaries(os.environ.get('REVIEW_DATA', os.path.join(HOME, 'review', 'data')))
-doc = doc.replace('<h2>By run type</h2>', render(supervisor_runs) + '<h2>By run type</h2>')
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 open(OUT, 'w').write(doc)
