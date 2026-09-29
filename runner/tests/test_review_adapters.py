@@ -318,6 +318,10 @@ class DiscoveryContract(unittest.TestCase):
         self.assertEqual(rows["pr:rsyncproject/rsync#1059"]["section"],
                          '<div class="pr changed" id="pr1059">\n<h3>1059</h3>\n</div>')
         self.assertEqual(rows["pr:rsyncproject/rsync#1060"]["key"], "1060")
+        discovery.repos["rsyncproject/rsync"]["key"] = "rsync"
+        rows = discovery.parse_manifest('<!-- reviewprs-manifest v1 heads="rsync#7:2222222222" -->\n'
+                                        '<div class="pr" id="prrsync7">\n<h3>author page form</h3>\n</div>\n<h2>Summary</h2>\n')
+        self.assertIn("author page form", rows["pr:rsyncproject/rsync#7"]["section"])
 
     def test_reserved_modes_and_pr_reference_precedence(self):
         self.assertEqual(self.discover.resolve("--FollowUp"), "followup")

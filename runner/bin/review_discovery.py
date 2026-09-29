@@ -217,9 +217,9 @@ class Discovery:
                 self.unparsed.append(key)
                 print("manifest: skipping unknown key " + key, file=sys.stderr)
                 continue
-            rows[canonical(f"pr:{repo}#{number}")] = dict(
-                head=head, section=self.section_of(html, key.replace("#", "-")), key=key
-            )
+            # label pages anchor rsync#1 as prrsync-1; the author page as prrsync1
+            section = self.section_of(html, key.replace("#", "-")) or self.section_of(html, key.replace("#", ""))
+            rows[canonical(f"pr:{repo}#{number}")] = dict(head=head, section=section, key=key)
         return rows
 
     @staticmethod

@@ -170,6 +170,16 @@
    "notes": "Firmware for the SiK telemetry radios - Si1000/Si1060, an 8051 core built with SDCC, not an ArduPilot flight board. Judge it as ArduPilot C, but most of the flight-code house rules have nothing to hold onto here: there are no AP_ libraries, no parameters in the AP_Param sense, and no ArduPilot allocator, so the zeroed-new and 16-character-parameter rules do not apply. What does matter is the platform: code and xdata space are tiny and a build that overflows a segment is the usual failure, SDCC storage qualifiers (__code, __xdata, __pdata) are load-bearing rather than decoration, and the radio protocol is timing-critical - the TDM window and the serial flow control are where the real bugs live. Default branch master, one CI workflow (test_build.yml: sdcc build plus tests/test_build.sh), no submodules. The repo has had no commits since 2023 while carrying a long tail of open PRs, so expect to be reviewing changes written against a much older tree: check whether a PR still applies before judging it, and say so when it does not."
   },
   {
+   "repo": "ArduPilot/CrashDebug",
+   "key": "CrashDebug",
+   "discovery": "explicit",
+   "post_comments": true,
+   "house_rules": "ardupilot",
+   "ci": true,
+   "added": "2026-09-29",
+   "notes": "Crash dump analysis tool. Small C++ tree, no submodules; judge it as ArduPilot C++ where the flight-code rules apply. Added because the author page carries a review of its PR #1 and the cutover import refuses a key no repository claims."
+  },
+  {
    "repo": "RsyncProject/rsync",
    "key": "rsync",
    "discovery": "rsync-mode",
