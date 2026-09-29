@@ -814,8 +814,11 @@ The wrapper freezes account homes (without secrets), model pins, effort,
 permissions, granted directories, endpoints, repositories, limits and admission
 deadline settings. Codex needs a model pin in the selected account's
 `config.toml` or `REVIEW_CODEX_MODEL`; its configured sandbox and effort are
-also frozen. Account leases are exclusive until concurrent-client testing
-justifies changing that policy. Exhausted quota defers inference but still
+also frozen. Up to `REVIEW_ACCOUNT_SLOTS` (default 4) review
+sessions share one login; concurrent sessions, including a simultaneous
+token refresh, were tested safe on 2026-09-30. Sessions hold numbered slots,
+not the account key, so quota probes and admission are never blocked by a
+running review. Exhausted quota defers inference but still
 starts recovery and drains deliveries. GitHub writes in the new adapter need
 explicit `REVIEW_GITHUB_WRITES=1` in `local.conf`; installation does not enable it.
 
