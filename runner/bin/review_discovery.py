@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import importlib.util
 from pathlib import Path
 import re
+import sys
 import subprocess
 from urllib.parse import quote
 from zoneinfo import ZoneInfo
@@ -92,6 +93,7 @@ class Discovery:
         self.accounts = config.get("comment_accounts", [])
         self._sweep_lock = threading.RLock()
         self._swept = None
+        self.unparsed = []          # manifest keys no repository claims
 
     def swept(self):
         with self._sweep_lock:
@@ -200,10 +202,21 @@ class Discovery:
         rows = {}
         for item in unescape(match[1]).split():
             key, head = item.rsplit(":", 1)
-            prefix, number = key.rsplit("#", 1) if "#" in key else ("", key)
+            # The command's pages write wiki-8080 for the wiki and 34234 for
+            # the main repository; the documented wiki#8080 form appears too.
+            if "#" in key:
+                prefix, number = key.rsplit("#", 1)
+            elif key.isdecimal():
+                prefix, number = "", key
+            else:
+                prefix, number = key.rsplit("-", 1) if "-" in key else (key, "")
             repo = names.get(prefix)
             if repo is None or not number.isdecimal() or not re.fullmatch("[0-9a-f]{7,40}", head):
-                raise OSError("unknown manifest key or head: " + key)
+                # Somebody else's page, or a slip in one: not a reason to end
+                # a run that only wanted the other entries.
+                self.unparsed.append(key)
+                print("manifest: skipping unknown key " + key, file=sys.stderr)
+                continue
             rows[canonical(f"pr:{repo}#{number}")] = dict(
                 head=head, section=self.section_of(html, key.replace("#", "-"))
             )

@@ -514,6 +514,8 @@ M = [
  ('reapscan', "runner/bin/reap-orphans.sh", '    [ $hit -eq 1 ] && candidates="$candidates $p"', '    false && candidates="$candidates $p"'),
  ('reapkeepsjob', "runner/bin/reap-orphans.sh", '    [ -r "$d/environ" ] && tr \'\\0\' \'\\n\' < "$d/environ" | grep -q \'^REVIEW_JOB_DIR=\' && continue\n', ''),
  ('manifestlegacy', "runner/bin/review_discovery.py", '        start = re.search(r\'<div class="pr" id="pr\' + re.escape(anchor) + r\'">\', html)', '        start = None'),
+ ('manifesthyphen', "runner/bin/review_discovery.py", '                prefix, number = key.rsplit("-", 1) if "-" in key else (key, "")', '                prefix, number = (key, "")'),
+ ('manifestskip', "runner/bin/review_discovery.py", '                self.unparsed.append(key)\n                print("manifest: skipping unknown key " + key, file=sys.stderr)\n                continue', '                raise OSError("unknown manifest key or head: " + key)'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -844,6 +846,8 @@ REGRESSION = {
     'reapscan': 'Reaper.test_an_unregistered_leak_under_the_review_tree_is_killed',
     'reapkeepsjob': 'Reaper.test_a_supervisor_payload_under_the_same_tree_is_left_alone',
     'manifestlegacy': 'DiscoveryContract.test_a_legacy_page_section_is_found_for_import',
+    'manifesthyphen': 'DiscoveryContract.test_the_hyphen_key_form_the_command_publishes_is_read',
+    'manifestskip': 'DiscoveryContract.test_the_hyphen_key_form_the_command_publishes_is_read',
 }
 
 # Slice two: mutations must cause their pinned test to FAIL, never merely ERROR.

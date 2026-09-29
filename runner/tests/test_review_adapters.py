@@ -282,6 +282,22 @@ class DiscoveryContract(unittest.TestCase):
             {"pr:ardupilot/ardupilot_wiki#1", "pr:mavlink/mavlink#1", "pr:ardupilot/mavlink#1"},
         )
 
+    def test_the_hyphen_key_form_the_command_publishes_is_read(self):
+        # the AIReview page of 2026-09-29 keys every non-main repository as
+        # key-number; a key nobody claims is skipped, not fatal
+        import repos
+
+        discovery = Discovery(self.gh, dict(self.config, repos=repos.load()))
+        try:
+            rows = discovery.parse_manifest(
+                '<!-- reviewprs-manifest v1 heads="wiki-8080:abcdef0 34234:abcdef1 upstream-mavlink-523:abcdef2 '
+                'wiki#8074:abcdef3 Nobody-7:abcdef4" -->')
+        except OSError as error:
+            self.fail("an unknown key ended the parse: %s" % error)
+        self.assertEqual(set(rows), {"pr:ardupilot/ardupilot_wiki#8080", "pr:ardupilot/ardupilot#34234",
+                                     "pr:mavlink/mavlink#523", "pr:ardupilot/ardupilot_wiki#8074"})
+        self.assertEqual(discovery.unparsed, ["Nobody-7"])
+
     def test_a_legacy_page_section_is_found_for_import(self):
         # the command's pages, which the handoff imports, use div sections
         # closed by a bare </div>; the rsync page of 2026-08-26 is this shape
