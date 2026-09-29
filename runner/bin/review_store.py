@@ -71,6 +71,12 @@ def unlink(path):
     fsync_dir(Path(path).parent)
 
 
+# A review pass may be accepted incomplete, gaps named, on its last try (the
+# supervisor decides that); a reconciliation never.
+ALLOWED_RESULT = {"primary": ("complete", "incomplete"), "cold": ("complete", "incomplete"),
+                  "validation": ("complete", "incomplete"), "reconciliation": ("complete",)}
+
+
 def delivery_id(pr, generation, kind, target):
     if target.startswith(("page:", "pr:", "account:")):
         target = canonical(target)
@@ -178,13 +184,13 @@ class Store:
             status = read(Path(path) / "status.json", {})
             if (status.get("state") != "terminal" or status.get("exit") != 0 or
                     status.get("timed_out") or status.get("aborted") or
-                    status.get("result_status") != "complete" or not status.get("empty") or
+                    status.get("result_status") not in ALLOWED_RESULT[kind] or not status.get("empty") or
                     any(status.get(k) != job[k] for k in IDENTITY) or
                     job["generation"] != claim["generation"] or job["run"] != claim["run"] or
                     job["kind"] != kind or job["input_digest"] != digest(claim["inputs"])):
                 raise ValueError("unsuccessful or fenced attempt")
             result = read_result(Path(path) / FILES[kind], job)
-            if result["status"] != "complete":
+            if result["status"] not in ALLOWED_RESULT[kind]:
                 raise ValueError("incomplete result")
             results[kind] = result
             jobs[kind] = job

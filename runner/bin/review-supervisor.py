@@ -20,6 +20,27 @@ from review_delivery import Delivery
 from review_inference import prepare as prepare_inference
 
 KINDS = ("primary", "cold", "validation", "reconciliation")
+REFUSAL = "flagged for possible cybersecurity risk"
+
+
+def refused(path):
+    """Whether a Codex payload ended on OpenAI's content filter."""
+    log = Path(path) / "payload.log"
+    try:
+        with open(log, "rb") as f:
+            f.seek(max(0, log.stat().st_size - 65536))
+            return REFUSAL.encode() in f.read()
+    except OSError:
+        return False
+
+
+def scaled_wall(base, diff):
+    """A pass's wall clock grows with the diff: a 30,000-line port cannot be
+    read in the half hour a normal PR needs. Up to three times the base."""
+    lines = (diff or "").count("\n")
+    return base * min(3.0, max(1.0, lines / 10000.0))
+
+
 # attempt errors that mean the payload never started
 STARVED = ("account deadline", "permit deadline")
 
@@ -506,7 +527,8 @@ class Supervisor:
                 for k, v in os.environ.items()
                 if k.startswith("REVIEW_") or k in ("PATH", "HOME", "LANG", "PYTHONPATH")
             },
-            "wall_timeout": self.config["wall"] or self.config.get("wall_timeouts", WALL)[kind],
+            "wall_timeout": self.config["wall"] or scaled_wall(
+                self.config.get("wall_timeouts", WALL)[kind], claim["inputs"].get("diff")),
             "pool_size": self.config["pool_size"],
             "permit_timeout": self.config["permit_timeout"],
             "command": [sys.executable, str(Path(__file__).with_name("review_stub.py"))],
@@ -548,6 +570,8 @@ class Supervisor:
         ]
         if kind == "reconciliation":
             job["finding_ids"] += job["previous_ids"]
+        if kind in state.get("refused", []):
+            job["refused_before"] = True
         if not self.config["stub"]:
             prepare_inference(self.store, path, job, self.config["configuration"])
         atomic(path / "job.json", job)
@@ -583,12 +607,17 @@ class Supervisor:
                 if not attempts:
                     del state["attempts"][kind]
                 continue
+            # A pass that states what it could not cover is accepted on its
+            # last try: a PR too large to finish in one pass otherwise never
+            # gets a review. Reconciliation must be complete.
+            last_try = len(attempts) >= 2 and kind != "reconciliation"
             if (
                 outcome == "done"
                 and status.get("exit") == 0
                 and not status.get("timed_out")
                 and not status.get("aborted")
-                and status.get("result_status") == "complete"
+                and (status.get("result_status") == "complete"
+                     or (last_try and status.get("result_status") == "incomplete"))
             ):
                 try:
                     read_result(Path(path) / FILES[kind], read(Path(path) / "job.json"))
@@ -598,6 +627,12 @@ class Supervisor:
                     claim["selected"][kind] = path
                     self.store.save_claim(self.owned[pr], pr, claim)
                     continue
+            if refused(path):
+                # OpenAI's content filter declined the prompt; the retry goes
+                # to a different Codex model and effort
+                state.setdefault("refused", [])
+                if kind not in state["refused"]:
+                    state["refused"].append(kind)
             if len(attempts) >= 2 or status.get("quota_blocked") or outcome == "blocked":
                 failed = True
                 if status.get("quota_blocked"):

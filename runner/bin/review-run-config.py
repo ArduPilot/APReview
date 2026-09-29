@@ -32,6 +32,10 @@ def freeze(args):
             # token-refresh race included; the cap is the only bound
             account=home, home=home, exclusive_account=False,
             account_slots=int(env.get("REVIEW_ACCOUNT_SLOTS", "8")),
+            # a Codex pass the content filter declined is retried on these
+            **(dict(fallback_model=env.get("REVIEW_CODEX_FALLBACK_MODEL", "gpt-6-sol"),
+                    fallback_effort=env.get("REVIEW_CODEX_FALLBACK_EFFORT", "medium"))
+               if tool == "codex" else {}),
             model=args.model if tool == "claude" else codex_model,
             effort="high" if tool == "claude" else env.get("REVIEW_CODEX_EFFORT", codex.get("model_reasoning_effort", "high")),
             permission_mode="auto" if tool == "claude" else codex.get("sandbox_mode", "workspace-write"),

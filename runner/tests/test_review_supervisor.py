@@ -149,6 +149,34 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual(sum(j["kind"] == "cold" for j in jobs), 1)
         self.assertEqual({j["generation"] for j in jobs}, {1})
 
+    def test_a_filtered_codex_pass_is_retried_on_the_fallback_model(self):
+        child, directory, log = self.start("refuse", [candidate(stub={"cold": [{"refuse": True}, {}]})])
+        summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"][PR]["review"], "accepted", log.read_text())
+        colds = sorted((read(p) for p in (directory / "attempts").glob("*/job.json") if read(p)["kind"] == "cold"),
+                       key=lambda j: j["registered"])
+        self.assertEqual([j.get("refused_before", False) for j in colds], [False, True])
+
+    def test_an_incomplete_pass_is_accepted_on_its_last_try(self):
+        # a PR too large to cover in one pass still gets a review, gaps named
+        child, directory, log = self.start("partial", [candidate(stub={"cold": {"incomplete": True}})])
+        summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"][PR]["review"], "accepted", log.read_text())
+        colds = [p for p in (directory / "attempts").glob("*/job.json") if read(p)["kind"] == "cold"]
+        self.assertEqual(len(colds), 2)
+
+    def test_an_incomplete_reconciliation_is_never_accepted(self):
+        child, directory, log = self.start("partialfinal", [candidate(stub={"reconciliation": {"incomplete": True}})])
+        summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"][PR]["review"], "deferred")
+        self.assertIsNone(self.store.current(PR))
+
+    def test_a_pass_gets_more_time_on_a_larger_diff(self):
+        self.assertEqual(SUPERVISOR.scaled_wall(1800, "x\n" * 500), 1800)
+        self.assertEqual(SUPERVISOR.scaled_wall(1800, "x\n" * 20000), 3600)
+        self.assertEqual(SUPERVISOR.scaled_wall(1800, "x\n" * 90000), 5400)
+        self.assertEqual(SUPERVISOR.scaled_wall(1800, None), 1800)
+
     def test_two_failures_defer_without_acceptance(self):
         child, directory, log = self.start("fail", [candidate(stub={"primary": {"invalid": True}})])
         summary = self.finish(child, directory, log)
