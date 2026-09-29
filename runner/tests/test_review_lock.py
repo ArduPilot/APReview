@@ -118,7 +118,7 @@ class ReviewLocks(unittest.TestCase):
     def test_permit_pool_is_shared_across_processes(self):
         lock = permit(self.path, "codex", 2)
         self.addCleanup(lock.close)
-        self.assertEqual(lock.key, "permit:codex:0")
+        self.assertEqual(lock.key, "permit:codex:1")
         code = "from review_lock import permit; import sys; a=permit(sys.argv[1],'codex',2); print(a.key, permit(sys.argv[1],'codex',2), flush=True); sys.stdin.read(1)"
         child = python(code, self.path, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
         self.addCleanup(stop, child)
@@ -126,7 +126,7 @@ class ReviewLocks(unittest.TestCase):
         with selectors.DefaultSelector() as selector:
             selector.register(child.stdout, selectors.EVENT_READ)
             self.assertTrue(selector.select(5))
-        self.assertEqual(child.stdout.readline().strip(), "permit:codex:1 None")
+        self.assertEqual(child.stdout.readline().strip(), "permit:codex:0 None")
         self.assertIsNone(permit(self.path, "codex", 2))
         child.communicate("x", timeout=5)
         other = permit(self.path, "codex", 2)
@@ -142,14 +142,22 @@ class ReviewLocks(unittest.TestCase):
         self.addCleanup(final.close)
         self.assertEqual(final.key, "permit:claude:0")
 
-    def test_pool_resize_requires_drained_physical_slots(self):
-        lock = permit(self.path, "heavy", 2)
-        self.addCleanup(lock.close)
-        self.assertIsNone(permit(self.path, "heavy", 3))
-        lock.close()
-        resized = permit(self.path, "heavy", 3)
-        self.assertIsNotNone(resized)
-        resized.close()
+    def test_runs_with_different_pool_sizes_share_one_physical_pool(self):
+        # a run frozen at 2 and a run at 3 coexist; neither waits for a drain
+        small = permit(self.path, "heavy", 2)
+        self.addCleanup(small.close)
+        large = permit(self.path, "heavy", 3)
+        self.assertIsNotNone(large)
+        self.addCleanup(large.close)
+        self.assertEqual({small.key, large.key}, {"permit:heavy:1", "permit:heavy:2"})
+        # the small run still has its own slot 0; its cap is its own
+        again = permit(self.path, "heavy", 2)
+        self.assertEqual(again.key, "permit:heavy:0")
+        again.close()
+        # the pool never shrinks below what a run has declared
+        smaller = permit(self.path, "heavy", 1)
+        self.assertEqual(smaller.key, "permit:heavy:0")
+        smaller.close()
         with self.assertRaises(ValueError):
             self.take("permit:heavy:3")
 
@@ -192,6 +200,15 @@ class ReviewLocks(unittest.TestCase):
         again = account_slot(self.path, key, 4)
         self.assertEqual(again.key, holders[0][1])
         again.close()
+        # highest first: a larger cap leaves slot 0 to a run capped at one
+        for child, _ in holders[1:]:
+            stop(child)
+        wide = python(code.replace("4)", "8)"), self.path, key, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(stop, wide)
+        self.assertEqual(wide.stdout.readline().strip(), key + "#7")
+        narrow = account_slot(self.path, key, 1)
+        self.assertEqual(narrow.key, key + "#0")
+        narrow.close()
 
     def test_shared_leases_leave_the_exclusive_header_unchanged(self):
         key = "account:codex/account"

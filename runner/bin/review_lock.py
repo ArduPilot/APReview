@@ -223,7 +223,8 @@ def account_slot(path, key, cap):
     wrapper's admission, stale refresh-lock cleanup). Several CLI sessions on
     one login refresh their token safely; this only bounds how many."""
     key = canonical(key)
-    for slot in range(max(1, int(cap))):
+    # highest first: a run capped at one session always finds slot 0
+    for slot in reversed(range(max(1, int(cap)))):
         lock = try_lock(path, "%s#%d" % (key, slot))
         if lock is not None:
             return lock
@@ -231,29 +232,26 @@ def account_slot(path, key, cap):
 
 
 def permit(path, provider, size=4, skip_finishing_slot=False):
+    """A slot below `size` in the provider's pool. Size is each run's own
+    cap, frozen with the run, over one physical pool: the file records the
+    largest size declared, which only grows. Growing needs no drain because
+    no slot above the old size can be held; runs with different sizes then
+    share the pool instead of each waiting for it to empty to resize it.
+    Slots are taken highest first, leaving the low ones to smaller runs."""
     if provider not in POOLS or not 1 <= size <= 256:
         raise ValueError("invalid permit pool")
     with _mutex:
         _order("permit:%s:0" % provider)
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
-        probes = []
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
             _layout(fd)
             offset = _pool_offset(provider)
-            old_size = int.from_bytes(os.pread(fd, 4, offset), "big")
-            if old_size != size:
-                # A configuration change must observe the whole physical pool drained.
-                for slot in range(256):
-                    probe = os.open(path, os.O_RDWR | os.O_CLOEXEC)
-                    probes.append(probe)
-                    _flock(probe, POOLS[provider] + slot)
+            recorded = int.from_bytes(os.pread(fd, 4, offset), "big")
+            if size > recorded:
                 os.pwrite(fd, size.to_bytes(4, "big"), offset)
                 os.fsync(fd)
-                for probe in probes:
-                    os.close(probe)
-                probes.clear()
-            for slot in range(1 if skip_finishing_slot else 0, size):
+            for slot in reversed(range(1 if skip_finishing_slot else 0, size)):
                 lock = try_lock(path, "permit:%s:%d" % (provider, slot), _layout_held=True)
                 if lock is not None:
                     return lock
@@ -263,8 +261,6 @@ def permit(path, provider, size=4, skip_finishing_slot=False):
                 return None
             raise
         finally:
-            for probe in probes:
-                os.close(probe)
             os.close(fd)
 
 
