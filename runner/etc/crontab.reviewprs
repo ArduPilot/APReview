@@ -49,9 +49,9 @@ MAILTO=""
 25 5 * * *   REVIEWPRS_LOCK_WAIT=7200 $HOME/review/bin/run-reviewprs.sh rsync
 #25 5 * * *   REVIEW_EXPECT_PATH=new $HOME/review/bin/run-reviewprs.sh rsync
 
-# Outbox recovery is independent of inference admission and quota. Enable with
-# the first canary; each entry uses its frozen delivery configuration.
-#*/5 * * * *   $HOME/review/bin/review-outbox.sh >> $HOME/review/logs/outbox.log 2>&1
+# Outbox recovery is independent of inference admission and quota; each entry
+# uses its frozen delivery configuration. On since the first canary (2026-09-29).
+*/5 * * * *   $HOME/review/bin/review-outbox.sh >> $HOME/review/logs/outbox.log 2>&1
 # Board sweep remains the shared adapter below (no outer lock around a drain).
 #*/15 * * * *   $HOME/review/bin/project-sync.sh
 
