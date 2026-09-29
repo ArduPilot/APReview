@@ -218,12 +218,20 @@ class Store:
         if current and current["generation"] >= generation:
             return current
         intents = copy.deepcopy(claim["prepared"])
-        # Retain mutable destinations even if an old fan-out never reached the index.
+        # Retain mutable destinations even if an old fan-out never reached the
+        # index, except a page an operator retired as unreachable.
         seen = {(x["kind"], x["target"]) for x in intents}
+        unreachable = set()
         for old in self.chain(pr):
             for intent in old["intents"]:
                 identity = intent["kind"], intent["target"]
-                if intent["kind"] in ("publish", "projection", "annotation") and not intent.get("retained") and identity not in seen:
+                if identity in seen or intent.get("retained") or intent["kind"] not in ("publish", "projection", "annotation"):
+                    continue
+                if intent["target"] not in unreachable:
+                    rows = read(self.root / "membership" / (digest(canonical(intent["target"])) + ".json"), {})
+                    if rows.get(pr, {}).get("unreachable"):
+                        unreachable.add(intent["target"])
+                if intent["target"] not in unreachable:
                     inherited = copy.deepcopy({k: v for k, v in intent.items() if k != "id"})
                     if inherited["kind"] == "projection" and pr in inherited.get("patches", {}):
                         inherited["patches"][pr]["generation"] = generation
@@ -362,7 +370,7 @@ class Store:
             row = dict(old)
             if "ticket" in patch and patch["ticket"] > old["ticket"]:
                 row.update(ticket=patch["ticket"], removed=patch["removed"])
-                for field in ("ci", "progress", "candidate"):
+                for field in ("ci", "progress", "candidate", "unreachable"):
                     if field in patch:
                         row[field] = patch[field]
                 current = self.current(pr)

@@ -835,8 +835,9 @@ python3 "$REVIEW_ROOT/bin/review-retire.py" --data "$REVIEW_DATA" \
     'page:review/PRReviews/ardupilot/mavproxy/1764/index.html' 'pr:ardupilot/mavproxy#1764'
 ```
 
-That marks the membership row removed and writes the superseded receipts
-delivery would have written, so the next drain posts the comment.
+That marks the membership row removed and unreachable and writes the
+superseded receipts delivery would have written, so the next drain posts the
+comment and later generations do not inherit the page.
 
 Resume uses the frozen run, even after role symlinks or models change, and
 refuses a target transferred back to old ownership. Abort durably records the

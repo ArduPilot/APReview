@@ -6,7 +6,8 @@ leaves its publish entries retrying until they exhaust their attempts, and the
 comment behind them waits forever because verification repairs the same
 intent. Delivery already treats a PR removed from a page as superseded; this
 writes that membership row and the superseded receipts delivery would have
-written, so rebuild never materializes the intents again.
+written, so rebuild never materializes the intents again and later
+generations do not inherit the page.
 """
 import argparse
 import time
@@ -39,7 +40,9 @@ for pr in map(canonical, a.prs):
             busy += 1
             continue
         with page_lock:
-            store._merge_membership(page_lock, page, {pr: {"ticket": ticket, "removed": True}})
+            store._merge_membership(
+                page_lock, page, {pr: {"ticket": ticket, "removed": True, "unreachable": a.reason}}
+            )
             entries = [read(f) for f in (store.root / "outbox").glob("*.json")]
             entries += [
                 dict(intent, pr=pr, generation=bundle["generation"])

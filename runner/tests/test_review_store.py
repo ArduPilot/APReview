@@ -128,6 +128,13 @@ class ReviewStore(unittest.TestCase):
         self.assertFalse((outbox / (ident + ".json")).exists())
         self.store.drain(StubAdapter(self.root))
         self.assertEqual(read(self.root / "receipts" / (comment + ".json"))["state"], "posted")
+        # the next generation inherits page b, a mutable destination, but not
+        # the retired page a
+        with try_lock(self.store.locks, PR) as lock:
+            claim = complete_claim(self.store, lock, run="new", request="new")
+            self.store.accept(lock, PR, claim, [{"kind": "comment", "target": PR}])
+        targets = [i["target"] for i in self.store.bundle(PR)["intents"] if i["kind"] == "publish"]
+        self.assertEqual(targets, ["page:end/b"])
 
     def test_receipt_wins_at_each_receipt_boundary(self):
         self.accept()
