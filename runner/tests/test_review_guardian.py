@@ -208,6 +208,18 @@ class ReviewResults(unittest.TestCase):
         return dict(id=ident, blocking=True, actionable=True, disposition="retained", rationale="",
                     evidence={"commands": [], "artifacts": [], "configuration": "stub"}, **changes)
 
+    def test_a_complete_review_may_name_what_it_could_not_exercise(self):
+        # the first live cold pass on the box did honest work, listed two
+        # things the sandbox would not let it run, and was thrown away as
+        # "incomplete" because a complete result was not allowed any gaps
+        complete = dict(self.result, gaps=["UNCONFIRMED: SITL not run, no network in the sandbox"])
+        try:
+            self.assertEqual(validate(complete, self.job)["status"], "complete")
+        except ValueError as error:
+            self.fail("a complete result with gaps was rejected: %s" % error)
+        with self.assertRaises(ValueError):
+            validate(dict(self.result, status="incomplete", gaps=[]), self.job)   # must say why
+
     def test_accept_cannot_hide_an_unrefuted_blocker(self):
         self.job["finding_ids"] = ["primary:F1"]
         self.result["outcomes"] = [self.outcome("primary:F1")]

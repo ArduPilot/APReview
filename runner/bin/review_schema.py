@@ -78,8 +78,11 @@ def validate(result, job):
         raise ValueError("result identity")
     if result["status"] not in ("complete", "incomplete") or type(result["heavy"]) is not bool or not isinstance(result["gaps"], list) or not all(isinstance(g, str) and g for g in result["gaps"]):
         raise ValueError("result status")
-    if (result["status"] == "complete") == bool(result["gaps"]):
-        raise ValueError("result gaps")
+    # A complete review may well have gaps: things it could not exercise are
+    # reported, and stay UNCONFIRMED. Incomplete means the review itself could
+    # not be carried out, and that has to say why.
+    if result["status"] == "incomplete" and not result["gaps"]:
+        raise ValueError("incomplete result names no gap")
     if "verdict" in result:
         if result["verdict"] == "APPROVE":
             result["verdict"] = "ACCEPT"

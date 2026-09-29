@@ -516,6 +516,7 @@ M = [
  ('manifestlegacy', "runner/bin/review_discovery.py", '        start = re.search(r\'<div class="pr" id="pr\' + re.escape(anchor) + r\'">\', html)', '        start = None'),
  ('manifesthyphen', "runner/bin/review_discovery.py", '                prefix, number = key.rsplit("-", 1) if "-" in key else (key, "")', '                prefix, number = (key, "")'),
  ('manifestskip', "runner/bin/review_discovery.py", '                self.unparsed.append(key)\n                print("manifest: skipping unknown key " + key, file=sys.stderr)\n                continue', '                raise OSError("unknown manifest key or head: " + key)'),
+ ('gapscomplete', "runner/bin/review_schema.py", '    if result["status"] == "incomplete" and not result["gaps"]:', '    if (result["status"] == "complete") == bool(result["gaps"]):'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -848,6 +849,7 @@ REGRESSION = {
     'manifestlegacy': 'DiscoveryContract.test_a_legacy_page_section_is_found_for_import',
     'manifesthyphen': 'DiscoveryContract.test_the_hyphen_key_form_the_command_publishes_is_read',
     'manifestskip': 'DiscoveryContract.test_the_hyphen_key_form_the_command_publishes_is_read',
+    'gapscomplete': 'ReviewResults.test_a_complete_review_may_name_what_it_could_not_exercise',
 }
 
 # Slice two: mutations must cause their pinned test to FAIL, never merely ERROR.
