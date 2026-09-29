@@ -231,6 +231,9 @@ def read(tool, directory):
         from review_credentials import lease
         with lease(tool, directory):
             rec.update(READERS[tool](directory))
+    except TimeoutError as e:
+        rec["error"] = "%s: %s" % (type(e).__name__, e)
+        rec["busy"] = BUSY in str(e)
     except subprocess.TimeoutExpired:
         rec["error"] = "timed out after %ds" % TIMEOUT
     except Exception as e:                       # observation must not raise
@@ -240,7 +243,10 @@ def read(tool, directory):
     return rec
 
 
-def recorded(logs=None):
+BUSY = "account credential lease busy"
+
+
+def recorded(logs=None, usable=False):
     """The newest recorded reading for each account, by (tool, real path).
 
     From the file quota.py --record writes. Callers that need a figure without
@@ -262,6 +268,8 @@ def recorded(logs=None):
         except Exception:
             continue
         key = (rec.get("tool"), os.path.realpath(rec.get("dir") or ""))
+        if usable and (rec.get("error") or rec.get("free_pct") is None):
+            continue
         if key[0] and key not in newest:
             newest[key] = rec
     return newest

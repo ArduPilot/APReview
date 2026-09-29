@@ -164,6 +164,38 @@ class Accounts(unittest.TestCase):
         d = self.decisions("--role", "default")[("default", "claude")]
         self.assertIn("recorded", d["considered"][0]["source"])
 
+    def hold_lease(self, tool, name):
+        # a guardian of another run holds the account for its whole attempt
+        data = os.path.join(self.home, "data")
+        os.makedirs(data, exist_ok=True)
+        code = ("import sys,time; sys.path.insert(0, sys.argv[1]); from review_lock import try_lock; "
+                "l = try_lock(sys.argv[2], sys.argv[3]); print('held', flush=True); time.sleep(60)")
+        key = "account:%s/%s" % (tool, os.path.realpath(os.path.join(self.auth, name)))
+        child = subprocess.Popen(["python3", "-c", code, os.path.dirname(ACCOUNTS),
+                                  os.path.join(data, "locks"), key], stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.wait)
+        self.addCleanup(child.kill)
+        self.assertEqual(child.stdout.readline().strip(), "held")
+        return data
+
+    def test_an_account_in_use_by_a_review_keeps_its_last_good_reading(self):
+        # an overlapping run found codex-a busy and deferred every PR as out of
+        # quota; busy means in use, so the last good figure stands
+        data = self.hold_lease("codex", "codex-a")
+        self.reading("codex", "codex-a", free=64.0, age_min=90)
+        self.reading("codex", "codex-a", error="TimeoutError: account credential lease busy", age_min=30)
+        d = self.decisions("--role", "default", REVIEW_DATA=data)[("default", "codex")]
+        self.assertEqual(d["chosen"], "codex-a")
+        self.assertIn("account in use", d["considered"][0]["source"])
+
+    def test_a_busy_account_with_no_recent_good_reading_is_still_unknown(self):
+        data = self.hold_lease("codex", "codex-a")
+        self.reading("codex", "codex-a", free=64.0, age_min=60 * 8)
+        self.reading("codex", "codex-b", free=50.0)
+        d = self.decisions("--role", "default", REVIEW_DATA=data)[("default", "codex")]
+        self.assertEqual(d["chosen"], "codex-b")
+        self.assertIn("lease busy", d["considered"][0]["skipped"])
+
     def test_a_stale_reading_is_not_used(self):
         self.reading("claude", "claude-a", free=60.0, age_min=600)
         d = self.decisions("--role", "default")[("default", "claude")]

@@ -131,8 +131,27 @@ def _reading(tool, directory, live, fresh_minutes, cache):
                 return rec
     rec = quota.read(tool, directory)
     rec["source"] = "read now"
+    if rec.get("busy"):
+        # A review holds the account right now, which is the one state in
+        # which it certainly works. Use its last good reading, if recent.
+        last = quota.recorded(usable=True).get((tool, os.path.realpath(directory)))
+        age = _age_minutes(last)
+        if age is not None and age <= BUSY_MAX_MINUTES:
+            rec = dict(last, source="recorded %dm ago; account in use" % age)
     cache[key] = rec
     return rec
+
+
+BUSY_MAX_MINUTES = 6 * 60
+
+
+def _age_minutes(rec):
+    try:
+        age = (datetime.datetime.now().astimezone()
+               - datetime.datetime.fromisoformat(rec.get("at"))).total_seconds() / 60.0
+    except Exception:
+        return None
+    return age if age >= 0 else None
 
 
 def choose(tool, role, policy, live=False, cache=None):
