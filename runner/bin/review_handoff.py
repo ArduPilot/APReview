@@ -171,6 +171,45 @@ def shared_pages(mirror):
     return [p for p in pages if p.exists()]
 
 
+def contents_facts(html):
+    """Title, author and verdict per anchor, from a page's Contents table:
+    the command stated them there in fixed columns."""
+    body = html[html.find("<h2>Contents"):html.find("<h2>Reviews")] if "<h2>Contents" in html else ""
+    rows = re.findall(r"<tr>(.*?)</tr>", body, re.S)
+    if not rows:
+        return {}
+    heads = [unescape(re.sub(r"<[^>]+>", "", h)).strip().lower()
+             for h in re.findall(r"<th[^>]*>(.*?)</th>", rows[0], re.S)]
+    out = {}
+    for row in rows[1:]:
+        cells = re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
+        link = re.search(r'href="#pr([^"]+)"', row)
+        if not link or len(cells) != len(heads):
+            continue
+        cell = dict(zip(heads, cells))
+        text = lambda c: unescape(re.sub(r"<[^>]+>", "", c or "")).strip()
+        fact = {}
+        if "title" in cell:
+            fact["title"] = text(cell["title"])
+        if "author" in cell:
+            fact["author"] = text(cell["author"])
+        verdict = re.search(r'class="v-(approve|comment|request)"', cell.get("verdict", ""))
+        if verdict:
+            fact["verdict"] = {"approve": "ACCEPT", "comment": "COMMENT", "request": "REQUEST CHANGES"}[verdict[1]]
+        out[link[1]] = fact
+    return out
+
+
+def record_facts(store, imports_facts):
+    """Keep what the old pages said about each imported PR beside the store;
+    bundles are immutable and the renderer must not parse review prose."""
+    path = store.root / "legacy-facts.json"
+    facts = read(path, {})
+    for pr, fact in imports_facts.items():
+        facts.setdefault(pr, {}).update({k: v for k, v in fact.items() if v})
+    atomic(path, facts)
+
+
 def scan_shared(mirror, parser):
     """Rows per shared page. Every manifest key must resolve to a configured
     repository and carry its section, or the page would lose that review on
@@ -188,6 +227,11 @@ def scan_shared(mirror, parser):
             continue
         problems += [rel + ": unknown key " + key for key in parser.unparsed]
         problems += [rel + ": no section for " + pr for pr, row in rows.items() if not row.get("section")]
+        table = contents_facts(path.read_text())
+        for row in rows.values():
+            fact = table.get(row.get("key", "").replace("#", "-")) or table.get(row.get("key", "").replace("#", ""))
+            if fact:
+                row["facts"] = fact
         imports.append(("page:review/" + rel, rows))
     return imports, problems
 
@@ -197,6 +241,7 @@ def import_pages(store, imports, config):
     imported section; an accepted new-path generation is authoritative."""
     ticket = store.ticket()
     conflicts = []
+    record_facts(store, {pr: row["facts"] for _, rows in imports for pr, row in rows.items() if row.get("facts")})
     for target, rows in imports:
         for pr, row in rows.items():
             lock = try_lock(store.locks, pr)

@@ -308,6 +308,9 @@ class Integration(unittest.TestCase):
         page = mirror / "DevCallReviews/AIReview/devcall_pr_reviews.html"
         page.parent.mkdir(parents=True)
         page.write_text('<!-- reviewprs-manifest v1 label="AIReview" heads="1:aaaaaaaaaa MAVProxy-2:bbbbbbbbbb" -->\n'
+                        '<h2>Contents</h2>\n<table><thead><tr><th>PR</th><th>Title</th><th>Author</th><th>Verdict</th></tr></thead>'
+                        '<tbody><tr><td><a href="#pr1">#1</a></td><td><a href="u">First &amp; one</a></td><td>alice</td>'
+                        '<td><span class="v-request">REQUEST CHANGES</span></td></tr></tbody></table>\n'
                         '<h2>Reviews</h2>\n<div class="pr new" id="pr1">\n<h3>one</h3>\n</div>\n'
                         '<div class="pr" id="prMAVProxy-2">\n<h3>two</h3>\n</div>\n<h2>Summary</h2>\n')
         other = mirror / "DevCallReviews/DevCallEU/devcall_pr_reviews.html"
@@ -356,7 +359,14 @@ class Integration(unittest.TestCase):
         from review_render import Renderer
         page = Renderer(self.store).render("page:review/DevCallReviews/AIReview/devcall_pr_reviews.html").decode()
         self.assertIn('<section id="prMAVProxy-2"', page)
-        self.assertNotIn('<div class="pr new"', page)
+        # the old contents table's facts, not the review's prose, fill the new one
+        self.assertEqual(read(self.data / "legacy-facts.json")["pr:ardupilot/ardupilot#1"],
+                         dict(title="First & one", author="alice", verdict="REQUEST CHANGES"))
+        self.assertIn('<td data-sort="alice">alice</td>', page)
+        self.assertIn('<span class="v-request">REQUEST CHANGES</span></td>', page)
+        # the command's own card is kept, its anchor moved to the section
+        self.assertIn('<div class="pr new">', page)
+        self.assertEqual(page.count('id="prMAVProxy-2"'), 1)
         self.assertIn("<h3>one</h3>", page)
         self.assertFalse(pending(self.data))
 

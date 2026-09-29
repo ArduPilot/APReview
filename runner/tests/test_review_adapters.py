@@ -487,12 +487,12 @@ class RenderContract(unittest.TestCase):
         verified = verify(raw)
         self.assertEqual(verified["sections"][0]["pr"], PR)
         self.assertIn(b"<body>\n<!-- reviewprs-manifest", raw)
-        self.assertIn(b"Validation outcome", raw)
+        self.assertIn(b'<p class="summary">', raw)
         self.assertIn(b"role','button", raw)
         with self.assertRaises(OSError):
             verify(raw.replace(b"Stub review.", b"Other review."))
         with self.assertRaises(OSError):
-            verify(raw.replace(b"<h1>PR reviews</h1>", b"<h1>Wrong report</h1>"))
+            verify(raw.replace(b"<h1>ArduPilot PR review: #1</h1>", b"<h1>Wrong report</h1>"))
         wrong = dict(verified["sections"][0], generation=2)
         with self.assertRaises(OSError):
             verify(raw, [wrong])
@@ -508,7 +508,9 @@ class RenderContract(unittest.TestCase):
         verified = verify(raw)
         self.assertEqual(verified["sections"][0]["pr"], "pr:owner/repo#7")
         self.assertIn(b"<h3>seven</h3>", raw)
-        self.assertNotIn(b'<div class="pr new"', raw)
+        # the command's own card, styled by its own stylesheet, one anchor
+        self.assertIn(b'<div class="pr new">', raw)
+        self.assertEqual(raw.count(b'id="pr7"'), 1)
 
     def test_an_unbalanced_legacy_section_still_ends_where_the_renderer_says(self):
         for markup in ('<div class="pr" id="pr8">\n<h3>eight</h3>\n<div class="x">no closer\n</div>',
@@ -556,7 +558,7 @@ class RenderContract(unittest.TestCase):
         self.store.merge_membership(
             page, {PR: dict(ticket=1, removed=False, ci=dict(ci, at="2026-09-28T11:00:00Z"))}
         )
-        self.assertNotIn(b"CI changed", self.renderer.render(page))
+        self.assertNotIn(b"CI updated", self.renderer.render(page))
         self.store.merge_membership(
             page,
             {
@@ -565,7 +567,28 @@ class RenderContract(unittest.TestCase):
                 )
             },
         )
-        self.assertIn(b"CI changed", self.renderer.render(page))
+        self.assertIn(b"CI updated", self.renderer.render(page))
+
+    def test_a_label_page_reads_like_the_commands_report(self):
+        # title, contents with title/author/verdict for imported reviews too
+        page = "page:test/DevCallReviews/DevCallEU/devcall_pr_reviews.html"
+        legacy = ('<div class="pr" id="pr9">\n<h3><a href="u">#9</a> &mdash; Fix the thing</h3>\n'
+                  '<p class="meta"><span>Author: <strong>someone</strong></span>'
+                  '<span>Verdict: <span class="v-request">REQUEST CHANGES</span></span></p>\n</div>')
+        from review_handoff import legacy_bundle
+        lock = __import__("review_lock").try_lock(self.store.locks, "pr:owner/repo#9")
+        with lock:
+            legacy_bundle(self.store, "pr:owner/repo#9", dict(head="c" * 10, section=legacy), page, 1, {})
+        self.store.merge_membership(page, {"pr:owner/repo#9": dict(ticket=2, removed=False, generation=0)})
+        raw = self.renderer.render(page).decode()
+        self.assertIn("<title>ArduPilot DevCallEU PR reviews</title>", raw)
+        self.assertIn("<h2>Contents</h2>", raw)
+        self.assertIn(">Fix the thing</a>", raw)
+        self.assertIn("<td data-sort=\"someone\">someone</td>", raw)
+        self.assertIn('<span class="v-request">REQUEST CHANGES</span></td>', raw)
+        self.assertNotIn("LEGACY", raw)
+        self.assertNotIn("page:test", raw.split("-->", 1)[1])
+        self.assertIn('content:"\\2195"', raw)
 
     def test_the_dated_page_is_the_calls_full_report(self):
         # people open DevCallReviews/<date>/devcall_pr_reviews.html for a call;
@@ -700,7 +723,7 @@ class LocalPublication(unittest.TestCase):
                 self.store.receipt(entry, **receipt)
         self.assertEqual(receipt["state"], "published")
         body = (self.served / "report.html").read_text()
-        self.assertIn("Posting action: held", body)
+        self.assertIn("Comment held for a human", body)
         self.assertIn("gh pr comment --body-file held.md", body)
 
     def test_http_success_with_wrong_page_digest_is_not_publication(self):

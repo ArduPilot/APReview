@@ -1,10 +1,11 @@
 """Deterministic HTML projections of accepted bundles and page membership."""
 
 import hashlib
-from html import escape
+from html import escape, unescape
 from html.parser import HTMLParser
 import json
 import re
+from urllib.parse import unquote
 
 from review_store import atomic, digest, read
 
@@ -26,7 +27,56 @@ for(const t of document.querySelectorAll('table.sortable')) {
  }
 }
 </script>"""
-STYLE = """<style>body{font-family:system-ui;max-width:1100px;margin:auto;padding:1em}table{border-collapse:collapse;width:100%}td,th{padding:.4em;border:1px solid #aaa;text-align:left}th{cursor:pointer}th::after{content:' ↕'}th[aria-sort=ascending]::after{content:' ▲'}th[aria-sort=descending]::after{content:' ▼'}pre{white-space:pre-wrap}section{margin-top:2em}.progress{border-left:4px solid #b80;padding:1em}</style>"""
+STYLE = """<style>
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+     max-width:1200px;margin:0 auto;padding:24px;line-height:1.5;color:#1b1f23;background:#fff}
+h1{border-bottom:2px solid #d0d7de;padding-bottom:8px}
+h2{margin-top:32px;border-bottom:1px solid #d0d7de;padding-bottom:4px}
+h3{margin-bottom:4px}
+code{background:#f6f8fa;padding:1px 4px;border-radius:4px;font-size:90%}
+.meta{color:#57606a;font-size:90%;margin:2px 0}
+.meta span{margin-right:16px}
+.banner{background:#ddf4ff;border:1px solid #54aeff;border-radius:6px;padding:10px 14px;margin:14px 0}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;margin:12px 0}
+th,td{border:1px solid #d0d7de;padding:6px 10px;text-align:left;vertical-align:top;font-size:92%}
+th{background:#f6f8fa;cursor:pointer;position:relative;user-select:none;white-space:nowrap}
+th:focus{outline:2px solid #0969da;outline-offset:-2px}
+th::after{content:"\\2195";opacity:.35;margin-left:6px;font-size:90%}
+th[aria-sort="ascending"]::after{content:"\\25B2";opacity:1}
+th[aria-sort="descending"]::after{content:"\\25BC";opacity:1}
+tr:nth-child(even) td{background:#fbfcfd}
+.hint{color:#57606a;font-size:88%;font-style:italic;margin-top:-6px}
+.pr{border:1px solid #d0d7de;border-radius:8px;padding:14px 18px;margin:20px 0;background:#fff}
+.summary{background:#f6f8fa;border-left:4px solid #8c959f;padding:8px 12px;margin:10px 0}
+ul.findings{margin:10px 0;padding-left:22px}
+ul.findings li{margin:8px 0}
+.tag{font-weight:700;font-size:80%;padding:1px 6px;border-radius:4px;color:#fff;margin-right:6px}
+.f-bug .tag{background:#cf222e}
+.f-issue .tag{background:#bc4c00}
+.f-note .tag{background:#0969da}
+.f-good .tag{background:#1a7f37}
+.v-approve{color:#1a7f37;font-weight:700}
+.v-comment{color:#9a6700;font-weight:700}
+.v-request{color:#cf222e;font-weight:700}
+.ci-pass{color:#1a7f37}
+.ci-fail{color:#cf222e;font-weight:700}
+.ci-none{color:#57606a}
+.ci-pend{color:#9a6700}
+.new{background:#dafbe1;border-left:4px solid #1a7f37}
+.deferred{background:#fff8c5;border-left:4px solid #bf8700}
+.draft{display:inline-block;font-weight:700;font-size:78%;padding:1px 6px;border-radius:4px;background:#f6f8fa;border:1px solid #d0d7de;color:#57606a}
+.verdict{background:#f6f8fa;border-left:4px solid #8c959f;padding:8px 12px;margin:10px 0}
+.src{font-style:italic}
+pre{background:#f6f8fa;border:1px solid #d0d7de;border-radius:6px;padding:10px 12px;overflow-x:auto;font-size:88%}
+pre code{background:none;padding:0}
+.ci-note{color:#57606a;font-size:88%;font-style:italic}
+.ci-updated{background:#fff8c5;border:1px solid #d4a72c;border-radius:6px;padding:8px 12px;margin:10px 0;font-size:92%}
+.f-ok .tag{background:#1a7f37}
+section{display:block}
+.progress{background:#fff8c5;border-left:4px solid #bf8700;padding:6px 12px;margin:8px 0}
+.annot{color:#57606a;font-size:88%;margin:-12px 0 20px 4px}
+</style>"""
 
 
 def sha(raw):
@@ -79,53 +129,94 @@ def balanced(inner):
     return inner + "</div>" * (opened - closed)
 
 
+VERDICT_CLASS = {"ACCEPT": "v-approve", "APPROVE": "v-approve", "COMMENT": "v-comment",
+                 "REQUEST CHANGES": "v-request"}
+
+
+def verdict_span(verdict):
+    if not verdict:
+        return "&mdash;"
+    word = "APPROVE" if verdict == "ACCEPT" else verdict
+    return '<span class="%s">%s</span>' % (VERDICT_CLASS.get(verdict, "v-comment"), escape(word))
+
+
+CI_SPAN = {"passing": ("ci-pass", "&#10003; passing"), "failing": ("ci-fail", "&#10007; failing"),
+           "pending": ("ci-pend", "&#8230; pending"), "none": ("ci-none", "no CI"),
+           "unknown": ("ci-none", "unknown")}
+
+
+def ci_span(ci):
+    cls, text = CI_SPAN.get((ci or {}).get("state", "unknown"), CI_SPAN["unknown"])
+    return '<span class="%s">%s</span>' % (cls, text)
+
+
+def legacy_facts(raw):
+    """Title and author as the command's own section heading states them,
+    and the verdict only where its meta line names one."""
+    facts = {}
+    m = re.search(r"<h3>.*?&mdash;\s*(.*?)</h3>", raw, re.S)
+    if m:
+        facts["title"] = unescape(re.sub(r"<[^>]+>", "", m[1])).strip()
+    m = re.search(r"Author:\s*<strong>(.*?)</strong>", raw)
+    if m:
+        facts["author"] = unescape(m[1])
+    m = re.search(r"Verdict:\s*<span[^>]*>(.*?)</span>", raw)
+    if m:
+        word = unescape(re.sub(r"<[^>]+>", "", m[1])).strip().upper()
+        facts["verdict"] = "ACCEPT" if word in ("APPROVE", "ACCEPT") else word
+    return facts
+
+
+def facts(bundle, recorded=None):
+    if bundle.get("legacy"):
+        out = legacy_facts(bundle["results"]["reconciliation"]["section_md"])
+        out.update((recorded or {}).get(bundle["pr"], {}))
+        return out
+    inputs = bundle["inputs"]
+    return dict(title=inputs.get("title", ""), author=inputs.get("author", ""),
+                verdict=bundle["results"]["reconciliation"].get("verdict"))
+
+
+FINDING = {(True, True): ("f-bug", "BLOCKING"), (True, False): ("f-bug", "BLOCKING"),
+           (False, True): ("f-issue", "ISSUE"), (False, False): ("f-note", "NOTE")}
+
+
 def core(bundle):
     if bundle.get("legacy"):
+        # the command's own card, as it was published; its id moves to the
+        # enclosing section so the anchor is not duplicated
         raw = bundle["results"]["reconciliation"]["section_md"].strip()
-        inner = re.sub(r'^<(?:section|div)\b[^>]*>\s*|\s*</(?:section|div)>$', '', raw)
-        return '<p>Imported legacy review; original coverage retained.</p>\n' + balanced(inner)
+        raw = re.sub(r'^(<(?:div|section)\b[^>]*?)\s+id="[^"]*"', r"\1", raw, count=1)
+        if raw.startswith("<section"):
+            raw = re.sub(r"^<section\b", '<div class="pr"', raw, count=1)
+            raw = re.sub(r"</section>\s*$", "</div>", raw)
+        return balanced(raw)
     inputs, final = bundle["inputs"], bundle["results"]["reconciliation"]
-    validation = bundle["results"]["validation"]
-    counts = {
-        name: sum(x["outcome"] == name for x in validation["outcomes"])
-        for name in ("CONFIRM", "ADJUST", "REFUTE")
-    }
-    counts["NEW"] = len(validation["new"])
-    title = escape(inputs.get("title", bundle["pr"]))
     url = f"https://github.com/{inputs['repository']}/pull/{inputs['number']}"
-    out = f'<h2><a href="{url}">{escape(bundle["pr"])}: {title}</a></h2>\n'
-    out += (
-        "<p>Reviewed head <code>"
-        + escape(inputs["head"])
-        + "</code>; base <code>"
-        + escape(inputs["base"])
-        + "</code>; merge base <code>"
-        + escape(inputs["merge_base"])
-        + "</code>.</p>\n"
-    )
-    out += "<p>Coverage: primary review, independent cold pass, validation, reconciliation.</p>\n"
-    out += table(
-        ["Verdict", "Summary"],
-        [[(final["verdict"], escape(final["verdict"])), ("", escape(final["summary"]))]],
-    )
-    out += table(
-        ["Validation outcome", "Count"], [[(name, name), (n, str(n))] for name, n in counts.items()]
-    )
-    if final["outcomes"]:
-        out += table(
-            ["Finding", "Disposition", "Blocking", "Actionable"],
-            [
-                [
-                    (x["id"], escape(x["id"])),
-                    (x["disposition"], escape(x["disposition"])),
-                    (int(x["blocking"]), str(x["blocking"])),
-                    (int(x["actionable"]), str(x["actionable"])),
-                ]
-                for x in final["outcomes"]
-            ],
-        )
-    out += markdown(final["section_md"])
-    return out
+    key = inputs.get("manifest_key", str(inputs["number"]))
+    label = "#" + key if key.isdecimal() else key.replace("-", "#")
+    out = '<div class="pr">\n'
+    out += f'<h3><a href="{url}">{escape(label)}</a> &mdash; {escape(inputs.get("title", ""))}</h3>\n'
+    out += ('<p class="meta"><span>Author: <strong>' + escape(inputs.get("author", "")) + "</strong></span>"
+            + "<span>Repo: <code>" + escape(inputs["repository"]) + "</code></span>"
+            + "<span>Head: <code>" + escape(inputs["head"][:10]) + "</code></span>"
+            + "<span>CI: " + ci_span(inputs.get("ci")) + "</span>"
+            + "<span>Verdict: " + verdict_span(final.get("verdict")) + "</span></p>\n")
+    date = inputs.get("configuration", {}).get("date", "")
+    out += ('<p class="meta"><span><a href="' + url + '/files">diff</a></span>'
+            + "<span>Reviewed by: Claude + Codex cold pass + Codex validation, reconciled by Claude</span>"
+            + ("<span>Reviewed " + escape(date) + "</span>" if date else "") + "</p>\n")
+    out += '<p class="summary">' + escape(final.get("summary", "")) + "</p>\n"
+    findings = [x for x in final.get("outcomes", []) if x.get("disposition") != "refuted"]
+    if findings:
+        out += '<ul class="findings">\n'
+        for x in findings:
+            cls, tag = FINDING[(bool(x.get("blocking")), bool(x.get("actionable")))]
+            out += ('<li class="' + cls + '"><span class="tag">' + tag + "</span> "
+                    + escape(x.get("rationale", "")) + "</li>\n")
+        out += "</ul>\n"
+    out += markdown(final.get("section_md", ""))
+    return out + "</div>\n"
 
 
 def section(bundle, annotation=""):
@@ -148,9 +239,11 @@ def section(bundle, annotation=""):
     )
 
 
-def seal(body):
+def seal(body, title="PR reviews"):
     raw = (
         '<!doctype html>\n<html><head><meta charset="utf-8">\n'
+        + '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        + "<title>" + escape(title) + "</title>\n"
         + STYLE
         + "\n</head>\n<body>\n"
         + body
@@ -246,7 +339,25 @@ class Renderer:
         self.store = store
 
     def render(self, target, retained=None):
-        return seal(self.body(target, retained))
+        return seal(self.body(target, retained), self.title(target, retained))
+
+    @staticmethod
+    def title(target, retained=None):
+        path = target.split("/", 1)[1] if "/" in target else target
+        m = re.match(r"DevCallReviews/(?:(\d{4}[-_]\d{2}[-_]\d{2})/)?([^/]+)/devcall_pr_reviews.html$", path)
+        if retained:
+            key = retained["inputs"].get("manifest_key", str(retained["inputs"]["number"]))
+            return "ArduPilot PR review: " + (key if not key.isdecimal() else "#" + key)
+        if m and m[2] != "followups":
+            return "ArduPilot %s PR reviews" % m[2]
+        m = re.match(r"UserReviews/(.+)\.html$", path)
+        if m:
+            return "ArduPilot PR reviews \u2014 " + unquote(m[1])
+        if path.startswith("RsyncReviews/"):
+            return "rsync PR reviews"
+        if "/followups/" in path:
+            return "ArduPilot followup PR reviews"
+        return "ArduPilot PR reviews"
 
     def body(self, target, retained=None):
         rows = read(self.store.root / "membership" / (digest(target) + ".json"), {})
@@ -273,111 +384,99 @@ class Renderer:
                 annotation = ""
                 ci = row.get("ci")
                 if ci and bundle:
-                    previous = bundle["inputs"].get("ci")
-                    annotation += (
-                        "<p>CI: "
-                        + escape(ci["state"])
-                        + " at "
-                        + escape(ci["head"])
-                        + ", "
-                        + escape(ci["at"])
-                        + (
-                            " (CI changed)"
-                            if ci["state"] != (previous or {}).get("state", "unknown")
-                            else ""
-                        )
-                        + "</p>\n"
-                    )
-                if progress:
-                    annotation += '<div class="progress">' + escape(progress) + "</div>\n"
+                    previous = (bundle["inputs"].get("ci") or {}).get("state", "unknown")
+                    if ci["state"] != previous and not bundle.get("legacy"):
+                        annotation += ('<div class="ci-updated">CI updated ' + escape(ci["at"][:10])
+                                       + ": " + escape(previous) + " &rarr; " + ci_span(ci) + "</div>\n")
+                if progress and progress not in ("accepted", "reuse", "reused"):
+                    annotation += '<div class="progress">Review ' + escape(progress) + "</div>\n"
                 annotations[pr] = annotation
                 if not bundle:
                     pending.append(
-                        '<div class="progress">'
-                        + escape(pr + ": " + (progress or "in progress; no accepted review"))
-                        + "</div>\n"
+                        '<div class="pr deferred"><p>' + escape(pr[3:]) + ": "
+                        + escape(progress or "review in progress") + "</p></div>\n"
                     )
-        generated = max(
-            (b["inputs"].get("configuration", {}).get("date", "") for b in bundles), default=""
-        )
+        dates = [b["inputs"].get("configuration", {}).get("date", "") for b in bundles if not b.get("legacy")]
+        generated = max(dates, default="")
         heads = " ".join(
             b["inputs"].get("manifest_key", str(b["inputs"]["number"])) + ":" + b["inputs"]["head"]
             for b in bundles
         )
         label = target.split("/")[-2]
         body = f'<!-- reviewprs-manifest v1 label="{escape(label)}" generated="{escape(generated)}" heads="{escape(heads)}" -->\n'
-        body += (
-            "<h1>PR reviews</h1><p>Review date: "
-            + escape(generated)
-            + "; call/archive: "
-            + escape(target)
-            + "</p>\n"
-        )
+        body += "<h1>" + escape(self.title(target, retained)) + "</h1>\n"
+        call = re.search(r"/(\d{4})[-_](\d{2})[-_](\d{2})/", target)
+        meta = []
+        if generated:
+            meta.append("Review date: <strong>" + escape(generated) + "</strong>")
+        if call and label in ("DevCallTopic", "DevCallEU"):
+            meta.append("for the <code>" + escape(label) + "</code> call on <strong>"
+                        + "-".join(call.groups()) + "</strong>")
+        if meta:
+            body += '<p class="meta">' + " &middot; ".join(meta) + "</p>\n"
+        legacy = sum(1 for b in bundles if b.get("legacy"))
+        if not retained:
+            body += ('<div class="banner"><b>%d PRs on this page</b>: %d reviewed by the review '
+                     "pipeline, %d carried over from the earlier report%s.</div>\n" % (
+                         len(bundles), len(bundles) - legacy, legacy,
+                         ", %d awaiting review" % len(pending) if pending else ""))
         contents = []
+        verdicts = []
+        recorded = read(self.store.root / "legacy-facts.json", {})
         for b in bundles:
-            i, final = b["inputs"], b["results"]["reconciliation"]
-            rank = {"ACCEPT": 0, "COMMENT": 1, "REQUEST CHANGES": 2}.get(final.get("verdict"), 3)
+            i = b["inputs"]
+            f = facts(b, recorded)
+            verdicts.append(f.get("verdict"))
+            key = i.get("manifest_key", str(i["number"]))
+            label_pr = "#" + key if key.isdecimal() else key.replace("-", "#")
             ci = rows.get(b["pr"], {}).get("ci") or i.get("ci") or {"state": "unknown"}
-            ci_rank = {"none": -1, "unknown": 0, "passing": 1, "pending": 2, "failing": 3}[
-                ci["state"]
-            ]
-            contents.append(
-                [
-                    (
-                        i["number"],
-                        '<a href="#'
-                        + escape(anchor(i))
-                        + '">'
-                        + escape(i.get("manifest_key", str(i["number"])))
-                        + "</a>",
-                    ),
-                    (i.get("author", ""), escape(i.get("author", ""))),
-                    (rank, final.get("verdict", "LEGACY")),
-                    (ci_rank, escape(ci["state"])),
-                ]
-            )
-        body += (
-            table(["PR", "Author", "Verdict", "CI"], contents)
-            + "<p>Headings are clickable; Enter or Space also sorts.</p>\n"
-        )
+            url = f"https://github.com/{i['repository']}/pull/{i['number']}"
+            rank = {"ACCEPT": 0, "COMMENT": 1, "REQUEST CHANGES": 2}.get(f.get("verdict"), 3)
+            ci_rank = {"passing": 0, "pending": 1, "failing": 2}.get(ci["state"], 3)
+            contents.append([
+                (i["number"], '<a href="#' + escape(anchor(i)) + '">' + escape(label_pr) + "</a>"),
+                (i["repository"], escape(i["repository"].split("/")[1])),
+                (f.get("title", ""), '<a href="' + url + '">' + escape(f.get("title", "")) + "</a>"),
+                (f.get("author", ""), escape(f.get("author", ""))),
+                (ci_rank, ci_span(ci)),
+                (rank, verdict_span(f.get("verdict"))),
+            ])
+        if not retained:
+            body += ("<h2>Contents</h2>\n" + '<div class="tablewrap">'
+                     + table(["PR", "Repo", "Title", "Author", "CI", "Verdict"], contents) + "</div>\n"
+                     + '<p class="hint">Every table on this page is click-to-sort &mdash; click a heading '
+                     "to sort by it, click again to reverse.</p>\n<h2>Reviews</h2>\n")
         for b in bundles:
             annotation = annotations.get(b["pr"], "")
             i = b["inputs"]
             snapshot = b.get("reconciliation_snapshot", {})
             if snapshot.get("head") and snapshot["head"] != i["head"]:
                 annotation += (
-                    "<p>Moved during run: reviewed "
-                    + escape(i["head"])
-                    + "; observed "
-                    + escape(snapshot["head"])
-                    + ". New head is not covered.</p>\n"
+                    '<p class="annot">Moved during the review: reviewed <code>' + escape(i["head"][:10])
+                    + "</code>, now <code>" + escape(snapshot["head"][:10])
+                    + "</code>. The new head is not covered.</p>\n"
                 )
             receipts = (
                 []
-                if retained
+                if retained or b.get("legacy")
                 else [
                     read(self.store.root / "receipts" / (intent["id"] + ".json"), {})
                     for intent in b["intents"]
                     if intent["kind"] in ("comment", "note")
                 ]
             )
-            annotation += (
-                "<p>Posting action: "
-                + escape(", ".join(r.get("state", "owed") for r in receipts) or "owed")
-                + "</p>\n"
-            )
             for r in receipts:
-                if r.get("manual_command"):
-                    annotation += "<pre>" + escape(r["manual_command"]) + "</pre>\n"
+                if r.get("url"):
+                    annotation += '<p class="annot">Comment: <a href="' + escape(r["url"]) + '">posted</a></p>\n'
+                elif r.get("manual_command"):
+                    annotation += '<p class="annot">Comment held for a human:</p><pre>' + escape(r["manual_command"]) + "</pre>\n"
             body += section(b, annotation)
         body += "".join(pending)
-        totals = {
-            v: sum(b["results"]["reconciliation"].get("verdict") == v for b in bundles)
-            for v in ("ACCEPT", "COMMENT", "REQUEST CHANGES")
-        }
-        body += "<h2>Summary</h2>" + table(
-            ["Verdict", "PR count"], [[(v, v), (n, str(n))] for v, n in totals.items()]
-        )
+        if not retained:
+            totals = {v: sum(x == v for x in verdicts) for v in ("ACCEPT", "COMMENT", "REQUEST CHANGES")}
+            body += "<h2>Summary</h2>\n" + table(
+                ["Verdict", "PRs"], [[(v, verdict_span(v)), (n, str(n))] for v, n in totals.items()]
+            )
         return body
 
     def landing(self, date, pages):
