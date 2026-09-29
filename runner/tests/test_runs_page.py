@@ -69,6 +69,14 @@ class Dashboard(unittest.TestCase):
         self.assertNotIn("Supervisor runs", page)
         self.assertIn(">all<", page)
 
+    def test_a_run_held_off_at_admission_is_a_skip_not_a_death(self):
+        now = datetime.datetime.now().astimezone()
+        self.log("all", "reviewprs mode=all host=t start=%s\ncredential account is busy\n"
+                 "finish=%s status=accounts-busy\n" % ((now - datetime.timedelta(hours=2)).isoformat(),
+                                                       (now - datetime.timedelta(hours=2)).isoformat()))
+        self.build()
+        self.assertEqual([r["status"] for r in self.state["runs"]], ["skipped"])
+
     def setUp(self):
         self.home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.home, True)

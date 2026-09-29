@@ -188,9 +188,11 @@ trap 'FR=""; [ "$LOCKED" = 1 ] && FR="--from-run"; \
       "$HOME/review/bin/publish-runs-page.sh" >/dev/null 2>&1 || true; \
       "$HOME/review/bin/project-sync.sh" >/dev/null 2>&1 || true' EXIT
 
-python3 "$REVIEW_ROOT/bin/review-route.py" "$MODE" --expect "$ROUTE" >/dev/null || exit 75
+python3 "$REVIEW_ROOT/bin/review-route.py" "$MODE" --expect "$ROUTE" >/dev/null || {
+    echo "finish=$(date -Is) status=route-changed"; exit 75; }
 if [ "$ROUTE" = old ]; then
-    python3 "$REVIEW_ROOT/bin/review-admit.py" pause || exit 75
+    python3 "$REVIEW_ROOT/bin/review-admit.py" pause || {
+        echo "finish=$(date -Is) status=admission-paused"; exit 75; }
 fi
 if [ "$ROUTE" = new ]; then
     echo "routing: supervisor (no global run lock)"
@@ -216,8 +218,10 @@ fi
 echo $$ >&9
 LOCKED=1
 fi
-[ "$ROUTE" = new ] || python3 "$REVIEW_ROOT/bin/review-admit.py" pause || exit 75
-python3 "$REVIEW_ROOT/bin/review-route.py" "$MODE" --expect "$ROUTE" >/dev/null || exit 75
+[ "$ROUTE" = new ] || python3 "$REVIEW_ROOT/bin/review-admit.py" pause || {
+    echo "finish=$(date -Is) status=admission-paused"; exit 75; }
+python3 "$REVIEW_ROOT/bin/review-route.py" "$MODE" --expect "$ROUTE" >/dev/null || {
+    echo "finish=$(date -Is) status=route-changed"; exit 75; }
 
 # Quota-directed selection, after the lock and not before it. A run that waited
 # two hours for the lock would otherwise have chosen on a reading taken before
@@ -323,7 +327,10 @@ cd "$REVIEW_ROOT/work" || {
 # CLI against guardian account leases. New attempts acquire their own leases
 # after these close; neither credential cleanup nor probes may race a CLI.
 exec 10<>"$REVIEW_DATA/locks" 11<>"$REVIEW_DATA/locks"
-python3 "$REVIEW_ROOT/bin/review-admit.py" accounts "$CLAUDE_DIR" "$CODEX_DIR" || exit 75
+python3 "$REVIEW_ROOT/bin/review-admit.py" accounts "$CLAUDE_DIR" "$CODEX_DIR" || {
+    # every early exit states itself; a log without a finish line reads as
+    # a run that died
+    echo "finish=$(date -Is) status=accounts-busy"; exit 75; }
 clear_stale_oauth_lock "$CLAUDE_DIR"
 
 # Which account is this? Two sources: the directory's own record, and the CLI.

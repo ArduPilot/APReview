@@ -93,7 +93,11 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
     fi_any = re.search(r'finish=(\S+) status=\S+', txt)
     if fi_any:
         r['finish'] = parse_iso(fi_any.group(1))
-    if 'status=skipped-locked' in txt:
+    if re.search(r'status=(accounts-busy|admission-paused|route-changed)\b', txt):
+        # held off at admission: nothing started, nothing failed
+        r['status'] = 'skipped'
+        r['elapsed'] = 0
+    elif 'status=skipped-locked' in txt:
         r['status'] = 'skipped'
         r['elapsed'] = 0
         fi = re.search(r'finish=(\S+) status=skipped-locked', txt)
