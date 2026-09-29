@@ -193,7 +193,9 @@ class ReviewSupervisor(unittest.TestCase):
         summary = self.finish(child, directory, log)
         self.assertEqual({v["review"] for v in summary["prs"].values()}, {"accepted"}, log.read_text())
         statuses = [read(p) for p in (directory / "attempts").glob("*/status.json")]
-        self.assertTrue(all(s.get("error") in (None, "account deadline") for s in statuses))
+        # the second PR waits unlaunched; it does not churn attempts that
+        # wait out the lease and prepare a worktree each time
+        self.assertEqual([s.get("error") for s in statuses if s.get("error")], [])
 
     def test_resume_monitors_surviving_guardians_and_reuses_completed_passes(self):
         child, directory, log = self.start("resume", [candidate(stub={"primary": {"sleep": 0.6}, "cold": {"sleep": 0.6}})], admission=8)

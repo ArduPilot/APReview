@@ -446,6 +446,18 @@ class Supervisor:
                 return True
             key = "account:%s/%s" % (provider, settings["account"])
             cap = 1 if settings.get("exclusive_account") else settings.get("account_slots", 8)
+        # A slot probe is a point in time: one scheduling pass must not launch
+        # more passes than there are slots, all to wait out the lease.
+        live = 0
+        for state in getattr(self, "states", {}).values():
+            for other, paths in (state.get("attempts") or {}).items():
+                mine = "claude" if other in ("primary", "reconciliation") else "codex"
+                if mine == provider and paths:
+                    status = read(Path(paths[-1]) / "status.json", {})
+                    if status.get("state") != "terminal":
+                        live += 1
+        if live >= cap:
+            return False
         try:
             probe = account_slot(self.store.locks, key, cap)
         except RuntimeError:
