@@ -129,6 +129,13 @@ class Discovery:
 
     def manifests(self, mode=None):
         """Frozen imported manifests plus accepted store membership."""
+        if self.gh is not None and mode != "rsync":
+            # submodule repositories' keys (mavlink-523) resolve only after the
+            # sweep; a resumed run reaches here without discover()
+            try:
+                self.swept()
+            except Exception as error:
+                print("manifest: submodule sweep failed: " + str(error), file=sys.stderr)
         manifests = {label: dict(rows) for label, rows in self.config.get("manifests", {}).items()}
         urls = dict(self.config.get("manifest_urls", {}))
         endpoint = self.config.get("endpoints", {}).get(self.config.get("endpoint", "review"), {})

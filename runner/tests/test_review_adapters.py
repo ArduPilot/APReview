@@ -355,7 +355,15 @@ class DiscoveryContract(unittest.TestCase):
         )
         self.assertEqual(c["classification"], "DROPPED")
 
-    def test_pr_mode_page_lives_under_the_configured_retained_prefix(self):
+    def test_manifests_sweep_submodules_before_parsing_keys(self):
+        import base64
+        modules = "[submodule \"modules/mavlink\"]\n\turl = https://github.com/ArduPilot/mavlink\n"
+        self.gh.request.side_effect = (
+            lambda endpoint, **kw: {"content": base64.b64encode(modules.encode()).decode()}
+            if endpoint.endswith(".gitmodules") else self.meta if "/pulls/" in endpoint else {"statuses": []}
+        )
+        self.discover.manifests("AIReview")
+        self.assertIn("ardupilot/mavlink", self.discover.repos)
         self.assertIn("page:review/PRReviews/owner/repo/1/index.html",
                       self.discover.candidate(PR, "pr")["destinations"])
         self.config["retained_prefix"] = "RsyncReviews/PRReviews"

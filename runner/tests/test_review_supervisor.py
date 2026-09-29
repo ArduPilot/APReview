@@ -158,6 +158,19 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual(sum(j["kind"] == "primary" for j in jobs), 2)
         self.assertFalse(any(j["kind"] == "reconciliation" for j in jobs))
 
+    def test_a_guardian_that_cannot_start_defers_the_pr_not_the_run(self):
+        # cron without the user bus: systemd-run fails for every attempt
+        shim = self.root / "shim"
+        shim.mkdir()
+        (shim / "systemd-run").write_text("#!/bin/sh\necho 'Failed to connect to user scope bus' >&2\nexit 1\n")
+        (shim / "systemd-run").chmod(0o755)
+        self.env = dict(self.env, PATH=str(shim) + os.pathsep + self.env["PATH"])
+        del self.env["REVIEW_GUARDIAN_PLAIN"]
+        child, directory, log = self.start("nobus", [candidate(), candidate(2)])
+        summary = self.finish(child, directory, log)
+        self.assertEqual({v["review"] for v in summary["prs"].values()}, {"deferred"})
+        self.assertNotIn("Traceback", log.read_text())
+
     def test_resume_monitors_surviving_guardians_and_reuses_completed_passes(self):
         child, directory, log = self.start("resume", [candidate(stub={"primary": {"sleep": 0.6}, "cold": {"sleep": 0.6}})], admission=8)
         self.running(directory, 2)

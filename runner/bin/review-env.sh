@@ -4,6 +4,11 @@ export REVIEW_ROOT="$HOME/review"
 export REVIEW_DATA="$REVIEW_ROOT/data"
 export REVIEW_LOGS="$REVIEW_ROOT/logs"
 export REVIEW_REPOS="$REVIEW_ROOT/repositories"
+# The supervisor starts each attempt as a user systemd unit, which needs the
+# user bus. A login shell has these; cron does not, and without them
+# systemd-run fails with "Failed to connect to user scope bus".
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
 
 # --- accounts ------------------------------------------------------------------
 # One directory per account, and a symlink per role saying which account that

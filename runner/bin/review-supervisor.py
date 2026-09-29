@@ -547,7 +547,9 @@ class Supervisor:
                 continue
             try:
                 self.start_attempt(candidate, kind, claim)
-            except (OSError, ValueError) as error:
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                # a guardian that cannot start (no user bus, systemd-run
+                # refused) defers this PR; it must not end the run
                 state["reason"] = str(error)
                 if not any(
                     self.attempt_state(paths[-1]) == "live" for paths in state["attempts"].values()
