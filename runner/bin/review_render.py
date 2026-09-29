@@ -68,11 +68,22 @@ def bundle_at(store, pr, generation):
     return next((b for b in store.chain(pr) if b["generation"] == generation), None)
 
 
+def balanced(inner):
+    """Legacy sections sometimes miss a </div> or carry a spare one; the
+    section boundary must not depend on the author's markup."""
+    opened = len(re.findall(r"<div\b", inner))
+    closed = len(re.findall(r"</div\s*>", inner))
+    while closed > opened:
+        inner = inner[: inner.rfind("</div")].rstrip()
+        closed -= 1
+    return inner + "</div>" * (opened - closed)
+
+
 def core(bundle):
     if bundle.get("legacy"):
         raw = bundle["results"]["reconciliation"]["section_md"].strip()
         inner = re.sub(r'^<(?:section|div)\b[^>]*>\s*|\s*</(?:section|div)>$', '', raw)
-        return '<p>Imported legacy review; original coverage retained.</p>\n' + inner
+        return '<p>Imported legacy review; original coverage retained.</p>\n' + balanced(inner)
     inputs, final = bundle["inputs"], bundle["results"]["reconciliation"]
     validation = bundle["results"]["validation"]
     counts = {
@@ -151,26 +162,38 @@ def seal(body):
 
 
 class Sections(HTMLParser):
+    """Recover each section's review-core bytes so the digest can be checked.
+    Imported legacy sections nest divs, self-close tags and carry comments,
+    so the capture tracks div depth and reproduces those forms verbatim."""
+
     def __init__(self):
         super().__init__(convert_charrefs=False)
         self.sections, self.current, self.capture = [], None, False
-        self.parts = []
+        self.parts, self.depth = [], 0
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         if tag == "section" and "data-pr" in attrs:
             self.current = attrs
-        if tag == "div" and attrs.get("class") == "review-core":
+        if not self.capture and tag == "div" and attrs.get("class") == "review-core":
             self.capture = True
-            self.parts = []
+            self.parts, self.depth = [], 0
         elif self.capture:
+            if tag == "div":
+                self.depth += 1
+            self.parts.append(self.get_starttag_text())
+
+    def handle_startendtag(self, tag, attrs):
+        if self.capture:
             self.parts.append(self.get_starttag_text())
 
     def handle_endtag(self, tag):
-        if self.capture and tag == "div":
+        if self.capture and tag == "div" and self.depth == 0:
             self.capture = False
             self.current["computed"] = sha("".join(self.parts).removeprefix("\n").encode())
         elif self.capture:
+            if tag == "div":
+                self.depth -= 1
             self.parts.append("</" + tag + ">")
         if tag == "section" and self.current:
             self.sections.append(self.current)
@@ -179,6 +202,10 @@ class Sections(HTMLParser):
     def handle_data(self, data):
         if self.capture:
             self.parts.append(data)
+
+    def handle_comment(self, data):
+        if self.capture:
+            self.parts.append("<!--" + data + "-->")
 
     def handle_entityref(self, name):
         self.handle_data("&" + name + ";")

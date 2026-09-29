@@ -355,6 +355,20 @@ class DiscoveryContract(unittest.TestCase):
         )
         self.assertEqual(c["classification"], "DROPPED")
 
+    def test_a_manifest_page_is_fetched_once_per_discovery(self):
+        from unittest.mock import patch, MagicMock
+        page = MagicMock()
+        page.__enter__.return_value.read.return_value = (
+            b'<!-- reviewprs-manifest v1 heads="1:aaaaaaaaaa" -->\n<section id="pr1">x</section>')
+        config = dict(self.config, endpoints={"review": {"url": "https://example.test"}})
+        discovery = Discovery(self.gh, config, self.store)
+        with patch("review_discovery.urlopen", return_value=page) as opened:
+            first = discovery.manifests("AIReview")
+            second = discovery.manifests("AIReview")
+        self.assertEqual(opened.call_count, 3)   # one per label page
+        self.assertEqual(first, second)
+        self.assertIn(PR, first["AIReview"])
+
     def test_manifests_sweep_submodules_before_parsing_keys(self):
         import base64
         modules = "[submodule \"modules/mavlink\"]\n\turl = https://github.com/ArduPilot/mavlink\n"
@@ -442,6 +456,29 @@ class RenderContract(unittest.TestCase):
         wrong = dict(verified["sections"][0], generation=2)
         with self.assertRaises(OSError):
             verify(raw, [wrong])
+
+    def test_an_imported_legacy_section_with_nested_markup_verifies(self):
+        # the command's sections nest divs, self-close tags and carry comments
+        legacy = dict(pr="pr:owner/repo#7", generation=0, legacy=True,
+                      inputs=dict(repository="owner/repo", number=7, head="a" * 10, manifest_key="7"),
+                      results={"reconciliation": {"section_md":
+                          '<div class="pr new" id="pr7">\n<h3>seven</h3>\n<ul><li class="f-bug"><span class="tag">BUG</span> '
+                          '<div class="body">nested<br/>line<!-- note --> &amp; more</div></li></ul>\n</div>'}})
+        raw = self.renderer.render("page:test/legacy.html", legacy)
+        verified = verify(raw)
+        self.assertEqual(verified["sections"][0]["pr"], "pr:owner/repo#7")
+        self.assertIn(b"<h3>seven</h3>", raw)
+        self.assertNotIn(b'<div class="pr new"', raw)
+
+    def test_an_unbalanced_legacy_section_still_ends_where_the_renderer_says(self):
+        for markup in ('<div class="pr" id="pr8">\n<h3>eight</h3>\n<div class="x">no closer\n</div>',
+                       '<div class="pr" id="pr8">\n<h3>eight</h3>\n</div></div>\n</div>'):
+            legacy = dict(pr="pr:owner/repo#8", generation=0, legacy=True,
+                          inputs=dict(repository="owner/repo", number=8, head="b" * 10, manifest_key="8"),
+                          results={"reconciliation": {"section_md": markup}})
+            raw = self.renderer.render("page:test/legacy.html", legacy)
+            self.assertEqual(verify(raw)["sections"][0]["pr"], "pr:owner/repo#8")
+            self.assertIn(b"<h3>eight</h3>", raw)
 
     def test_section_digest_is_checked_even_with_valid_page_digest(self):
         from review_render import META

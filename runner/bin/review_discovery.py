@@ -156,17 +156,24 @@ class Discovery:
             urls[mode] = (
                 endpoint["url"].rstrip("/") + "/UserReviews/" + quote(mode[1:], safe="") + ".html"
             )
+        # One fetch per page per discovery: every admitted PR refreshes its
+        # candidate, and the AIReview page is two megabytes.
+        if not hasattr(self, "_pages"):
+            self._pages = {}
         for label, url in urls.items():
-            try:
-                with urlopen(url, timeout=20) as response:
-                    raw = response.read(16 * 1024 * 1024 + 1)
-            except HTTPError as error:
-                if error.code == 404:
-                    continue
-                raise
-            if len(raw) > 16 * 1024 * 1024:
-                raise OSError("manifest page exceeds bound")
-            manifests.setdefault(label, {}).update(self.parse_manifest(raw.decode()))
+            if url not in self._pages:
+                try:
+                    with urlopen(url, timeout=20) as response:
+                        raw = response.read(16 * 1024 * 1024 + 1)
+                except HTTPError as error:
+                    if error.code != 404:
+                        raise
+                    raw = None
+                if raw is not None and len(raw) > 16 * 1024 * 1024:
+                    raise OSError("manifest page exceeds bound")
+                self._pages[url] = self.parse_manifest(raw.decode()) if raw is not None else None
+            if self._pages[url] is not None:
+                manifests.setdefault(label, {}).update(self._pages[url])
         if self.store:
             from review_store import read, digest
 

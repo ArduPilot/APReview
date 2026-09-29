@@ -19,6 +19,9 @@ from review_delivery import Delivery
 from review_inference import prepare as prepare_inference
 
 KINDS = ("primary", "cold", "validation", "reconciliation")
+# attempt errors that mean the payload never started
+STARVED = ("account deadline", "permit deadline")
+
 WALL = {"primary": 5400, "cold": 1800, "validation": 1800, "reconciliation": 2700}
 
 
@@ -390,6 +393,29 @@ class Supervisor:
             if job and job["input_digest"] == digest(inputs):
                 state["attempts"].setdefault(job["kind"], []).append(path)
 
+    def account_free(self, kind):
+        """Whether this kind's exclusive account lease is available now. A
+        probe, not a reservation: the guardian still takes the lease itself."""
+        provider = "claude" if kind in ("primary", "reconciliation") else "codex"
+        config = getattr(self, "config", None)
+        if config is None or config["stub"]:
+            if os.environ.get("REVIEW_STUB_EXCLUSIVE") != "1":
+                return True
+            key = "account:%s/stub" % provider
+        else:
+            settings = config["configuration"].get("providers", {}).get(provider, {})
+            if not settings.get("exclusive_account") or not settings.get("account"):
+                return True
+            key = "account:%s/%s" % (provider, settings["account"])
+        try:
+            probe = try_lock(self.store.locks, key)
+        except RuntimeError:
+            return True
+        if probe is None:
+            return False
+        probe.close()
+        return True
+
     def attempt_state(self, path):
         status = read(Path(path) / "status.json", {})
         if alive(status):
@@ -419,6 +445,7 @@ class Supervisor:
             "pr": pr,
             "provider": "claude" if kind in ("primary", "reconciliation") else "codex",
             "account": "stub",
+            "exclusive_account": os.environ.get("REVIEW_STUB_EXCLUSIVE") == "1",
             "input_digest": digest(claim["inputs"]),
             "abort_path": str(self.directory / "abort.json"),
             "registered": time.time(),
@@ -488,7 +515,7 @@ class Supervisor:
         failed = False
         failed_reason = "pass failed after retry"
         retryable = set()
-        for kind, attempts in state["attempts"].items():
+        for kind, attempts in list(state["attempts"].items()):
             if kind in claim["selected"]:
                 continue
             path = attempts[-1]
@@ -497,6 +524,13 @@ class Supervisor:
                 live = True
                 continue
             status = read(Path(path) / "status.json", {})
+            if outcome == "done" and status.get("error") in STARVED and not status.get("aborted"):
+                # The payload never ran: another PR held the account or the
+                # permit for the whole wait. That is not a failed pass.
+                state.setdefault("starved", []).append(attempts.pop())
+                if not attempts:
+                    del state["attempts"][kind]
+                continue
             if (
                 outcome == "done"
                 and status.get("exit") == 0
@@ -544,6 +578,10 @@ class Supervisor:
                 continue
             attempts = state["attempts"].get(kind, [])
             if attempts and kind not in retryable:
+                continue
+            if not self.account_free(kind):
+                # launching now would only build a worktree to time out on
+                # the lease; the next pass looks again
                 continue
             try:
                 self.start_attempt(candidate, kind, claim)

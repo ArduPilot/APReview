@@ -171,6 +171,18 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual({v["review"] for v in summary["prs"].values()}, {"deferred"})
         self.assertNotIn("Traceback", log.read_text())
 
+    def test_a_held_exclusive_account_waits_instead_of_spending_tries(self):
+        # two PRs, one exclusive account per provider: the second PR must wait
+        # for the lease, not burn its two tries on account deadlines
+        self.env["REVIEW_STUB_EXCLUSIVE"] = "1"
+        slow = {kind: {"sleep": 1.5} for kind in ("primary", "cold")}
+        child, directory, log = self.start("exclusive", [candidate(stub=slow), candidate(2, stub=slow)],
+                                           admission=60, extra=["--permit-timeout", "1"])
+        summary = self.finish(child, directory, log)
+        self.assertEqual({v["review"] for v in summary["prs"].values()}, {"accepted"}, log.read_text())
+        statuses = [read(p) for p in (directory / "attempts").glob("*/status.json")]
+        self.assertTrue(all(s.get("error") in (None, "account deadline") for s in statuses))
+
     def test_resume_monitors_surviving_guardians_and_reuses_completed_passes(self):
         child, directory, log = self.start("resume", [candidate(stub={"primary": {"sleep": 0.6}, "cold": {"sleep": 0.6}})], admission=8)
         self.running(directory, 2)
