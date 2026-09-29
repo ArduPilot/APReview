@@ -224,6 +224,20 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual({v["review"] for v in summary["prs"].values()}, {"accepted"},
                          {k: (v["review"], v.get("reason")) for k, v in summary["prs"].items()})
 
+    def test_another_runs_passes_hold_the_permits_it_waits_for(self):
+        # a second run's controller cannot see the first's passes in its own
+        # state; it probes the pool instead of launching into a full one
+        slow = {kind: {"sleep": 2.5} for kind in ("primary", "cold")}
+        first, first_dir, first_log = self.start("first", [candidate(n, stub=slow) for n in (1, 2)],
+                                                 admission=60, extra=["--pool-size", "3"])
+        self.running(first_dir, 4)
+        second, second_dir, second_log = self.start("second", [candidate(n, stub=slow) for n in (3, 4)],
+                                                    admission=60, extra=["--pool-size", "3"])
+        self.finish(first, first_dir, first_log)
+        self.finish(second, second_dir, second_log)
+        statuses = [read(p) for p in (second_dir / "attempts").glob("*/status.json")]
+        self.assertEqual([s.get("error") for s in statuses if s.get("error")], [])
+
     def test_a_held_exclusive_account_waits_instead_of_spending_tries(self):
         # two PRs, one exclusive account per provider: the second PR must wait
         # for the lease, not burn its two tries on account deadlines

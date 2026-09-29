@@ -11,7 +11,7 @@ import time
 import uuid
 
 from review_guardian import alive, cleanup_attempt, identity, launch
-from review_lock import account_slot, canonical, try_lock
+from review_lock import account_slot, canonical, permit, try_lock
 from review_schema import FILES, read_result
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, mkdir, read
 from review_discovery import Discovery, LABELS
@@ -490,6 +490,16 @@ class Supervisor:
         if probe is None:
             return False
         probe.close()
+        # Another run's passes count too: probe the provider's permit pool,
+        # or this run's passes lose every race and wait out the permit.
+        try:
+            permit_probe = permit(self.store.locks, provider, pool,
+                                  skip_finishing_slot=kind in ("primary", "cold"))
+        except (RuntimeError, OSError, ValueError):
+            return True
+        if permit_probe is None:
+            return False
+        permit_probe.close()
         return True
 
     def attempt_state(self, path):
