@@ -217,6 +217,19 @@ def adopt(path, key, fd):
         return lock
 
 
+def account_slot(path, key, cap):
+    """One of `cap` session slots on an account. Sessions no longer hold the
+    account's own key: that is left for the brief holders (quota probes, the
+    wrapper's admission, stale refresh-lock cleanup). Several CLI sessions on
+    one login refresh their token safely; this only bounds how many."""
+    key = canonical(key)
+    for slot in range(max(1, int(cap))):
+        lock = try_lock(path, "%s#%d" % (key, slot))
+        if lock is not None:
+            return lock
+    return None
+
+
 def permit(path, provider, size=4, skip_finishing_slot=False):
     if provider not in POOLS or not 1 <= size <= 256:
         raise ValueError("invalid permit pool")

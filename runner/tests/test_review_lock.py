@@ -170,6 +170,29 @@ class ReviewLocks(unittest.TestCase):
             self.assertEqual(output.strip(), "True")
         self.assertIsNotNone(self.take(pair[1]))
 
+    def test_an_account_has_a_capped_number_of_session_slots(self):
+        # each session is its own guardian process holding one slot
+        from review_lock import account_slot
+        key = "account:claude//home/one/.claude"
+        code = ("import sys,time; from review_lock import account_slot; "
+                "l = account_slot(sys.argv[1], sys.argv[2], 4); print(l.key if l else 'none', flush=True); time.sleep(30)")
+        holders = []
+        for _ in range(4):
+            child = python(code, self.path, key, stdout=subprocess.PIPE, text=True)
+            self.addCleanup(stop, child)
+            holders.append((child, child.stdout.readline().strip()))
+        self.assertEqual(len({k for _, k in holders}), 4)
+        self.assertNotIn("none", [k for _, k in holders])
+        self.assertIsNone(account_slot(self.path, key, 4))
+        # the account's own key stays free for probes, admission and cleanup
+        probe = try_lock(self.path, key)
+        self.assertIsNotNone(probe)
+        probe.close()
+        stop(holders[0][0])
+        again = account_slot(self.path, key, 4)
+        self.assertEqual(again.key, holders[0][1])
+        again.close()
+
     def test_shared_leases_leave_the_exclusive_header_unchanged(self):
         key = "account:codex/account"
         exclusive = self.take(key)

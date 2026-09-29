@@ -11,7 +11,7 @@ import sys
 import time
 import uuid
 
-from review_lock import acquire, adopt, boot_id, permit, start_time, try_lock
+from review_lock import account_slot, acquire, adopt, boot_id, permit, start_time, try_lock
 from review_usage import sessions
 from review_schema import FILES, IDENTITY, evidence_paths, read_result
 from review_store import Store, atomic, fsync_dir, mkdir, read
@@ -270,9 +270,11 @@ def run(data, attempt, fd):
                 key = "account:%s/%s" % (job["provider"], job["account"])
                 account = None
                 while time.monotonic() < deadline and not aborted():
-                    account = try_lock(store.locks, key, shared=not job.get("exclusive_account", False))
+                    cap = 1 if job.get("exclusive_account") else job.get("account_slots", 4)
+                    account = account_slot(store.locks, key, cap)
                     if account:
                         owned.append(account)
+                        status["account_slot"] = account.key
                         break
                     if time.monotonic() >= heartbeat:
                         record_usage(status, attempt)

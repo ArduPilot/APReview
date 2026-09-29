@@ -171,6 +171,18 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual({v["review"] for v in summary["prs"].values()}, {"deferred"})
         self.assertNotIn("Traceback", log.read_text())
 
+    def test_prs_share_an_account_up_to_its_slot_cap(self):
+        # four slots per account: two PRs' primaries run at the same time
+        slow = {"primary": {"sleep": 1.5}}
+        child, directory, log = self.start("shared", [candidate(stub=slow), candidate(2, stub=slow)], admission=60)
+        records = self.running(directory, 3)
+        self.assertGreaterEqual(sum(r["kind"] == "primary" and r["state"] == "running" for r in records), 2)
+        summary = self.finish(child, directory, log)
+        self.assertEqual({v["review"] for v in summary["prs"].values()}, {"accepted"})
+        slots = {read(p).get("account_slot") for p in (directory / "attempts").glob("*/status.json")
+                 if read(p)["kind"] == "primary"}
+        self.assertEqual(len(slots), 2, slots)
+
     def test_a_held_exclusive_account_waits_instead_of_spending_tries(self):
         # two PRs, one exclusive account per provider: the second PR must wait
         # for the lease, not burn its two tries on account deadlines

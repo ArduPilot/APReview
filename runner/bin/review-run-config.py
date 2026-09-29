@@ -28,7 +28,10 @@ def freeze(args):
     for tool in ("claude", "codex"):
         home = str(Path(getattr(args, tool + "_home")).resolve())
         providers[tool] = dict(
-            account=home, home=home, exclusive_account=True,
+            # concurrent sessions on one login were tested safe on 2026-09-30,
+            # token-refresh race included; the cap is the only bound
+            account=home, home=home, exclusive_account=False,
+            account_slots=int(env.get("REVIEW_ACCOUNT_SLOTS", "4")),
             model=args.model if tool == "claude" else codex_model,
             effort="high" if tool == "claude" else env.get("REVIEW_CODEX_EFFORT", codex.get("model_reasoning_effort", "high")),
             permission_mode="auto" if tool == "claude" else codex.get("sandbox_mode", "workspace-write"),

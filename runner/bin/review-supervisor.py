@@ -11,7 +11,7 @@ import time
 import uuid
 
 from review_guardian import alive, cleanup_attempt, identity, launch
-from review_lock import canonical, try_lock
+from review_lock import account_slot, canonical, try_lock
 from review_schema import FILES, read_result
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, mkdir, read
 from review_discovery import Discovery, LABELS
@@ -435,17 +435,19 @@ class Supervisor:
         probe, not a reservation: the guardian still takes the lease itself."""
         provider = "claude" if kind in ("primary", "reconciliation") else "codex"
         config = getattr(self, "config", None)
-        if config is None or config["stub"]:
-            if os.environ.get("REVIEW_STUB_EXCLUSIVE") != "1":
-                return True
+        if config is None:
+            return True
+        if config["stub"]:
             key = "account:%s/stub" % provider
+            cap = 1 if os.environ.get("REVIEW_STUB_EXCLUSIVE") == "1" else 4
         else:
             settings = config["configuration"].get("providers", {}).get(provider, {})
-            if not settings.get("exclusive_account") or not settings.get("account"):
+            if not settings.get("account"):
                 return True
             key = "account:%s/%s" % (provider, settings["account"])
+            cap = 1 if settings.get("exclusive_account") else settings.get("account_slots", 4)
         try:
-            probe = try_lock(self.store.locks, key)
+            probe = account_slot(self.store.locks, key, cap)
         except RuntimeError:
             return True
         if probe is None:
@@ -483,6 +485,7 @@ class Supervisor:
             "provider": "claude" if kind in ("primary", "reconciliation") else "codex",
             "account": "stub",
             "exclusive_account": os.environ.get("REVIEW_STUB_EXCLUSIVE") == "1",
+            "account_slots": 4,
             "input_digest": digest(claim["inputs"]),
             "abort_path": str(self.directory / "abort.json"),
             "registered": time.time(),
