@@ -181,6 +181,15 @@ class ReviewStore(unittest.TestCase):
         self.store.drain(StubAdapter(self.root), limit=6)
         self.assertEqual(list((self.root / "outbox").glob("*.json")), [])
 
+    def test_an_entry_removed_by_a_concurrent_drain_does_not_end_this_one(self):
+        # read() answers None for a file that vanished between glob and read;
+        # a null body is the same thing to the snapshot
+        (self.root / "outbox").mkdir(exist_ok=True)
+        (self.root / "outbox" / "gone.json").write_text("null")
+        self.assertEqual(self.store.delivery_snapshot(), [])
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root))
+
     def test_receipt_wins_at_each_receipt_boundary(self):
         self.accept()
         entry = read(next((self.root / "outbox").glob("*.json")))

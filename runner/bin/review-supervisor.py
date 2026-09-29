@@ -239,7 +239,7 @@ class Supervisor:
             self.saved_state = digest(self.states)
         if changed or force or now - self.last_summary >= 30:
             self.last_summary = now
-            debts = [read(p) for p in (self.store.root / "outbox").glob("*.json")]
+            debts = [x for x in (read(p) for p in (self.store.root / "outbox").glob("*.json")) if x]
             atomic(
                 self.directory / "summary.json",
                 {

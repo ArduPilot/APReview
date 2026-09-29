@@ -443,7 +443,8 @@ class Store:
     KIND_ORDER = {"projection": 0, "publish": 1, "comment": 2, "note": 2, "annotation": 3, "deprecate": 3, "board": 4}
 
     def delivery_snapshot(self, limit=100):
-        snapshot = sorted((read(p) for p in (self.root / "outbox").glob("*.json")),
+        # another drain may receipt and remove an entry between glob and read
+        snapshot = sorted((x for x in (read(p) for p in (self.root / "outbox").glob("*.json")) if x),
                           key=lambda x: (x["next_attempt"], self.KIND_ORDER.get(x["kind"], 5), x["id"]))
         return [x for x in snapshot if x["next_attempt"] <= time.time() and x["failures"] < 5][:limit]
 
@@ -519,7 +520,7 @@ class Store:
                 if any(not dep or dep["state"] not in self.SETTLED for dep in dependencies):
                     continue
                 if entry["kind"] in ("comment", "note"):
-                    older = [read(p) for p in (self.root / "outbox").glob("*.json")]
+                    older = [x for x in (read(p) for p in (self.root / "outbox").glob("*.json")) if x]
                     if any(x["pr"] == entry["pr"] and x["kind"] in ("comment", "note") and x["generation"] < entry["generation"] and x["state"] in ("sending", "uncertain") for x in older):
                         continue
                 credentials = ExitStack()
@@ -568,7 +569,7 @@ class Store:
                 finally:
                     side_stack.close()
                     credentials.close()
-        return [read(p) for p in sorted((self.root / "outbox").glob("*.json"))]
+        return [x for x in (read(p) for p in sorted((self.root / "outbox").glob("*.json"))) if x]
 
 
 class StubAdapter:
