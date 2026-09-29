@@ -56,3 +56,6 @@ REVIEW_PUBLIC_URL="https://reviews.example.org"
 # GitHub writes stay disabled in the new adapter unless explicitly enabled.
 #REVIEW_GITHUB_WRITES=1
 #REVIEW_PROJECT_ID="<ProjectV2 node id>"
+# Retained per-review pages go under <endpoint>/PRReviews by default, which
+# needs that tree on the publishing host; otherwise name a served tree.
+#REVIEW_RETAINED_PREFIX="RsyncReviews/PRReviews"

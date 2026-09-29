@@ -204,17 +204,28 @@ class Discovery:
             repo = names.get(prefix)
             if repo is None or not number.isdecimal() or not re.fullmatch("[0-9a-f]{7,40}", head):
                 raise OSError("unknown manifest key or head: " + key)
-            section = re.search(
-                r'<section\b[^>]*id="pr'
-                + re.escape(key.replace("#", "-"))
-                + r'"[^>]*>.*?</section>',
-                html,
-                re.S,
-            )
             rows[canonical(f"pr:{repo}#{number}")] = dict(
-                head=head, section=section[0] if section else None
+                head=head, section=self.section_of(html, key.replace("#", "-"))
             )
         return rows
+
+    @staticmethod
+    def section_of(html, anchor):
+        """The PR's section, in either page form.
+
+        The new renderer writes <section id="prKEY">...</section>. The command's
+        pages, which the handoff imports, write <div class="pr" id="prKEY"> and
+        close it with a bare </div>; the next PR's div or the Summary heading
+        is the only reliable end of it.
+        """
+        match = re.search(r'<section\b[^>]*id="pr' + re.escape(anchor) + r'"[^>]*>.*?</section>', html, re.S)
+        if match:
+            return match[0]
+        start = re.search(r'<div class="pr" id="pr' + re.escape(anchor) + r'">', html)
+        if not start:
+            return None
+        end = re.search(r'\n<div class="pr" id="pr|\n<h2>', html[start.end():])
+        return html[start.start():start.end() + end.start()] if end else html[start.start():]
 
     def destination(self, label):
         endpoint = self.config.get("endpoint", "review")

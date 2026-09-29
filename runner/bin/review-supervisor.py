@@ -564,8 +564,9 @@ class Supervisor:
             if self.config["stub"]
             else self.config["configuration"].get("endpoint", "review")
         )
-        retained = "page:%s/PRReviews/%s/%d/%d.html" % (
+        retained = "page:%s/%s/%s/%d/%d.html" % (
             endpoint,
+            self.config["configuration"].get("retained_prefix", "PRReviews") if not self.config["stub"] else "PRReviews",
             candidate["repository"],
             candidate["number"],
             generation,

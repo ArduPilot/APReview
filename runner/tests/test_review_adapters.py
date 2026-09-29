@@ -282,6 +282,22 @@ class DiscoveryContract(unittest.TestCase):
             {"pr:ardupilot/ardupilot_wiki#1", "pr:mavlink/mavlink#1", "pr:ardupilot/mavlink#1"},
         )
 
+    def test_a_legacy_page_section_is_found_for_import(self):
+        # the command's pages, which the handoff imports, use div sections
+        # closed by a bare </div>; the rsync page of 2026-08-26 is this shape
+        import repos
+
+        discovery = Discovery(self.gh, dict(self.config, repos=repos.load()))
+        discovery.repos = {"rsyncproject/rsync": dict(repo="RsyncProject/rsync", key="")}
+        html = ('<!-- reviewprs-manifest v1 label="AIReview" heads="1065:c512980a46 1060:0580585747" -->\n'
+                '<h2>Reviews</h2>\n<div class="pr" id="pr1065">\n<h3>1065</h3>\n<div class="x">nested</div>\n</div>\n'
+                '<div class="pr" id="pr1060">\n<h3>1060</h3>\n</div>\n<h2>Summary</h2>\n')
+        rows = discovery.parse_manifest(html)
+        self.assertEqual(rows["pr:rsyncproject/rsync#1065"]["section"],
+                         '<div class="pr" id="pr1065">\n<h3>1065</h3>\n<div class="x">nested</div>\n</div>')
+        self.assertEqual(rows["pr:rsyncproject/rsync#1060"]["section"],
+                         '<div class="pr" id="pr1060">\n<h3>1060</h3>\n</div>')
+
     def test_reserved_modes_and_pr_reference_precedence(self):
         self.assertEqual(self.discover.resolve("--FollowUp"), "followup")
         self.assertEqual(self.discover.resolve("/RSYNC"), "rsync")

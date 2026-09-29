@@ -513,6 +513,7 @@ M = [
  ('leasefds', RUN, '    --verbose 9>&- 10>&- 11>&- \\', '    --verbose 9>&- \\'),
  ('reapscan', "runner/bin/reap-orphans.sh", '    [ $hit -eq 1 ] && candidates="$candidates $p"', '    false && candidates="$candidates $p"'),
  ('reapkeepsjob', "runner/bin/reap-orphans.sh", '    tr \'\\0\' \'\\n\' < "$d/environ" 2>/dev/null | grep -q \'^REVIEW_JOB_DIR=\' && continue\n', ''),
+ ('manifestlegacy', "runner/bin/review_discovery.py", '        start = re.search(r\'<div class="pr" id="pr\' + re.escape(anchor) + r\'">\', html)', '        start = None'),
 ]
 
 # An unrelated failure is not evidence for a particular guard. Each mutation
@@ -842,6 +843,7 @@ REGRESSION = {
     'leasefds': 'Guard.test_the_agent_inherits_no_lock_or_lease_descriptor',
     'reapscan': 'Reaper.test_an_unregistered_leak_under_the_review_tree_is_killed',
     'reapkeepsjob': 'Reaper.test_a_supervisor_payload_under_the_same_tree_is_left_alone',
+    'manifestlegacy': 'DiscoveryContract.test_a_legacy_page_section_is_found_for_import',
 }
 
 # Slice two: mutations must cause their pinned test to FAIL, never merely ERROR.

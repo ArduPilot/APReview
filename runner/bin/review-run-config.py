@@ -51,6 +51,10 @@ def freeze(args):
         reference_clones={r["repo"].lower(): str(references / (r.get("clone_dir") or r["repo"].split("/")[1]))
                           for r in repositories["repos"]},
         comment_accounts=json.loads(args.comments), endpoint="review",
+        # Where a review's retained page lives under the endpoint. The default
+        # needs a PRReviews tree on the publishing host; a site without one
+        # can put it under a tree it already serves.
+        retained_prefix=env.get("REVIEW_RETAINED_PREFIX", "PRReviews").strip("/"),
         endpoints={"review": dict(url=env.get("REVIEW_PUBLIC_URL", ""),
                                   publish=env.get("REVIEW_PUBLISH", ""),
                                   rsync_args=shlex.split(env.get("RSYNC_AUTH", "")))},
