@@ -330,7 +330,20 @@ class Supervisor:
         if store is None:
             store = self.prefetched = {}
         now = time.monotonic()
-        todo = [c for c in candidates if now - store.get(c["pr"], (-1e9, None))[0] >= self.PREFETCH_AGE]
+        todo = []
+        for c in candidates:
+            if now - store.get(c["pr"], (-1e9, None))[0] < self.PREFETCH_AGE:
+                continue
+            # A PR another pass holds will not be claimed this pass; fetching
+            # it every minute while it waits spent the hourly GitHub budget.
+            try:
+                probe = try_lock(self.store.locks, c["pr"])
+            except (RuntimeError, OSError, ValueError):
+                probe = None
+            if probe is None:
+                continue
+            probe.close()
+            todo.append(c)
         if not todo:
             return
         def one(candidate):

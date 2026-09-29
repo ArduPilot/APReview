@@ -9,7 +9,7 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from review_fixtures import BIN, PR, candidate, stop, until, workspace
+from review_fixtures import BIN, PR, candidate, python, stop, until, workspace
 from review_lock import try_lock
 from review_store import Store, atomic, read
 
@@ -315,6 +315,7 @@ class ReviewSupervisor(unittest.TestCase):
     def test_admission_refreshes_are_prefetched_together_and_expire(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.config = {"configuration": {"discovery_workers": 4}}
+        supervisor.store = self.store
         supervisor.discovery = Mock()
         supervisor.discovery.refresh.side_effect = lambda c: dict(c, fresh=True)
         rows = [dict(candidate(n), pr="pr:owner/repo#%d" % n) for n in (1, 2, 3)]
@@ -326,6 +327,16 @@ class ReviewSupervisor(unittest.TestCase):
         # a stale prefetch is not used
         supervisor.prefetched[rows[1]["pr"]] = (time.monotonic() - 120, {"stale": True})
         self.assertIsNone(supervisor.prefetched_refresh(rows[1]["pr"]))
+        # a PR another pass holds is not fetched while it waits: doing so
+        # every minute spent the hourly GitHub budget
+        holder = python("import sys,time; from review_lock import try_lock; l = try_lock(sys.argv[1], sys.argv[2]); "
+                        "print('held', flush=True); time.sleep(30)", self.store.locks, "pr:owner/repo#5",
+                        stdout=subprocess.PIPE, text=True)
+        self.addCleanup(stop, holder)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
+        supervisor.discovery.refresh.reset_mock()
+        supervisor.prefetch([dict(candidate(5), pr="pr:owner/repo#5")])
+        supervisor.discovery.refresh.assert_not_called()
         # a failed prefetch leaves the claim to refresh and report
         supervisor.discovery.refresh.side_effect = OSError("gone")
         supervisor.prefetch([dict(candidate(4), pr="pr:owner/repo#4")])
