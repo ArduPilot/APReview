@@ -45,7 +45,7 @@ REVIEW_PUBLIC_URL="https://reviews.example.org"
 # do not switch any target. Keep a separate full reference-clone tree while
 # the legacy runner still reads/refreshes its mutable base clones.
 #REVIEW_NEW_REPOS="/data/review/references"
-#REVIEW_POOL_SIZE=4
+#REVIEW_POOL_SIZE=8
 #REVIEW_HEAVY_SIZE=4
 #REVIEW_PERMIT_TIMEOUT=120
 #REVIEW_ADMISSION=14400

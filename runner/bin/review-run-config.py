@@ -31,7 +31,7 @@ def freeze(args):
             # concurrent sessions on one login were tested safe on 2026-09-30,
             # token-refresh race included; the cap is the only bound
             account=home, home=home, exclusive_account=False,
-            account_slots=int(env.get("REVIEW_ACCOUNT_SLOTS", "4")),
+            account_slots=int(env.get("REVIEW_ACCOUNT_SLOTS", "8")),
             model=args.model if tool == "claude" else codex_model,
             effort="high" if tool == "claude" else env.get("REVIEW_CODEX_EFFORT", codex.get("model_reasoning_effort", "high")),
             permission_mode="auto" if tool == "claude" else codex.get("sandbox_mode", "workspace-write"),
@@ -65,7 +65,7 @@ def freeze(args):
                          "project": {"id": "project", "project": True}},
         github_writes=env.get("REVIEW_GITHUB_WRITES") == "1",
         project_id=env.get("REVIEW_PROJECT_ID"),
-        pool_size=int(env.get("REVIEW_POOL_SIZE", "4")),
+        pool_size=int(env.get("REVIEW_POOL_SIZE", "8")),
         heavy_size=int(env.get("REVIEW_HEAVY_SIZE", "4")),
         permit_timeout=float(env.get("REVIEW_PERMIT_TIMEOUT", "120")),
         admission=float(env.get("REVIEW_ADMISSION", "14400")),

@@ -59,6 +59,19 @@ class ReviewGuardian(unittest.TestCase):
         self.assertTrue(status["empty"])
         return status
 
+    def test_memory_limits_follow_the_box_not_a_fixed_figure(self):
+        from review_guardian import memory_limits
+        # blu6: 30G and four build slots -> throttle near 6G, kill near 12G
+        high, ceiling = memory_limits(heavy=4, total=30 * (1 << 30))
+        self.assertEqual(high, "--property=MemoryHigh=6144M")
+        self.assertEqual(ceiling, "--property=MemoryMax=12288M")
+        # never above the machine, never absurdly small
+        for total in (4, 30, 256):
+            h, c = (int(x.split("=")[-1][:-1]) for x in memory_limits(heavy=4, total=total * (1 << 30)))
+            self.assertLessEqual(c, total * 1024)
+            self.assertGreaterEqual(h, 2048)
+            self.assertLessEqual(h, c)
+
     def test_success_and_payload_receives_no_lock_descriptors(self):
         command = [sys.executable, "-c", "import os,runpy,sys; from pathlib import Path; assert not any(os.path.realpath(p)==os.environ['LOCK_PATH'] for p in Path('/proc/self/fd').glob('*')); sys.path.insert(0,str(Path(os.environ['STUB_PATH']).parent)); runpy.run_path(os.environ['STUB_PATH'],run_name='__main__')"]
         with patch.dict(os.environ, LOCK_PATH=str(self.store.locks), STUB_PATH=str(BIN / "review_stub.py")):

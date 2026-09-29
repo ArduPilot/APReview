@@ -814,9 +814,13 @@ The wrapper freezes account homes (without secrets), model pins, effort,
 permissions, granted directories, endpoints, repositories, limits and admission
 deadline settings. Codex needs a model pin in the selected account's
 `config.toml` or `REVIEW_CODEX_MODEL`; its configured sandbox and effort are
-also frozen. Up to `REVIEW_ACCOUNT_SLOTS` (default 4) review
-sessions share one login; concurrent sessions, including a simultaneous
-token refresh, were tested safe on 2026-09-30. Sessions hold numbered slots,
+also frozen. Up to `REVIEW_ACCOUNT_SLOTS` (default 8) review
+sessions share one login, matching `REVIEW_POOL_SIZE` (default 8) passes per
+provider; concurrent sessions, including a simultaneous token refresh, were
+tested safe on 2026-09-30. Builds stay at `REVIEW_HEAVY_SIZE` (4). Each
+attempt's unit is throttled (`MemoryHigh`) at 80% of RAM divided by the build
+slots and killed (`MemoryMax`) past 40% of RAM; on blu6 that is about 6G and
+12G. Sessions hold numbered slots,
 not the account key, so quota probes and admission are never blocked by a
 running review. Exhausted quota defers inference but still
 starts recovery and drains deliveries. GitHub writes in the new adapter need

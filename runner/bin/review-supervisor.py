@@ -53,7 +53,7 @@ class Supervisor:
         wall=None,
         request=None,
         mode="candidates",
-        pool_size=4,
+        pool_size=8,
         permit_timeout=120,
         configuration=None,
     ):
@@ -439,13 +439,13 @@ class Supervisor:
             return True
         if config["stub"]:
             key = "account:%s/stub" % provider
-            cap = 1 if os.environ.get("REVIEW_STUB_EXCLUSIVE") == "1" else 4
+            cap = 1 if os.environ.get("REVIEW_STUB_EXCLUSIVE") == "1" else 8
         else:
             settings = config["configuration"].get("providers", {}).get(provider, {})
             if not settings.get("account"):
                 return True
             key = "account:%s/%s" % (provider, settings["account"])
-            cap = 1 if settings.get("exclusive_account") else settings.get("account_slots", 4)
+            cap = 1 if settings.get("exclusive_account") else settings.get("account_slots", 8)
         try:
             probe = account_slot(self.store.locks, key, cap)
         except RuntimeError:
@@ -485,7 +485,7 @@ class Supervisor:
             "provider": "claude" if kind in ("primary", "reconciliation") else "codex",
             "account": "stub",
             "exclusive_account": os.environ.get("REVIEW_STUB_EXCLUSIVE") == "1",
-            "account_slots": 4,
+            "account_slots": 8,
             "input_digest": digest(claim["inputs"]),
             "abort_path": str(self.directory / "abort.json"),
             "registered": time.time(),

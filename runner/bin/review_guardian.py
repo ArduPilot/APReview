@@ -145,6 +145,20 @@ def cleanup_attempt(path, deadline):
     return bool(unit)
 
 
+def memory_limits(heavy=None, total=None):
+    """An attempt's CLI and its builds share one cgroup. Throttle it at its
+    share of the box's memory across the build slots, and kill only past
+    two shares, so one runaway cannot take the box but a large link can
+    still finish. The old fixed 40G was larger than blu6's 30G."""
+    heavy = heavy or int(os.environ.get("REVIEW_HEAVY_SIZE", "4"))
+    if total is None:
+        total = os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
+    mib = total // (1 << 20)
+    high = max(2048, int(mib * 0.8 / max(1, heavy)))
+    ceiling = max(high, int(mib * 0.4))
+    return ["--property=MemoryHigh=%dM" % high, "--property=MemoryMax=%dM" % ceiling]
+
+
 def launch(data, attempt, pr_lock):
     attempt = Path(attempt)
     plain = os.environ.get("REVIEW_GUARDIAN_PLAIN") == "1"
@@ -166,7 +180,7 @@ def launch(data, attempt, pr_lock):
         server.settimeout(15)
         subprocess.run(["systemd-run", "--user", "--quiet", "--unit=" + unit,
                         "--service-type=exec", "--property=Delegate=yes", "--property=KillMode=control-group",
-                        "--property=MemoryMax=40G", "--property=TasksMax=4000", "--property=CPUQuota=1600%",
+                        *memory_limits(), "--property=TasksMax=4000", "--property=CPUQuota=1600%",
                         "--property=TimeoutStopSec=30", "--", sys.executable, SCRIPT,
                         "--data", str(data), "--attempt", str(attempt), "--socket", address[1:]],
                        check=True, timeout=20, stdout=subprocess.DEVNULL)
@@ -247,7 +261,7 @@ def run(data, attempt, fd):
         deadline = time.monotonic() + job.get("permit_timeout", 120)
         heartbeat = time.monotonic() + 30
         while time.monotonic() < deadline and not aborted():
-            slot = permit(store.locks, job["provider"], job.get("pool_size", 4),
+            slot = permit(store.locks, job["provider"], job.get("pool_size", 8),
                           skip_finishing_slot=job["kind"] in ("primary", "cold"))
             if slot:
                 if not store.clean_owner(slot):
@@ -270,7 +284,7 @@ def run(data, attempt, fd):
                 key = "account:%s/%s" % (job["provider"], job["account"])
                 account = None
                 while time.monotonic() < deadline and not aborted():
-                    cap = 1 if job.get("exclusive_account") else job.get("account_slots", 4)
+                    cap = 1 if job.get("exclusive_account") else job.get("account_slots", 8)
                     account = account_slot(store.locks, key, cap)
                     if account:
                         owned.append(account)

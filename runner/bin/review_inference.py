@@ -61,7 +61,7 @@ def _prepare(store, path, job, config):
         reference_clone=str(reference),
         account=provider["account"],
         exclusive_account=provider.get("exclusive_account", True),
-        account_slots=provider.get("account_slots", 4),
+        account_slots=provider.get("account_slots", 8),
     )
     env = job["env"]
     # Resolve symlinks too; an alias of the base Tools/autotest is still the base.

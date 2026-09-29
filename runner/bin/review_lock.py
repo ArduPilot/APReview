@@ -218,7 +218,7 @@ def adopt(path, key, fd):
 
 
 def account_slot(path, key, cap):
-    """One of `cap` session slots on an account. Sessions no longer hold the
+    """One of `cap` session slots on an account (REVIEW_ACCOUNT_SLOTS). Sessions no longer hold the
     account's own key: that is left for the brief holders (quota probes, the
     wrapper's admission, stale refresh-lock cleanup). Several CLI sessions on
     one login refresh their token safely; this only bounds how many."""
