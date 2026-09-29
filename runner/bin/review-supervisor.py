@@ -2,6 +2,7 @@
 """A finite candidate snapshot and durable claims drive four independent tracks."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import os
 from pathlib import Path
 import sys
@@ -296,6 +297,40 @@ class Supervisor:
                 self.store.save_claim(lock, pr, claim)
             lock.close()
 
+    PREFETCH_AGE = 60
+
+    def prefetch(self, candidates):
+        """Refresh the candidates about to be claimed in parallel. Each is a
+        few GitHub round trips and a pass admits every pending PR; one at a
+        time that took most of an hour."""
+        if not self.discovery:
+            return
+        store = getattr(self, "prefetched", None)
+        if store is None:
+            store = self.prefetched = {}
+        now = time.monotonic()
+        todo = [c for c in candidates if now - store.get(c["pr"], (-1e9, None))[0] >= self.PREFETCH_AGE]
+        if not todo:
+            return
+        def one(candidate):
+            # best effort: a failure here is repeated, and reported, by the
+            # claim's own refresh
+            try:
+                return self.discovery.refresh(candidate)
+            except Exception:
+                return None
+        workers = int(self.config["configuration"].get("discovery_workers", 8))
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            for candidate, result in zip(todo, pool.map(one, todo)):
+                if result is not None:
+                    store[candidate["pr"]] = (time.monotonic(), result)
+
+    def prefetched_refresh(self, pr):
+        taken = getattr(self, "prefetched", {}).pop(pr, None)
+        if not taken or time.monotonic() - taken[0] >= self.PREFETCH_AGE:
+            return None
+        return taken[1]
+
     def claim_candidate(self, candidate):
         routing_root = self.config["configuration"].get("routing_root")
         if routing_root:
@@ -325,7 +360,9 @@ class Supervisor:
             self.finish(pr, "deferred", "stored node id changed")
             return
         try:
-            fresh = self.discovery.refresh(candidate) if self.discovery else refresh(candidate)
+            fresh = self.prefetched_refresh(pr)
+            if fresh is None:
+                fresh = self.discovery.refresh(candidate) if self.discovery else refresh(candidate)
         except OSError as error:
             self.finish(pr, "deferred", str(error))
             return
@@ -732,7 +769,6 @@ class Supervisor:
     def discover_phase(self, phase):
         if phase in self.config["phases"]:
             return
-        from concurrent.futures import ThreadPoolExecutor
 
         modes = (
             LABELS if phase == "labels" else [self.config["mode"] if phase == "initial" else phase]
@@ -913,6 +949,14 @@ class Supervisor:
                 paused = pause is None
                 if pause:
                     pause.close()
+                if not paused and not (self.directory / "abort.json").exists():
+                    self.prefetch([
+                        c for c in self.config["candidates"]
+                        if self.states[c["pr"]]["review"] == "pending"
+                        and time.time() >= self.next_claim.get(c["pr"], 0)
+                        and not (self.config["configuration"].get("quota", {}).get("paused"))
+                        and time.time() < self.config["admission_deadline"]
+                    ])
                 for candidate in self.config["candidates"]:
                     pr = candidate["pr"]
                     state = self.states[pr]

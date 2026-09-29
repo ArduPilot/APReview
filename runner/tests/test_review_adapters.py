@@ -192,6 +192,45 @@ class DiscoveryContract(unittest.TestCase):
         ):
             self.assertIn(key, c)
 
+    def test_a_label_pr_at_its_published_head_is_reused_without_reading_its_thread(self):
+        manifests = {"AIReview": {PR: {"head": "a" * 40}}}
+        self.gh.thread.reset_mock()
+        self.assertEqual(self.discover.candidate(PR, "AIReview", manifests)["classification"], "REUSE")
+        self.gh.thread.assert_not_called()
+        # a moved head is reviewed, and its thread is read for the previous round
+        manifests = {"AIReview": {PR: {"head": "c" * 40}}}
+        self.assertEqual(self.discover.candidate(PR, "AIReview", manifests)["classification"], "REVIEW")
+        self.gh.thread.assert_called_once()
+        # followup always needs the thread: the told head lives in our comment
+        self.gh.thread.reset_mock()
+        self.discover.candidate(PR, "followup", manifests)
+        self.gh.thread.assert_called_once()
+
+    def test_candidates_are_discovered_in_parallel_and_returned_in_order(self):
+        import threading, time
+        active, peak = [0], [0]
+        gate = threading.Lock()
+        real = self.discover.candidate
+        def slow(pr, mode, manifests=None):
+            with gate:
+                active[0] += 1
+                peak[0] = max(peak[0], active[0])
+            time.sleep(0.05)
+            with gate:
+                active[0] -= 1
+            return real(pr, mode, manifests)
+        self.discover.candidate = slow
+        self.discover.search = lambda mode, swept: {f"pr:owner/repo#{n}" for n in range(1, 9)}
+        self.discover.swept = lambda: {"owner/repo": {}}
+        self.discover.manifests = lambda mode=None: {}
+        self.config["routing"] = dict(schema=1, repositories=[], labels=[], modes=["all"])
+        self.gh.request.side_effect = lambda endpoint, **kw: (
+            dict(self.meta, number=int(endpoint.rsplit("/", 1)[1])) if "/pulls/" in endpoint else {"statuses": []})
+        rows = self.discover.discover("AIReview")
+        self.assertEqual(len(rows), 8)
+        self.assertGreater(peak[0], 1)
+        self.assertEqual([r["created_at"] for r in rows], sorted(r["created_at"] for r in rows))
+
     def test_filters_and_forced_pr_mode(self):
         manifests = {"AIReview": {PR: {"head": "a" * 40}}}
         self.assertEqual(

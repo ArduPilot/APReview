@@ -5,6 +5,7 @@ import configparser
 from datetime import datetime, timedelta
 import importlib.util
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import re
 import sys
 import subprocess
@@ -92,6 +93,7 @@ class Discovery:
         self.repos = {r["repo"].lower(): r for r in config.get("repos", repos.load())["repos"]}
         self.accounts = config.get("comment_accounts", [])
         self._sweep_lock = threading.RLock()
+        self._clone_locks = {}
         self._swept = None
         self.unparsed = []          # manifest keys no repository claims
 
@@ -360,8 +362,8 @@ class Discovery:
                 return []
             if mode in LABELS or mode == "rsync":
                 keys |= set(manifests.get(mode, {}))
-        out = []
         routing = validate(self.config.get("routing", DEFAULT))
+        wanted = []
         for pr in sorted(keys):
             repository = pr[3:].split("#")[0]
             if owner(routing, mode, repository) != "new":
@@ -370,9 +372,14 @@ class Discovery:
             # still belong to old publication. Do not partially overwrite them.
             if mode not in ("pr", "rsync") and owner(routing, mode) != "new":
                 continue
-            candidate = self.candidate(pr, mode, manifests)
+            wanted.append(pr)
+        # Each candidate is a handful of independent GitHub round trips; one
+        # at a time, 170 PRs took a quarter of an hour.
+        workers = int(self.config.get("discovery_workers", 8))
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            out = list(pool.map(lambda pr: self.candidate(pr, mode, manifests), wanted))
+        for candidate in out:
             candidate["observation"] = ticket
-            out.append(candidate)
         if mode == "followup" and not any(c["classification"] == "REVIEW" for c in out):
             for c in out:
                 c["destinations"] = []
@@ -396,7 +403,22 @@ class Discovery:
         key = (info.get("key", "") + "#" if info.get("key") else "") + str(number)
         head, base = meta["head"]["sha"], meta["base"]["sha"]
         labels = [x["name"] for x in meta.get("labels", [])]
-        thread = self.gh.thread(repo, number)
+        memberships = [label for label, rows in manifests.items() if pr in rows]
+        old = manifests.get(mode, {}).get(pr, {})
+        if not old and memberships:
+            old = manifests[memberships[0]][pr]
+        old = dict(head=old) if isinstance(old, str) else old
+        # A label PR at its published head is reused whatever its thread
+        # says; the thread is the costly part of a candidate (several paged
+        # calls), so it is read only when the review can use it.
+        reuse = (
+            (mode in LABELS or mode == "rsync")
+            and meta["state"] == "open"
+            and not meta["draft"]
+            and ("AIReview" if mode == "rsync" else mode) in labels
+            and same_head(head, old.get("head"))
+        )
+        thread = [] if reuse else self.gh.thread(repo, number)
         ours = [
             c
             for c in thread
@@ -414,11 +436,6 @@ class Discovery:
                 {"id": f"previous:{previous['id']}:{i}", "claim": paragraph}
                 for i, paragraph in enumerate(paragraphs or [previous["body"]])
             ]
-        memberships = [label for label, rows in manifests.items() if pr in rows]
-        old = manifests.get(mode, {}).get(pr, {})
-        if not old and memberships:
-            old = manifests[memberships[0]][pr]
-        old = dict(head=old) if isinstance(old, str) else old
         destinations = [
             target for label in memberships if label in LABELS
             and owner(self.config.get("routing", DEFAULT), label) == "new"
@@ -549,6 +566,14 @@ class Discovery:
         clone = self.config.get("reference_clones", {}).get(candidate["repository"])
         if not clone:
             raise OSError("no reference clone configured")
+        # candidates are discovered in parallel; git fetches into one clone
+        # are not, and FETCH_HEAD is not written under a lock
+        with self._sweep_lock:
+            gate = self._clone_locks.setdefault(clone, threading.Lock())
+        with gate:
+            self._snapshot_diff(clone, candidate, old)
+
+    def _snapshot_diff(self, clone, candidate, old):
         deadline = time.monotonic() + 120
         lock = acquire(self.store.locks, "refresh", deadline, shared=True) if self.store else None
         try:

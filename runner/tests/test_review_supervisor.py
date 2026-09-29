@@ -243,6 +243,25 @@ class ReviewSupervisor(unittest.TestCase):
         jobs = sorted([read(p) for p in (directory / "attempts").glob("*/job.json") if read(p)["kind"] == "primary"], key=lambda x: x["registered"])
         self.assertEqual([j["number"] for j in jobs], [3, 1, 2])
 
+    def test_admission_refreshes_are_prefetched_together_and_expire(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.config = {"configuration": {"discovery_workers": 4}}
+        supervisor.discovery = Mock()
+        supervisor.discovery.refresh.side_effect = lambda c: dict(c, fresh=True)
+        rows = [dict(candidate(n), pr="pr:owner/repo#%d" % n) for n in (1, 2, 3)]
+        supervisor.prefetch(rows)
+        self.assertEqual(supervisor.discovery.refresh.call_count, 3)
+        self.assertTrue(supervisor.prefetched_refresh(rows[0]["pr"])["fresh"])
+        # taken once; a second claim refreshes for itself
+        self.assertIsNone(supervisor.prefetched_refresh(rows[0]["pr"]))
+        # a stale prefetch is not used
+        supervisor.prefetched[rows[1]["pr"]] = (time.monotonic() - 120, {"stale": True})
+        self.assertIsNone(supervisor.prefetched_refresh(rows[1]["pr"]))
+        # a failed prefetch leaves the claim to refresh and report
+        supervisor.discovery.refresh.side_effect = OSError("gone")
+        supervisor.prefetch([dict(candidate(4), pr="pr:owner/repo#4")])
+        self.assertIsNone(supervisor.prefetched_refresh("pr:owner/repo#4"))
+
     def test_terminal_transition_between_poll_and_schedule_does_not_retry(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root
