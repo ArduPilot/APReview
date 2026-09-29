@@ -854,9 +854,13 @@ and then wait on your own pause. It waits for old jobs and new attempts/debts,
 imports previous sections, scrubs shared pages, publishes them under page
 locks and only then switches routing. Both directions are idempotent and have
 `--dry-run`. A pending publication journal must be completed before reversing.
-The new cron alternatives and drain are commented out in
-`runner/etc/crontab.reviewprs`; replace the appropriate old line explicitly,
-never enable both.
+The full cutover is `review-handoff.py new --full --pages <mirror>`, with a
+`--dry-run` first; it needs a reference clone for every repository under
+`$REVIEW_DATA/references` (seed them from the old base clones with
+`git clone --reference <old> --dissociate --recurse-submodules`). Afterwards
+the existing cron lines route to the supervisor by themselves. The new cron
+alternatives are commented out in `runner/etc/crontab.reviewprs`; replace the
+appropriate old line explicitly, never enable both.
 
 When a run is stuck, start with `runs/<run>/summary.json`, then its
 `attempts/<attempt>/status.json`, `job.json`, `payload.log`, `launch.json` and

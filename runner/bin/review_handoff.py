@@ -49,8 +49,9 @@ def legacy_busy(data, references, work=None):
     return False
 
 
-def pending(data, repository, deadline=None):
-    prefix = "pr:" + repository.lower() + "#"
+def pending(data, repository=None, deadline=None):
+    """Undelivered work for one repository, or for every one when None."""
+    prefix = "pr:" + (repository.lower() + "#" if repository else "")
     # A crash can leave a committed journal/bundle before outbox fan-out. An
     # empty outbox alone is not a fence against its next recovery controller.
     operations = [read(p) for p in Path(data).glob("operations/*.json")]
@@ -60,8 +61,10 @@ def pending(data, repository, deadline=None):
                    for i in operation["intents"]):
                 return True
     store = Store(data)
-    for path in (Path(data) / "results" / repository).glob("*/current"):
-        for bundle in store.chain(prefix + path.parent.name):
+    results = Path(data) / "results"
+    for path in (results / repository).glob("*/current") if repository else results.glob("*/*/*/current"):
+        pr = "pr:" + path.parent.parent.parent.name + "/" + path.parent.parent.name + "#" + path.parent.name
+        for bundle in store.chain(pr):
             if any(not (Path(data) / "receipts" / (i["id"] + ".json")).exists()
                    for i in bundle["intents"]):
                 return True
@@ -78,7 +81,7 @@ def pending(data, repository, deadline=None):
             # project. A paused queued controller can still write page intents;
             # it must finish/abort before ownership transfers, not just have no
             # live guardian at this instant.
-            if not rows or any(c["repository"].lower() == repository for c in rows):
+            if not rows or repository is None or any(c["repository"].lower() == repository for c in rows):
                 return True
     for path in Path(data).glob("outbox/*.json"):
         if read(path, {}).get("pr", "").startswith(prefix):
@@ -109,6 +112,29 @@ def strip_rows(raw, keys):
     return re.sub(r'<!-- reviewprs-manifest v1 [^>]*heads="([^"]*)"[^>]*-->', manifest, raw)
 
 
+def legacy_bundle(store, pr, row, target, ticket, config, key=None):
+    """Generation zero: an explicitly imported legacy review, not evidence
+    that four new inference passes ran successfully. Caller owns the PR."""
+    repository, number = pr[3:].split("#")
+    inputs = dict(repository=repository, number=int(number), head=row["head"],
+                  manifest_key=key or number, configuration=config)
+    bundle = dict(schema=1, legacy=True, pr=pr, generation=0,
+                  run="legacy-import", request="legacy-import", inputs=inputs,
+                  results={"reconciliation": {"section_md": row["section"]}},
+                  previous=None, intents=[
+                      dict(kind="projection", target=target,
+                           patches={pr: dict(ticket=ticket, removed=False, generation=0)}),
+                      dict(kind="publish", target=target)], selected={})
+    for intent in bundle["intents"]:
+        intent["id"] = delivery_id(pr, 0, intent["kind"], target)
+    directory = store.pr_dir(pr) / "generations/0"
+    atomic(directory / "bundle.json", bundle)
+    for intent in bundle["intents"]:
+        store.receipt(dict(intent, pr=pr, generation=0), "imported")
+    atomic(store.pr_dir(pr) / "current", dict(generation=0, digest=bundle_digest(directory)))
+    return bundle
+
+
 def import_manifest(store, repository, rows, target, config):
     ticket = store.ticket()
     for pr, row in rows.items():
@@ -126,28 +152,141 @@ def import_manifest(store, repository, rows, target, config):
             if current and current["inputs"]["head"] != row["head"]:
                 raise ValueError("import conflicts with accepted head: " + pr)
             if not current:
-                number = int(pr.split("#")[1])
-                inputs = dict(repository=repository, number=number, head=row["head"],
-                              manifest_key=str(number), configuration=config)
-                # Generation zero is an explicitly imported legacy review, not
-                # evidence that four new inference passes ran successfully.
-                bundle = dict(schema=1, legacy=True, pr=pr, generation=0,
-                              run="legacy-import", request="legacy-import", inputs=inputs,
-                              results={"reconciliation": {"section_md": row["section"]}},
-                              previous=None, intents=[
-                                  dict(kind="projection", target=target,
-                                       patches={pr: dict(ticket=ticket, removed=False, generation=0)}),
-                                  dict(kind="publish", target=target)], selected={})
-                for intent in bundle["intents"]:
-                    intent["id"] = delivery_id(pr, 0, intent["kind"], target)
-                directory = store.pr_dir(pr) / "generations/0"
-                atomic(directory / "bundle.json", bundle)
-                for intent in bundle["intents"]:
-                    store.receipt(dict(intent, pr=pr, generation=0), "imported")
-                atomic(store.pr_dir(pr) / "current", dict(generation=0, digest=bundle_digest(directory)))
-                current = bundle
+                current = legacy_bundle(store, pr, row, target, ticket, config)
             store.merge_membership(target, {pr: dict(ticket=ticket, removed=False,
                                                      generation=current["generation"])})
+
+
+SHARED_LABELS = ("AIReview", "DevCallTopic", "DevCallEU")
+
+
+def shared_pages(mirror):
+    """The latest shared pages the full cutover imports: one per label, one
+    per author. Dated archives and followup reports are history; the new
+    path writes its own."""
+    pages = [mirror / "DevCallReviews" / label / "devcall_pr_reviews.html" for label in SHARED_LABELS]
+    users = mirror / "UserReviews"
+    if users.is_dir():
+        pages += sorted(p for p in users.glob("*.html") if p.name != "files.html")
+    return [p for p in pages if p.exists()]
+
+
+def scan_shared(mirror, parser):
+    """Rows per shared page. Every manifest key must resolve to a configured
+    repository and carry its section, or the page would lose that review on
+    its first republish."""
+    imports, problems = [], []
+    for path in shared_pages(mirror):
+        if path.is_symlink():
+            raise ValueError("publication mirror must not contain symlinks")
+        rel = path.relative_to(mirror).as_posix()
+        parser.unparsed = []
+        try:
+            rows = parser.parse_manifest(path.read_text())
+        except OSError as error:
+            problems.append(rel + ": " + str(error))
+            continue
+        problems += [rel + ": unknown key " + key for key in parser.unparsed]
+        problems += [rel + ": no section for " + pr for pr, row in rows.items() if not row.get("section")]
+        imports.append(("page:review/" + rel, rows))
+    return imports, problems
+
+
+def import_pages(store, imports, config):
+    """Import every shared page's rows. A PR on two pages keeps the first
+    imported section; an accepted new-path generation is authoritative."""
+    ticket = store.ticket()
+    conflicts = []
+    for target, rows in imports:
+        for pr, row in rows.items():
+            lock = try_lock(store.locks, pr)
+            if lock is None:
+                raise RuntimeError("PR is still owned: " + pr)
+            with lock:
+                if not store.clean_owner(lock):
+                    raise RuntimeError("previous payload not empty")
+                current = store.bundle(pr)
+                if not current:
+                    current = legacy_bundle(store, pr, row, target, ticket, config, row.get("key"))
+                elif current.get("legacy") and current["inputs"]["head"] != row["head"]:
+                    conflicts.append(dict(pr=pr, page=target, kept=current["inputs"]["head"],
+                                          skipped=row["head"]))
+                store.merge_membership(target, {pr: dict(ticket=ticket, removed=False,
+                                                         generation=current["generation"])})
+    return conflicts
+
+
+def cutover(root, data, mirror, *, dry=False, wait=300, publish=None, rsync_args=(),
+            references=None, github=None):
+    """Transfer every remaining mode, label and repository at once (design
+    step 4). Imports the latest shared pages so the first new run republishes
+    them whole, then sets modes to all. There is no automated reverse."""
+    root, data, mirror = Path(root), Path(data), Path(mirror)
+    parser = Discovery(github, {"repos": repos.load()})
+    problems = []
+    if github is not None:
+        try:
+            parser.swept()      # submodule repositories, so their keys resolve
+        except Exception as error:
+            problems.append("submodule sweep failed: " + str(error))
+    imports, scanned = scan_shared(mirror, parser)
+    problems += scanned
+    changes = dict(direction="new", modes=["all"], before=load(root)["modes"],
+                   pages=[t for t, _ in imports],
+                   imported_prs=sum(len(r) for _, r in imports), problems=problems)
+    if dry:
+        return dict(changes, dry_run=True)
+    if problems:
+        raise ValueError("cannot import: " + "; ".join(problems[:20]))
+    deadline = time.monotonic() + wait
+    store = Store(data)
+    with ExitStack() as stack:
+        pause = acquire(store.locks, "pause", deadline)
+        if pause is None:
+            raise TimeoutError("admission already paused; finish/resume that pause first")
+        stack.enter_context(pause)
+        old = stack.enter_context(open(root / "etc/reviewprs.lock", "a"))
+        while True:
+            try:
+                fcntl.flock(old, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("old run did not drain")
+                time.sleep(0.05)
+        while True:
+            debts = pending(data, None, deadline)
+            busy = not debts and legacy_busy(data, references or root / "repositories", root / "work")
+            if not debts and not busy:
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError(("delivery debts" if debts else "attempts or legacy readers")
+                                   + " did not drain")
+            time.sleep(0.05)
+        routing = load(root)
+        if publish:
+            # Only after draining: an old run may have published until now.
+            subprocess.run(["rsync", "-a", *rsync_args, "--", publish.rstrip('/') + '/', str(mirror) + '/'],
+                           check=True, timeout=max(.1, deadline - time.monotonic()))
+            imports, problems = scan_shared(mirror, parser)
+            if problems:
+                raise ValueError("cannot import: " + "; ".join(problems[:20]))
+        config = {"repos": repos.load()}
+        # The admission fence belongs to the coordinator; the leaf owns PR
+        # then page, in normal order, on separate open descriptions.
+        result = subprocess.run([sys.executable, "-c",
+            "import json,sys; from review_handoff import import_pages; "
+            "from review_store import Store; a=json.load(sys.stdin); "
+            "print(json.dumps(import_pages(Store(a[0]), a[1], a[2])))"],
+            input=json.dumps([str(data), imports, config]), text=True, capture_output=True,
+            check=True, timeout=max(.1, deadline - time.monotonic()),
+            env=dict(os.environ, PYTHONPATH=str(Path(__file__).parent)))
+        changes.update(imported_prs=sum(len(r) for _, r in imports),
+                       conflicts=json.loads(result.stdout.strip().splitlines()[-1]))
+        routing["modes"] = sorted(set(routing["modes"]) | {"all"})
+        atomic(root / "etc/routing.json", routing)
+        atomic(data / "handoff" / "full" / "last.json", changes)
+    return changes
 
 
 def scan_mirror(repository, mirror):

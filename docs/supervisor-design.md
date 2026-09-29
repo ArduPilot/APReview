@@ -975,10 +975,21 @@ python3 "$REVIEW_ROOT/bin/review-handoff.py" old --pages /data/review/canary-pag
 Rollback exports the accepted rsync page with a compatible manifest before
 returning ownership. It keeps bundles, receipts and backups; it does not
 restore stale rows into shared reports. Their next old sweep rebuilds them.
-The automated handoff intentionally supports only the rsync repository
-boundary. The remaining all-at-once transfer still requires the full manifest
-inventory and destination plan described in step 4; it is not inferred from
-labels or performed by installing this slice.
+The remaining all-at-once transfer (step 4) is `review-handoff.py new --full`.
+It reads the same complete mirror, imports every row of the latest shared
+pages (the three label pages and every author page) as generation zero, one
+membership row per page, and then adds `all` to `modes`, which makes every
+mode, label and repository new-owned. Dated archives and followup reports are
+history; the new path writes its own. A PR on two pages keeps the first
+imported section and the conflict is reported; an already accepted new-path
+generation is authoritative for its row. The dry run lists every manifest key
+that resolves to no configured repository and every entry without a section,
+and the transfer refuses while any remain, because that review would vanish
+from its page on the first republish. It needs a full reference clone under
+`REVIEW_NEW_REPOS` for every repository in repos.json, submodules included.
+There is no automated reverse: rolling back means restoring routing.json and
+accepting that the old command rebuilds its pages from the new renderer's
+manifests.
 
 ## Decisions taken
 

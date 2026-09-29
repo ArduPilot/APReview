@@ -218,7 +218,7 @@ class Discovery:
                 print("manifest: skipping unknown key " + key, file=sys.stderr)
                 continue
             rows[canonical(f"pr:{repo}#{number}")] = dict(
-                head=head, section=self.section_of(html, key.replace("#", "-"))
+                head=head, section=self.section_of(html, key.replace("#", "-")), key=key
             )
         return rows
 
@@ -227,17 +227,17 @@ class Discovery:
         """The PR's section, in either page form.
 
         The new renderer writes <section id="prKEY">...</section>. The command's
-        pages, which the handoff imports, write <div class="pr" id="prKEY"> and
-        close it with a bare </div>; the next PR's div or the Summary heading
-        is the only reliable end of it.
+        pages, which the handoff imports, write <div class="pr" id="prKEY">
+        (also class "pr new" or "pr changed") and close it with a bare </div>;
+        the next PR's div or the Summary heading is the only reliable end of it.
         """
         match = re.search(r'<section\b[^>]*id="pr' + re.escape(anchor) + r'"[^>]*>.*?</section>', html, re.S)
         if match:
             return match[0]
-        start = re.search(r'<div class="pr" id="pr' + re.escape(anchor) + r'">', html)
+        start = re.search(r'<div class="pr(?: [^"]*)?" id="pr' + re.escape(anchor) + r'">', html)
         if not start:
             return None
-        end = re.search(r'\n<div class="pr" id="pr|\n<h2>', html[start.end():])
+        end = re.search(r'\n<div class="pr(?: [^"]*)?" id="pr|\n<h2>', html[start.end():])
         return html[start.start():start.end() + end.start()] if end else html[start.start():]
 
     def destination(self, label):

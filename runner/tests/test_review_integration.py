@@ -16,7 +16,7 @@ from review_control import abort, reap, signal_identity
 from review_dashboard import render, summaries
 from review_discovery import Discovery
 from review_guardian import identity
-from review_handoff import handoff, import_manifest, pending
+from review_handoff import cutover, handoff, import_manifest, pending
 from review_lock import try_lock
 from review_routing import DEFAULT, candidates, load, route, validate
 from review_store import Store, atomic, digest, read
@@ -302,6 +302,76 @@ class Integration(unittest.TestCase):
         shared.write_text('<!-- reviewprs-manifest v1 heads="rsync#1:aaaaaaaaaa 2:bbbbbbbbbb" -->'
                           '<section id="prrsync-1">rsync</section><section id="pr2">keep</section>')
         return mirror
+
+    def shared_mirror(self):
+        mirror = self.root / "pages"
+        page = mirror / "DevCallReviews/AIReview/devcall_pr_reviews.html"
+        page.parent.mkdir(parents=True)
+        page.write_text('<!-- reviewprs-manifest v1 label="AIReview" heads="1:aaaaaaaaaa MAVProxy-2:bbbbbbbbbb" -->\n'
+                        '<h2>Reviews</h2>\n<div class="pr new" id="pr1">\n<h3>one</h3>\n</div>\n'
+                        '<div class="pr" id="prMAVProxy-2">\n<h3>two</h3>\n</div>\n<h2>Summary</h2>\n')
+        other = mirror / "DevCallReviews/DevCallEU/devcall_pr_reviews.html"
+        other.parent.mkdir(parents=True)
+        # the same PR at an older head on a second page
+        other.write_text('<!-- reviewprs-manifest v1 label="DevCallEU" heads="1:cccccccccc" -->\n'
+                         '<h2>Reviews</h2>\n<div class="pr" id="pr1">\n<h3>older one</h3>\n</div>\n<h2>Summary</h2>\n')
+        person = mirror / "UserReviews/person.html"
+        person.parent.mkdir()
+        person.write_text('<!-- reviewprs-manifest v1 heads="wiki-3:dddddddddd" -->\n'
+                          '<div class="pr" id="prwiki-3">\n<h3>wiki</h3>\n</div>\n<h2>Summary</h2>\n')
+        (mirror / "UserReviews/files.html").write_text("<p>index</p>")
+        return mirror
+
+    def test_full_cutover_imports_every_shared_page_and_transfers_all_modes(self):
+        mirror = self.shared_mirror()
+        atomic(self.site / "etc/routing.json", self.routing)
+        plan = cutover(self.site, self.data, mirror, dry=True)
+        self.assertEqual(plan["problems"], [])
+        self.assertEqual(plan["imported_prs"], 4)
+        self.assertEqual(plan["pages"], ["page:review/DevCallReviews/AIReview/devcall_pr_reviews.html",
+                                         "page:review/DevCallReviews/DevCallEU/devcall_pr_reviews.html",
+                                         "page:review/UserReviews/person.html"])
+        self.assertEqual(load(self.site)["modes"], [])
+        for _ in range(2):
+            result = cutover(self.site, self.data, mirror, wait=1)
+        self.assertEqual(load(self.site), dict(self.routing, modes=["all"]))
+        self.assertEqual(result["conflicts"], [dict(pr="pr:ardupilot/ardupilot#1",
+                                                    page="page:review/DevCallReviews/DevCallEU/devcall_pr_reviews.html",
+                                                    kept="aaaaaaaaaa", skipped="cccccccccc")])
+        one = self.store.bundle("pr:ardupilot/ardupilot#1")
+        self.assertTrue(one["legacy"])
+        self.assertIn("<h3>one</h3>", one["results"]["reconciliation"]["section_md"])
+        two = self.store.bundle("pr:ardupilot/mavproxy#2")
+        self.assertEqual(two["inputs"]["manifest_key"], "MAVProxy-2")
+        self.assertIsNotNone(self.store.bundle("pr:ardupilot/ardupilot_wiki#3"))
+        for target, prs in {"page:review/DevCallReviews/AIReview/devcall_pr_reviews.html":
+                                {"pr:ardupilot/ardupilot#1", "pr:ardupilot/mavproxy#2"},
+                            "page:review/DevCallReviews/DevCallEU/devcall_pr_reviews.html":
+                                {"pr:ardupilot/ardupilot#1"},
+                            "page:review/UserReviews/person.html": {"pr:ardupilot/ardupilot_wiki#3"}}.items():
+            rows = read(self.data / "membership" / (digest(target) + ".json"))
+            self.assertEqual({pr for pr, row in rows.items() if not row["removed"]}, prs)
+            self.assertTrue(all(row["generation"] == 0 for row in rows.values()))
+        # the imported section renders without its old wrapper, under the new anchor
+        from review_render import Renderer
+        page = Renderer(self.store).render("page:review/DevCallReviews/AIReview/devcall_pr_reviews.html").decode()
+        self.assertIn('<section id="prMAVProxy-2"', page)
+        self.assertNotIn('<div class="pr new"', page)
+        self.assertIn("<h3>one</h3>", page)
+        self.assertFalse(pending(self.data))
+
+    def test_full_cutover_refuses_a_key_it_cannot_place_or_a_missing_section(self):
+        mirror = self.shared_mirror()
+        page = mirror / "DevCallReviews/DevCallTopic/devcall_pr_reviews.html"
+        page.parent.mkdir()
+        page.write_text('<!-- reviewprs-manifest v1 heads="Nobody-7:eeeeeeeeee 9:ffffffffff" -->\n<h2>Reviews</h2>\n')
+        plan = cutover(self.site, self.data, mirror, dry=True)
+        self.assertEqual(plan["problems"], ["DevCallReviews/DevCallTopic/devcall_pr_reviews.html: unknown key Nobody-7",
+                                            "DevCallReviews/DevCallTopic/devcall_pr_reviews.html: no section for pr:ardupilot/ardupilot#9"])
+        with self.assertRaises(ValueError):
+            cutover(self.site, self.data, mirror, wait=1)
+        self.assertEqual(load(self.site), DEFAULT)
+        self.assertIsNone(self.store.bundle("pr:ardupilot/ardupilot#1"))
 
     def test_handoff_dry_run_import_scrub_and_idempotent_rollback(self):
         mirror = self.mirror()

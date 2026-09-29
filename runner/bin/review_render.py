@@ -70,8 +70,8 @@ def bundle_at(store, pr, generation):
 
 def core(bundle):
     if bundle.get("legacy"):
-        raw = bundle["results"]["reconciliation"]["section_md"]
-        inner = re.sub(r'^<section\b[^>]*>|</section>\s*$', '', raw)
+        raw = bundle["results"]["reconciliation"]["section_md"].strip()
+        inner = re.sub(r'^<(?:section|div)\b[^>]*>\s*|\s*</(?:section|div)>$', '', raw)
         return '<p>Imported legacy review; original coverage retained.</p>\n' + inner
     inputs, final = bundle["inputs"], bundle["results"]["reconciliation"]
     validation = bundle["results"]["validation"]

@@ -305,14 +305,19 @@ class DiscoveryContract(unittest.TestCase):
 
         discovery = Discovery(self.gh, dict(self.config, repos=repos.load()))
         discovery.repos = {"rsyncproject/rsync": dict(repo="RsyncProject/rsync", key="")}
-        html = ('<!-- reviewprs-manifest v1 label="AIReview" heads="1065:c512980a46 1060:0580585747" -->\n'
-                '<h2>Reviews</h2>\n<div class="pr" id="pr1065">\n<h3>1065</h3>\n<div class="x">nested</div>\n</div>\n'
-                '<div class="pr" id="pr1060">\n<h3>1060</h3>\n</div>\n<h2>Summary</h2>\n')
+        html = ('<!-- reviewprs-manifest v1 label="AIReview" heads="1065:c512980a46 1060:0580585747 1059:1111111111" -->\n'
+                '<h2>Reviews</h2>\n<div class="pr new" id="pr1065">\n<h3>1065</h3>\n<div class="x">nested</div>\n</div>\n'
+                '<div class="pr" id="pr1060">\n<h3>1060</h3>\n</div>\n'
+                '<div class="pr changed" id="pr1059">\n<h3>1059</h3>\n</div>\n<h2>Summary</h2>\n')
         rows = discovery.parse_manifest(html)
+        # the label pages mark sections "pr new" and "pr changed" as well
         self.assertEqual(rows["pr:rsyncproject/rsync#1065"]["section"],
-                         '<div class="pr" id="pr1065">\n<h3>1065</h3>\n<div class="x">nested</div>\n</div>')
+                         '<div class="pr new" id="pr1065">\n<h3>1065</h3>\n<div class="x">nested</div>\n</div>')
         self.assertEqual(rows["pr:rsyncproject/rsync#1060"]["section"],
                          '<div class="pr" id="pr1060">\n<h3>1060</h3>\n</div>')
+        self.assertEqual(rows["pr:rsyncproject/rsync#1059"]["section"],
+                         '<div class="pr changed" id="pr1059">\n<h3>1059</h3>\n</div>')
+        self.assertEqual(rows["pr:rsyncproject/rsync#1060"]["key"], "1060")
 
     def test_reserved_modes_and_pr_reference_precedence(self):
         self.assertEqual(self.discover.resolve("--FollowUp"), "followup")
