@@ -726,33 +726,36 @@ for r in runs:
     rows.append(
         '<tr>'
         '<td data-sort="%d">%s</td>'
-        '<td>%s</td>'
-        '<td data-sort="%s">%s</td>'
+        '<td class="wrap">%s</td>'
         '<td data-sort="%s">%s</td>'
         '<td data-sort="%s">%s</td>'
         '<td data-sort="%d">%s</td>'
-        '<td data-sort="%s">%s</td>'
+        '<td data-sort="%s" class="wrap">%s</td>'
         '<td data-sort="%s">%s</td>'
         '<td data-sort="%s">%s</td>'
         '<td data-sort="%s">%s</td>'
         '</tr>' % (
-            int(r['start'].timestamp()), r['start'].strftime('%a %d %b %H:%M'),
+            int(r['start'].timestamp()), r['start'].strftime('%d %b %H:%M'),
             html.escape(r['mode']),
             r['elapsed'] if r['elapsed'] is not None else (
                 int((now - r['start']).total_seconds() // 60) if r['status'] == 'running' else -1),
+            # a legacy run queued on the old global lock shows its wait here,
+            # now that the lock wait column has gone
+            ('%dm waiting' % r['waited']) if r['status'] == 'queued' and r.get('waited') else (
             ('%dm' % r['elapsed']) if r['elapsed'] is not None else (
                 ('%dm so far' % int((now - r['start']).total_seconds() // 60))
-                if r['status'] == 'running' else '&mdash;'),
-            r['waited'] if r['waited'] is not None else -1,
-            ('%dm' % r['waited']) if r['waited'] else '&mdash;',
+                if r['status'] == 'running' else '&mdash;')),
             {'ok': 0, 'running': 1, 'skipped': 2, 'quota': 3}.get(r['status'], 4), 
             '<span class="badge %s">%s</span>' % (BADGE.get(r['status'], 'b-fail'), r['status']),
             r['prs'] if r['prs'] is not None else -1,
             r['prs'] if r['prs'] is not None else '&mdash;',
             r.get('passes', -1) if r.get('passes') is not None else -1,
-            ('%d%s%s' % (r['passes'],
-                         ' <span class="sub">(%d retried)</span>' % r['retried'] if r.get('retried') else '',
-                         ' <span class="sub">+%d failed before inference</span>' % r['early'] if r.get('early') else ''))
+            # the count, with any retries and early failures in small print on
+            # a second line: on one line this cell widened the whole table
+            ('%d%s' % (r['passes'], ('<br><span class="sub">%s</span>' % ', '.join(
+                x for x in ('%d retried' % r['retried'] if r.get('retried') else '',
+                            '%d failed early' % r['early'] if r.get('early') else '') if x))
+                if (r.get('retried') or r.get('early')) else ''))
             if r.get('passes') is not None else '&mdash;',
             tot or -1, fmt_tok(tot),
             ('%.1f' % r['cl_delta']) if r['cl_delta'] is not None else -1,
@@ -800,6 +803,9 @@ th::after{content:"\\2195";opacity:.35;margin-left:5px;font-size:11px}
 th[aria-sort=ascending]::after{content:"\\25B2";opacity:1}
 th[aria-sort=descending]::after{content:"\\25BC";opacity:1}
 tr:last-child td{border-bottom:0}
+td .sub{font-size:12px;margin:0}
+td.wrap{white-space:normal}
+table.runs th{white-space:normal}
 .badge{padding:1px 7px;border-radius:10px;font-size:12px;font-weight:600}
 /* an account at or below the threshold a run would ask for */
 td.bad{color:#b42318;font-weight:600}
@@ -858,9 +864,9 @@ so their state is read from the published reports instead.</p>
 <tbody>__SROWS__</tbody></table></div>
 
 <h2>Runs</h2>
-<div class="scroll"><table class="sortable">
-<thead><tr><th>Started</th><th>Mode</th><th>Duration</th><th>Lock wait</th><th>Status</th>
-<th>PRs reviewed</th><th>Passes</th><th>Claude tokens</th><th>Claude wk &Delta;</th><th>Codex wk &Delta;</th></tr></thead>
+<div class="scroll"><table class="runs sortable">
+<thead><tr><th>Started</th><th>Mode</th><th>Duration</th><th>Status</th>
+<th>PRs</th><th>Passes</th><th>Claude tokens</th><th>Claude wk &Delta;</th><th>Codex wk &Delta;</th></tr></thead>
 <tbody>__ROWS__</tbody></table></div>
 
 <div class="note">

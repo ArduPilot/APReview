@@ -82,13 +82,15 @@ class Dashboard(unittest.TestCase):
         self.assertEqual((row["codex_account"], row["codex_home"]), ("acct-one", "/nowhere/codex"))
         self.assertNotIn("Supervisor runs", page)
         # PRs reviewed is its own column: one accepted in this run
-        self.assertIn("<th>PRs reviewed</th>", page)
+        self.assertIn("<th>PRs</th>", page)
+        self.assertNotIn("<th>Lock wait</th>", page)
         self.assertIn("<th>Passes</th>", page)
         self.assertNotIn("<th>Turns</th>", page)
         # the running pass reached inference; the failed one died before its
         # session and is counted apart; the starved one is not counted at all
         self.assertEqual((row["passes"], row["retried"], row["early"]), (1, 0, 1))
-        self.assertIn("+1 failed before inference", page)
+        # the breakdown sits under the count, so the column stays narrow
+        self.assertIn('1<br><span class="sub">1 failed early</span>', page)
         self.assertIn('<td data-sort="1">1</td>', page)
         self.assertIn(">all<", page)
 
@@ -507,7 +509,7 @@ class Dashboard(unittest.TestCase):
         reason.
         """
         table = page.split("<h2>Runs</h2>", 1)[1]
-        rows = [r for r in table.split("<tr>") if "<td>%s</td>" % mode in r]
+        rows = [r for r in table.split("<tr>") if '<td class="wrap">%s</td>' % mode in r]
         self.assertTrue(rows, "no %s row in the Runs table" % mode)
         return rows[0]
 
