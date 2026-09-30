@@ -58,7 +58,18 @@ class Dashboard(unittest.TestCase):
         path = directory / "attempts/a"
         path.mkdir(parents=True)
         (path / "status.json").write_text(json.dumps(dict(schema=1, **identity, state="running",
-            attempt="a", provider="codex", heartbeat=0, session_id="session-one", usage={"input_tokens": 13})))
+            attempt="a", provider="codex", heartbeat=0, session_id="session-one", usage={"input_tokens": 13},
+            pr="pr:owner/repo#2", kind="cold")))
+        # an earlier cold pass on the same PR that ran and failed: a retry
+        again = directory / "attempts/b"
+        again.mkdir(parents=True)
+        (again / "status.json").write_text(json.dumps(dict(schema=1, **identity, state="terminal",
+            attempt="b", provider="codex", heartbeat=0, exit=1, pr="pr:owner/repo#2", kind="cold")))
+        # one that waited out the account lease and never ran costs nothing
+        starved = directory / "attempts/c"
+        starved.mkdir(parents=True)
+        (starved / "status.json").write_text(json.dumps(dict(schema=1, **identity, state="terminal",
+            attempt="c", provider="codex", heartbeat=0, error="account deadline", pr="pr:owner/repo#2", kind="cold")))
         self.log("rsync", 'reviewprs mode=rsync host=t start=' + datetime.datetime.now().astimezone().isoformat() +
                  '\ncodex account:  acct-one  (role default, home /nowhere/codex)'
                  '\nsupervisor run=' + str(directory) + '\n')
@@ -72,6 +83,10 @@ class Dashboard(unittest.TestCase):
         self.assertNotIn("Supervisor runs", page)
         # PRs reviewed is its own column: one accepted in this run
         self.assertIn("<th>PRs reviewed</th>", page)
+        self.assertIn("<th>Passes</th>", page)
+        self.assertNotIn("<th>Turns</th>", page)
+        self.assertEqual((row["passes"], row["retried"]), (2, 1))
+        self.assertIn("(1 retried)", page)
         self.assertIn('<td data-sort="1">1</td>', page)
         self.assertIn(">all<", page)
 

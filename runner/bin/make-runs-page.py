@@ -217,10 +217,16 @@ for sv in summaries(DATA):
         status, finish = 'running', None
     usage = sv.get('usage', {})
     counts = sv.get('counts', {})
+    # Passes whose payload ran: one that waited out an account or permit and
+    # never started cost nothing. A second pass of a kind on one PR is a retry.
+    ran = [a for a in sv.get('attempts', [])
+           if a.get('error') not in ('account deadline', 'permit deadline')
+           and a.get('state') in ('running', 'terminal')]
+    retried = len(ran) - len({(a.get('pr'), a.get('kind')) for a in ran})
     runs.append(dict(
         mode=cfg.get('mode') or sv['name'], start=start, finish=finish,
         elapsed=int((finish - start).total_seconds() // 60) if finish else None,
-        status=status, rc=None, turns=None,
+        status=status, rc=None, turns=None, passes=len(ran), retried=retried,
         tin=usage.get('input_tokens', 0), tout=usage.get('output_tokens', 0),
         tcr=usage.get('cache_read_input_tokens', 0) + usage.get('cached_input_tokens', 0),
         tcw=usage.get('cache_creation_input_tokens', 0), waited=None,
@@ -706,7 +712,9 @@ for r in runs:
             '<span class="badge %s">%s</span>' % (BADGE.get(r['status'], 'b-fail'), r['status']),
             r['prs'] if r['prs'] is not None else -1,
             r['prs'] if r['prs'] is not None else '&mdash;',
-            r['turns'] or -1, r['turns'] or '&mdash;',
+            r.get('passes', -1) if r.get('passes') is not None else -1,
+            ('%d%s' % (r['passes'], ' <span class="sub">(%d retried)</span>' % r['retried'] if r.get('retried') else ''))
+            if r.get('passes') is not None else '&mdash;',
             tot or -1, fmt_tok(tot),
             ('%.1f' % r['cl_delta']) if r['cl_delta'] is not None else -1,
             ('+%d%%' % r['cl_delta']) if r['cl_delta'] else '&mdash;',
@@ -813,7 +821,7 @@ so their state is read from the published reports instead.</p>
 <h2>Runs</h2>
 <div class="scroll"><table class="sortable">
 <thead><tr><th>Started</th><th>Mode</th><th>Duration</th><th>Lock wait</th><th>Status</th>
-<th>PRs reviewed</th><th>Turns</th><th>Claude tokens</th><th>Claude wk &Delta;</th><th>Codex wk &Delta;</th></tr></thead>
+<th>PRs reviewed</th><th>Passes</th><th>Claude tokens</th><th>Claude wk &Delta;</th><th>Codex wk &Delta;</th></tr></thead>
 <tbody>__ROWS__</tbody></table></div>
 
 <div class="note">
