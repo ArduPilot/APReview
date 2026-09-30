@@ -177,6 +177,17 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual(SUPERVISOR.scaled_wall(1800, "x\n" * 90000), 5400)
         self.assertEqual(SUPERVISOR.scaled_wall(1800, None), 1800)
 
+    def test_a_rerun_of_a_deferred_pr_pays_only_for_what_was_left(self):
+        child, directory, log = self.start("first", [candidate(stub={"reconciliation": {"invalid": True}})])
+        summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"][PR]["review"], "deferred")
+        child, again, log = self.start("second", [candidate()])
+        summary = self.finish(child, again, log)
+        self.assertEqual(summary["prs"][PR]["review"], "accepted", log.read_text())
+        kinds = sorted(read(p)["kind"] for p in (again / "attempts").glob("*/job.json"))
+        self.assertEqual(kinds, ["reconciliation"])
+        self.assertEqual(summary["prs"][PR].get("carried"), ["cold", "primary", "validation"])
+
     def test_two_failures_defer_without_acceptance(self):
         child, directory, log = self.start("fail", [candidate(stub={"primary": {"invalid": True}})])
         summary = self.finish(child, directory, log)

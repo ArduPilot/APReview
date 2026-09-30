@@ -239,6 +239,74 @@ class ReviewStore(unittest.TestCase):
         self.assertNotIn("candidate", row)
         self.assertEqual(row["ci"], {"state": "passing"})
 
+    def finish_with_reconciliation(self, claim):
+        from review_schema import FILES, canned
+        from review_store import mkdir
+        results = {k: read(Path(claim["selected"][k]) / FILES[k]) for k in ("primary", "cold", "validation")}
+        path = self.root / "attempt-fixtures" / str(claim["generation"]) / "reconciliation"
+        mkdir(path)
+        inputs = claim["inputs"]
+        job = {k: inputs[k] for k in ("repository", "number", "node_id", "head", "base", "merge_base")}
+        job.update(schema=1, run=claim["run"], job="reconciliation", attempt=str(path),
+                   generation=claim["generation"], kind="reconciliation", input_digest=digest(inputs),
+                   primary_ids=[], finding_ids=[], results=results)
+        atomic(path / "job.json", job)
+        atomic(path / "final.json", canned(job))
+        atomic(path / "status.json", dict(job, state="terminal", exit=0, timed_out=False,
+                                          aborted=False, result_status="complete", empty=True))
+        claim["attempts"].append(str(path))
+        claim["selected"]["reconciliation"] = str(path)
+        self.store.save_claim(self.lock, PR, claim)
+        return claim
+
+    def test_a_later_claim_over_the_same_inputs_keeps_the_earlier_passes(self):
+        from review_fixtures import candidate
+        first = complete_claim(self.store, self.lock, run="first")
+        first["status"] = "deferred"
+        del first["selected"]["reconciliation"]
+        self.store.save_claim(self.lock, PR, first)
+        # a later run, same review inputs; its observation ticket differs
+        second = self.store.allocate(self.lock, PR, "second", "request", dict(candidate(), observation=9))
+        self.assertEqual(sorted(second["carried"]), ["cold", "primary", "validation"])
+        self.assertEqual(second["selected"]["primary"], first["selected"]["primary"])
+        self.assertNotIn("reconciliation", second["selected"])
+        # it only needs its reconciliation, and acceptance takes the carried passes
+        second = self.finish_with_reconciliation(second)
+        self.assertEqual(sorted(self.store.selected(PR, second)), ["cold", "primary", "reconciliation", "validation"])
+
+    def test_nothing_carries_when_the_review_inputs_changed(self):
+        from review_fixtures import candidate
+        first = complete_claim(self.store, self.lock, run="first")
+        first["status"] = "deferred"
+        self.store.save_claim(self.lock, PR, first)
+        moved = self.store.allocate(self.lock, PR, "second", "request", dict(candidate(), head="d" * 40))
+        self.assertEqual(moved["selected"], {})
+        self.assertNotIn("carried", moved)
+
+    def test_a_carried_pass_that_no_longer_checks_out_is_refused_at_acceptance(self):
+        from review_fixtures import candidate
+        first = complete_claim(self.store, self.lock, run="first")
+        first["status"] = "deferred"
+        self.store.save_claim(self.lock, PR, first)
+        second = self.finish_with_reconciliation(
+            self.store.allocate(self.lock, PR, "second", "request", candidate()))
+        status = Path(second["carried"]["cold"]) / "status.json"
+        atomic(status, dict(read(status), exit=1))
+        with self.assertRaises(ValueError):
+            self.store.selected(PR, second)
+
+    def test_validation_is_not_carried_without_its_primary(self):
+        from review_fixtures import candidate
+        first = complete_claim(self.store, self.lock, run="first")
+        first["status"] = "deferred"
+        status = Path(first["selected"]["primary"]) / "status.json"
+        atomic(status, dict(read(status), exit=1))
+        self.store.save_claim(self.lock, PR, first)
+        second = self.store.allocate(self.lock, PR, "second", "request", candidate())
+        # cold is independent and carries; validation was made against the
+        # primary that failed, so neither comes across
+        self.assertEqual(sorted(second.get("carried", {})), ["cold"])
+
     def test_receipt_wins_at_each_receipt_boundary(self):
         self.accept()
         entry = read(next((self.root / "outbox").glob("*.json")))

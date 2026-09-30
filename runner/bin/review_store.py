@@ -77,6 +77,20 @@ ALLOWED_RESULT = {"primary": ("complete", "incomplete"), "cold": ("complete", "i
                   "validation": ("complete", "incomplete"), "reconciliation": ("complete",)}
 
 
+# What a review pass actually read. Two claims agreeing on these would give
+# a pass the same work, so a pass one completed can serve the other.
+REVIEW_FIELDS = ("repository", "number", "node_id", "head", "base", "merge_base", "diff", "rules", "title")
+# Passes that can carry to a later claim. Reconciliation re-reads the live PR,
+# so it is always run by the claim that accepts.
+CARRIED = ("primary", "cold", "validation")
+
+
+def review_key(inputs):
+    previous = inputs.get("previous_comment") or {}
+    return digest([[inputs.get(k) for k in REVIEW_FIELDS], digest(inputs.get("thread")),
+                   previous.get("id"), previous.get("told_head")])
+
+
 def delivery_id(pr, generation, kind, target):
     if target.startswith(("page:", "pr:", "account:")):
         target = canonical(target)
@@ -157,10 +171,40 @@ class Store:
         claim = {"counter": old["counter"] + 1, "generation": old["counter"] + 1,
                  "run": run, "request": request, "inputs": inputs, "node_id": inputs["node_id"],
                  "status": "active", "attempts": [], "selected": {}}
+        # A PR deferred part way (a pass that failed twice, the admission
+        # deadline, an abort) keeps what it had done: a later claim over the
+        # same review inputs takes the earlier claim's good passes rather than
+        # paying for them again.
+        if old.get("inputs") and review_key(old["inputs"]) == review_key(inputs):
+            carried = {}
+            for kind in CARRIED:
+                earlier = old.get("selected", {}).get(kind)
+                if kind == "validation" and "primary" not in carried:
+                    break   # validation was made against that primary
+                if earlier and self.carryable(earlier, kind, inputs):
+                    carried[kind] = earlier
+            if carried:
+                claim["selected"] = dict(carried)
+                claim["attempts"] = list(carried.values())
+                claim["carried"] = dict(carried)
         atomic(path, claim)
         atomic(self.owner_path(lock), {"registry": str(path), "pr": canonical(pr)})
         self.crash("allocated")
         return claim
+
+    def carryable(self, path, kind, inputs):
+        """A finished, clean pass of this kind whose job read these inputs."""
+        job = read(Path(path) / "job.json")
+        status = read(Path(path) / "status.json", {})
+        if not job or status.get("state") != "terminal" or status.get("exit") != 0 or \
+                status.get("timed_out") or status.get("aborted") or not status.get("empty") or \
+                status.get("result_status") not in ALLOWED_RESULT[kind] or job.get("kind") != kind or \
+                any(status.get(k) != job.get(k) for k in IDENTITY) or review_key(job) != review_key(inputs):
+            return False
+        try:
+            return read_result(Path(path) / FILES[kind], job)["status"] in ALLOWED_RESULT[kind]
+        except (ValueError, OSError, KeyError):
+            return False
 
     def claim(self, pr):
         return read(self.pr_dir(pr) / "claim.json")
@@ -182,7 +226,12 @@ class Store:
                 raise ValueError("unregistered attempt")
             job = read(Path(path) / "job.json")
             status = read(Path(path) / "status.json", {})
-            if (status.get("state") != "terminal" or status.get("exit") != 0 or
+            carried = claim.get("carried", {}).get(kind) == path and kind in CARRIED
+            if carried:
+                # an earlier claim's pass: same review inputs, not same claim
+                if not self.carryable(path, kind, claim["inputs"]):
+                    raise ValueError("carried attempt no longer matches")
+            elif (status.get("state") != "terminal" or status.get("exit") != 0 or
                     status.get("timed_out") or status.get("aborted") or
                     status.get("result_status") not in ALLOWED_RESULT[kind] or not status.get("empty") or
                     any(status.get(k) != job[k] for k in IDENTITY) or

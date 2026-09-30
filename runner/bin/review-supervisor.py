@@ -469,6 +469,9 @@ class Supervisor:
             claim = self.store.allocate(lock, pr, self.run_id, self.config["request"], inputs)
         self.project(fresh, "refresh-" + str(fresh.get("observation", 0)))
         state.update(review="claimed", generation=claim["generation"], candidate=fresh, attempts={})
+        if claim.get("carried"):
+            # passes an earlier claim finished over the same review inputs
+            state["carried"] = sorted(claim["carried"])
         for path in claim["attempts"]:
             job = read(Path(path) / "job.json")
             if job and job["input_digest"] == digest(inputs):
