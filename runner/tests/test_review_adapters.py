@@ -977,6 +977,19 @@ class PostingContract(unittest.TestCase):
         self.assertIn("/comments/1", self.gh.calls[-1][0])
         self.assertNotIn("/comments/42", self.gh.calls[-1][0])
 
+    def test_deprecation_leaves_another_logins_comments_to_their_own_job(self):
+        # the old command posted as a different login; the bot cannot edit
+        # those, and GitHub answers "Must have admin rights to Repository"
+        mine = self.match(id=1, body="old AI-generated")
+        theirs = self.match(id=2, login="legacy", body="older AI-generated")
+        receipt = dict(state="posted", comment_id=42, account="bot", predecessors=[mine, theirs])
+        atomic(self.store.root / "receipts" / "posted2.json", receipt)
+        before = len(self.gh.calls)
+        self.assertEqual(self.poster.deprecate(dict(pr=PR, dependencies=["posted2"]), self.deadline)["state"],
+                         "deprecated")
+        edited = [c[0] for c in self.gh.calls[before:] if "/issues/comments/" in c[0]]
+        self.assertEqual([e.rsplit("/", 1)[1] for e in edited], ["1"])
+
 
 class BoardContract(unittest.TestCase):
     def setUp(self):

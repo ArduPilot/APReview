@@ -370,9 +370,15 @@ class Posting:
         receipt = read(self.store.root / "receipts" / (entry["dependencies"][0] + ".json"))
         if receipt["state"] != "posted":
             return dict(state="not_applicable")
-        self.check_account(receipt.get("account", self.config["comment_accounts"][0]), deadline)
+        poster = receipt.get("account", self.config["comment_accounts"][0])
+        self.check_account(poster, deadline)
         repo = entry["pr"][3:].split("#")[0]
         for old in receipt.get("predecessors", []):
+            # GitHub lets only a comment's author edit it. Comments another of
+            # our logins wrote (the old command posted as tridge) are left to
+            # deprecate-legacy-comments.sh, which runs as that login.
+            if old.get("login") and old["login"] != poster:
+                continue
             # Targets and original bytes are frozen at first send, never newest-thread selection.
             self.gh.request(
                 f"repos/{repo}/issues/comments/{old['id']}",
