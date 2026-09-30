@@ -106,7 +106,14 @@ class Discovery:
     def _sweep(self):
         cfg = self.config.get("repos", repos.load())
         main = next(r["repo"] for r in cfg["repos"] if r.get("discovery") == "main")
-        response = self.gh.request(f"repos/{main}/contents/.gitmodules")
+        try:
+            response = self.gh.request(f"repos/{main}/contents/.gitmodules")
+        except (OSError, TimeoutError, KeyError) as error:
+            # Without it only the submodule-only repositories are missed this
+            # run; a network blip here used to end the whole run.
+            print("discovery: submodule sweep failed, using repos.json only: %s" % str(error)[:200],
+                  file=sys.stderr)
+            return {k: r for k, r in self.repos.items() if r.get("discovery") in ("main", "explicit")}
         parser = configparser.ConfigParser()
         parser.read_string(base64.b64decode(response["content"]).decode())
         owners = {o.lower() for o in cfg.get("submodule_sweep", {}).get("owners", ["ArduPilot"])}

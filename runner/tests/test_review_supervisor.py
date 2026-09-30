@@ -7,7 +7,7 @@ import subprocess
 import sys
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from review_fixtures import BIN, PR, candidate, python, stop, until, workspace
 from review_lock import try_lock
@@ -361,6 +361,27 @@ class ReviewSupervisor(unittest.TestCase):
         lock = try_lock(self.store.locks, PR)
         self.assertIsNotNone(lock)
         lock.close()
+
+    def test_a_failing_discovery_is_retried_then_left_empty_not_fatal(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.config = {"phases": {}, "mode": "followup"}
+        supervisor.discovery = Mock()
+        supervisor.discovery.discover.side_effect = [OSError("network is unreachable"), [], ]
+        with patch.object(SUPERVISOR, "DISCOVERY_RETRY", 0):
+            try:
+                supervisor.discover_phase("initial")
+            except (AttributeError, KeyError, TypeError):
+                pass   # the bare supervisor lacks the rest of a phase's state
+        self.assertEqual(supervisor.discovery.discover.call_count, 2)
+        supervisor.config["phases"] = {}
+        supervisor.discovery.discover.reset_mock()
+        supervisor.discovery.discover.side_effect = OSError("network is unreachable")
+        with patch.object(SUPERVISOR, "DISCOVERY_RETRY", 0):
+            try:
+                supervisor.discover_phase("initial")
+            except (AttributeError, KeyError, TypeError):
+                pass
+        self.assertEqual(supervisor.discovery.discover.call_count, 3)
 
     def test_terminal_transition_between_poll_and_schedule_does_not_retry(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)

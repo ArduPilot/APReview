@@ -41,6 +41,8 @@ def scaled_wall(base, diff):
     return base * min(3.0, max(1.0, lines / 10000.0))
 
 
+DISCOVERY_RETRY = 60
+
 # attempt errors that mean the payload never started
 STARVED = ("account deadline", "permit deadline")
 
@@ -862,9 +864,23 @@ class Supervisor:
         modes = (
             LABELS if phase == "labels" else [self.config["mode"] if phase == "initial" else phase]
         )
+        def discover(mode):
+            # a failed discovery (GitHub or the network down for a moment) is
+            # tried twice more a minute apart, then that mode is left empty
+            # for this run rather than ending it
+            for attempt in range(3):
+                try:
+                    return self.discovery.discover(mode)
+                except (OSError, TimeoutError) as error:
+                    print("discovery of %s failed (%s): %s" % (mode, attempt + 1, str(error)[:200]),
+                          file=sys.stderr, flush=True)
+                    if attempt < 2:
+                        time.sleep(DISCOVERY_RETRY)
+            return []
+
         snapshots = {}
         with ThreadPoolExecutor(max_workers=3) as pool:
-            futures = {mode: pool.submit(self.discovery.discover, mode) for mode in modes}
+            futures = {mode: pool.submit(discover, mode) for mode in modes}
             for mode, future in futures.items():
                 snapshots[mode] = future.result()
         merged = {}

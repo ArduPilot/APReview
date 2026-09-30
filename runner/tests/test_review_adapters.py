@@ -455,6 +455,12 @@ class DiscoveryContract(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertIn(PR, first["AIReview"])
 
+    def test_a_failed_submodule_sweep_falls_back_to_the_listed_repositories(self):
+        discovery = Discovery(self.gh, self.config, self.store)
+        self.gh.request.side_effect = OSError("dial tcp: connect: network is unreachable")
+        swept = discovery.swept()
+        self.assertIn("owner/repo", swept)
+
     def test_manifests_sweep_submodules_before_parsing_keys(self):
         import base64
         modules = "[submodule \"modules/mavlink\"]\n\turl = https://github.com/ArduPilot/mavlink\n"
