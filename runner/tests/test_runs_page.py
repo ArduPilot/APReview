@@ -70,6 +70,9 @@ class Dashboard(unittest.TestCase):
         # the accounts come from the wrapper's log, so the Codex delta can be read
         self.assertEqual((row["codex_account"], row["codex_home"]), ("acct-one", "/nowhere/codex"))
         self.assertNotIn("Supervisor runs", page)
+        # PRs reviewed is its own column: one accepted in this run
+        self.assertIn("<th>PRs reviewed</th>", page)
+        self.assertIn('<td data-sort="1">1</td>', page)
         self.assertIn(">all<", page)
 
     def test_a_run_held_off_at_admission_is_a_skip_not_a_death(self):

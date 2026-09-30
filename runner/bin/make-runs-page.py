@@ -691,6 +691,7 @@ for r in runs:
         '<td data-sort="%s">%s</td>'
         '<td data-sort="%s">%s</td>'
         '<td data-sort="%s">%s</td>'
+        '<td data-sort="%s">%s</td>'
         '</tr>' % (
             int(r['start'].timestamp()), r['start'].strftime('%a %d %b %H:%M'),
             html.escape(r['mode']),
@@ -703,6 +704,8 @@ for r in runs:
             ('%dm' % r['waited']) if r['waited'] else '&mdash;',
             {'ok': 0, 'running': 1, 'skipped': 2, 'quota': 3}.get(r['status'], 4), 
             '<span class="badge %s">%s</span>' % (BADGE.get(r['status'], 'b-fail'), r['status']),
+            r['prs'] if r['prs'] is not None else -1,
+            r['prs'] if r['prs'] is not None else '&mdash;',
             r['turns'] or -1, r['turns'] or '&mdash;',
             tot or -1, fmt_tok(tot),
             ('%.1f' % r['cl_delta']) if r['cl_delta'] is not None else -1,
@@ -810,7 +813,7 @@ so their state is read from the published reports instead.</p>
 <h2>Runs</h2>
 <div class="scroll"><table class="sortable">
 <thead><tr><th>Started</th><th>Mode</th><th>Duration</th><th>Lock wait</th><th>Status</th>
-<th>Turns</th><th>Claude tokens</th><th>Claude wk &Delta;</th><th>Codex wk &Delta;</th></tr></thead>
+<th>PRs reviewed</th><th>Turns</th><th>Claude tokens</th><th>Claude wk &Delta;</th><th>Codex wk &Delta;</th></tr></thead>
 <tbody>__ROWS__</tbody></table></div>
 
 <div class="note">
