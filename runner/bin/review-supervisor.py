@@ -203,7 +203,8 @@ class Supervisor:
             "ticket": candidate.get("observation", self.config["observation"]),
             "ci": candidate.get("ci"),
             "progress": phase,
-            "candidate": candidate,
+            # no candidate here: it carries the whole diff and thread, nothing
+            # reads it from a page's rows, and every projection rewrote it
             "removed": candidate.get("classification") == "DROPPED",
         }
         if generation is not None:

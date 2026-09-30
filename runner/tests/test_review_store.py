@@ -228,6 +228,17 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(read(self.root / "receipts" / (projection + ".json"))["state"], "published")
         self.assertFalse((self.root / "outbox" / "waiting.json").exists())
 
+    def test_a_page_row_keeps_only_what_the_page_needs(self):
+        # a row once held the whole discovery candidate, diff and thread
+        # included, and every projection rewrote megabytes of it
+        page = "page:end/rows"
+        self.lock.close()
+        self.store.merge_membership(page, {PR: {"ticket": 1, "removed": False, "ci": {"state": "passing"},
+                                                "candidate": {"diff": "x" * 100000}}})
+        row = read(self.root / "membership" / (digest(page) + ".json"))[PR]
+        self.assertNotIn("candidate", row)
+        self.assertEqual(row["ci"], {"state": "passing"})
+
     def test_receipt_wins_at_each_receipt_boundary(self):
         self.accept()
         entry = read(next((self.root / "outbox").glob("*.json")))

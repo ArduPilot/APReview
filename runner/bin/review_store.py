@@ -376,7 +376,8 @@ class Store:
             row = dict(old)
             if "ticket" in patch and patch["ticket"] > old["ticket"]:
                 row.update(ticket=patch["ticket"], removed=patch["removed"])
-                for field in ("ci", "progress", "candidate", "unreachable"):
+                row.pop("candidate", None)
+                for field in ("ci", "progress", "unreachable"):
                     if field in patch:
                         row[field] = patch[field]
                 current = self.current(pr)
