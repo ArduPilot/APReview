@@ -77,6 +77,26 @@ class Dashboard(unittest.TestCase):
         self.build()
         self.assertEqual([r["status"] for r in self.state["runs"]], ["skipped"])
 
+    def test_label_links_keep_the_sites_path_prefix(self):
+        import http.server, socketserver, threading
+        root = os.path.join(self.home, "served")
+        page = os.path.join(root, "Tools/APReview/DevCallReviews/DevCallEU")
+        os.makedirs(page)
+        with open(os.path.join(page, "devcall_pr_reviews.html"), "w") as f:
+            f.write('<!-- reviewprs-manifest v1 label="DevCallEU" generated="" heads="1:aaaaaaaaaa" -->'
+                    '<p class="meta"><span>Verdict: <span class="v-comment">COMMENT</span></span></p>')
+        handler = lambda *a, **k: http.server.SimpleHTTPRequestHandler(*a, directory=root, **k)
+        server = socketserver.TCPServer(("127.0.0.1", 0), handler)
+        self.addCleanup(server.server_close)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        base = "http://127.0.0.1:%d/Tools/APReview" % server.server_address[1]
+        page_html = self.build(REVIEW_PUBLIC_URL=base)
+        self.assertIn('<a href="%s/DevCallReviews/DevCallEU/devcall_pr_reviews.html">DevCallEU</a>' % base, page_html)
+        self.assertNotIn('href="/DevCallReviews/', page_html)
+        # a page of carried-over reviews has no review date; say so
+        self.assertIn("<td>&mdash;</td><td>1</td>", page_html)
+
     def setUp(self):
         self.home = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.home, True)

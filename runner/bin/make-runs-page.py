@@ -647,11 +647,14 @@ for lab, gen, fup, npr, a, c, rc in labels:
     if gen is None:
         lrows.append('<tr><td>%s</td><td colspan="4">unreachable</td></tr>' % lab)
         continue
-    stamp = gen + (' <span class="muted">+ followup %s</span>' % html.escape(fup) if fup else '')
-    lrows.append('<tr><td><a href="/DevCallReviews/%s/devcall_pr_reviews.html">%s</a></td>'
+    stamp = (html.escape(gen) or '&mdash;') + (' <span class="muted">+ followup %s</span>' % html.escape(fup) if fup else '')
+    # This page is served from DevCallReviews/, not the site root: a link
+    # starting with / left the Tools/APReview prefix out.
+    link = ((PUBLIC_URL + '/DevCallReviews/') if PUBLIC_URL else '') + '%s/devcall_pr_reviews.html' % lab
+    lrows.append('<tr><td><a href="%s">%s</a></td>'
                  '<td>%s</td><td>%s</td><td>%s</td>'
                  '<td>%d / %d / %d</td></tr>' % (
-                     lab, lab, stamp, npr if npr is not None else '?',
+                     html.escape(link, quote=True), lab, stamp, npr if npr is not None else '?',
                      'sub-run of <code>all</code>' if lab != 'DevCallTopic' else
                      'sub-run of <code>all</code> + manual',
                      a, c, rc))
