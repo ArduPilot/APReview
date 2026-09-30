@@ -85,10 +85,41 @@ class Dashboard(unittest.TestCase):
         self.assertIn("<th>PRs reviewed</th>", page)
         self.assertIn("<th>Passes</th>", page)
         self.assertNotIn("<th>Turns</th>", page)
-        self.assertEqual((row["passes"], row["retried"]), (2, 1))
-        self.assertIn("(1 retried)", page)
+        # the running pass reached inference; the failed one died before its
+        # session and is counted apart; the starved one is not counted at all
+        self.assertEqual((row["passes"], row["retried"], row["early"]), (1, 0, 1))
+        self.assertIn("+1 failed before inference", page)
         self.assertIn('<td data-sort="1">1</td>', page)
         self.assertIn(">all<", page)
+
+    def supervisor_run(self, name, codex_tokens, claude_tokens, account, home):
+        from pathlib import Path
+        directory = Path(self.home) / "review/data/runs" / name
+        identity = dict(boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                        pid=os.getpid(), start=int(Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]))
+        directory.mkdir(parents=True)
+        (directory / "summary.json").write_text(json.dumps(dict(schema=1, **identity, state="running",
+                                                                heartbeat=0, prs={})))
+        (directory / "run.json").write_text(json.dumps(dict(mode=name, created=datetime.datetime.now().timestamp() - 1800)))
+        for provider, tokens in (("codex", codex_tokens), ("claude", claude_tokens)):
+            path = directory / "attempts" / provider
+            path.mkdir(parents=True)
+            (path / "status.json").write_text(json.dumps(dict(schema=1, **identity, state="terminal",
+                attempt=provider, provider=provider, heartbeat=0, exit=0, session_id=name + provider,
+                usage={"input_tokens": tokens}, pr="pr:o/r#1", kind="cold" if provider == "codex" else "primary")))
+        self.log(name, "reviewprs mode=%s host=t start=%s\ncodex account:  %s  (role default, home %s)\n"
+                 "supervisor run=%s\n" % (name, datetime.datetime.now().astimezone().isoformat(), account, home, directory))
+
+    def test_overlapping_runs_share_the_meters_by_their_own_tokens(self):
+        # two runs over the same hour: a window would credit each with both
+        home = self.codex_quota("codex-shared", 10.0, 14.0)
+        self.supervisor_run("first", 100, 1000, "codex-shared", home)
+        self.supervisor_run("second", 300, 3000, "codex-shared", home)
+        self.build()
+        rows = {r["mode"]: r for r in self.state["runs"]}
+        self.assertEqual((rows["first"]["ctok"], rows["second"]["ctok"]), (1000, 3000))
+        self.assertAlmostEqual(rows["first"]["q_delta"], 1.0)
+        self.assertAlmostEqual(rows["second"]["q_delta"], 3.0)
 
     def test_a_run_held_off_at_admission_is_a_skip_not_a_death(self):
         now = datetime.datetime.now().astimezone()

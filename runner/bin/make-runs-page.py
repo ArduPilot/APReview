@@ -217,16 +217,31 @@ for sv in summaries(DATA):
         status, finish = 'running', None
     usage = sv.get('usage', {})
     counts = sv.get('counts', {})
-    # Passes whose payload ran: one that waited out an account or permit and
-    # never started cost nothing. A second pass of a kind on one PR is a retry.
-    ran = [a for a in sv.get('attempts', [])
-           if a.get('error') not in ('account deadline', 'permit deadline')
-           and a.get('state') in ('running', 'terminal')]
+    # Passes that reached inference: a CLI session recorded usage, or one is
+    # running now. One that waited out an account or permit never started;
+    # one that died before its session (a failed worktree or submodule clone)
+    # cost nothing either, and is counted apart. A second pass of a kind on
+    # one PR is a retry.
+    attempts = sv.get('attempts', [])
+    ran = [a for a in attempts if a.get('sessions') or a.get('state') == 'running']
+    early = [a for a in attempts if a not in ran and a.get('state') == 'terminal'
+             and a.get('error') not in ('account deadline', 'permit deadline')]
     retried = len(ran) - len({(a.get('pr'), a.get('kind')) for a in ran})
+
+    def spent(provider):
+        total = 0
+        for a in attempts:
+            if a.get('provider') == provider:
+                for used in (a.get('sessions') or {}).values():
+                    total += sum(used.get(k, 0) for k in (
+                        'input_tokens', 'output_tokens', 'cache_read_input_tokens',
+                        'cache_creation_input_tokens'))
+        return total
     runs.append(dict(
         mode=cfg.get('mode') or sv['name'], start=start, finish=finish,
         elapsed=int((finish - start).total_seconds() // 60) if finish else None,
-        status=status, rc=None, turns=None, passes=len(ran), retried=retried,
+        status=status, rc=None, turns=None, passes=len(ran), retried=retried, early=len(early),
+        own_claude=spent('claude'), own_codex=spent('codex'),
         tin=usage.get('input_tokens', 0), tout=usage.get('output_tokens', 0),
         tcr=usage.get('cache_read_input_tokens', 0) + usage.get('cached_input_tokens', 0),
         tcw=usage.get('cache_creation_input_tokens', 0), waited=None,
@@ -443,6 +458,10 @@ for r in runs:
     # that run's tokens: 15.7M against an rsync run that had executed nothing.
     if r['status'] == 'queued':
         r['ctok'], r['cwt'] = 0, 0
+    elif r.get('supervisor'):
+        # its own sessions: runs overlap now, and a time window credits each
+        # with everything spent on the account meanwhile
+        r['ctok'], r['cwt'] = r['own_claude'], 0
     else:
         r['ctok'], r['cwt'] = claude_between(r.get('acquired') or r['start'],
                                              r['finish'] or now)
@@ -516,6 +535,24 @@ for r in runs:
     a = cl_week_at(r['start'], acct)
     b = cl_week_at(r['finish'] or now, acct)
     r['cl_delta'] = (b - a) if (a is not None and b is not None and b >= a) else None
+
+
+def share_overlaps(key, account, own):
+    """The weekly meters are per account, so a window's rise is shared by the
+    supervisor runs overlapping it, in proportion to each run's own tokens."""
+    for r in runs:
+        if not r.get('supervisor') or r.get(key) is None:
+            continue
+        end = r['finish'] or now
+        peers = [o for o in runs if o.get('supervisor') and o.get(account) == r.get(account)
+                 and o['start'] < end and (o['finish'] or now) > r['start']]
+        total = sum(o.get(own, 0) for o in peers)
+        if len(peers) > 1 and total:
+            r[key] = r[key] * r.get(own, 0) / total
+
+
+share_overlaps('cl_delta', 'account', 'own_claude')
+share_overlaps('q_delta', 'codex_home', 'own_codex')
 
 # Claude weekly burn, measured the same way as the Codex one.
 cl_burn = None
@@ -713,7 +750,9 @@ for r in runs:
             r['prs'] if r['prs'] is not None else -1,
             r['prs'] if r['prs'] is not None else '&mdash;',
             r.get('passes', -1) if r.get('passes') is not None else -1,
-            ('%d%s' % (r['passes'], ' <span class="sub">(%d retried)</span>' % r['retried'] if r.get('retried') else ''))
+            ('%d%s%s' % (r['passes'],
+                         ' <span class="sub">(%d retried)</span>' % r['retried'] if r.get('retried') else '',
+                         ' <span class="sub">+%d failed before inference</span>' % r['early'] if r.get('early') else ''))
             if r.get('passes') is not None else '&mdash;',
             tot or -1, fmt_tok(tot),
             ('%.1f' % r['cl_delta']) if r['cl_delta'] is not None else -1,
