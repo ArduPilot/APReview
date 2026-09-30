@@ -285,7 +285,8 @@ def run(data, attempt, fd):
                 account = None
                 while time.monotonic() < deadline and not aborted():
                     cap = 1 if job.get("exclusive_account") else job.get("account_slots", 8)
-                    account = account_slot(store.locks, key, cap)
+                    account = account_slot(store.locks, key, cap,
+                                           skip_finishing_slot=job["kind"] in ("primary", "cold"))
                     if account:
                         owned.append(account)
                         status["account_slot"] = account.key

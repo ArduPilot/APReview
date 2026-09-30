@@ -209,6 +209,18 @@ class ReviewLocks(unittest.TestCase):
         narrow = account_slot(self.path, key, 1)
         self.assertEqual(narrow.key, key + "#0")
         narrow.close()
+        # starting passes leave slot 0 to the passes that finish a PR
+        stop(wide)
+        starters = []
+        for _ in range(4):
+            child = python(code.replace("4)", "4, skip_finishing_slot=True)"), self.path, key,
+                           stdout=subprocess.PIPE, text=True)
+            self.addCleanup(stop, child)
+            starters.append(child.stdout.readline().strip())
+        self.assertEqual(starters, [key + "#3", key + "#2", key + "#1", "none"])
+        finishing = account_slot(self.path, key, 4)
+        self.assertEqual(finishing.key, key + "#0")
+        finishing.close()
 
     def test_shared_leases_leave_the_exclusive_header_unchanged(self):
         key = "account:codex/account"

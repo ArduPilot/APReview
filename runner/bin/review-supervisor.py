@@ -471,6 +471,10 @@ class Supervisor:
             if job and job["input_digest"] == digest(inputs):
                 state["attempts"].setdefault(job["kind"], []).append(path)
 
+    def progress(self, pr):
+        claim = self.store.claim(pr) or {}
+        return len(claim.get("selected", {}))
+
     def account_free(self, kind):
         """Whether this kind's exclusive account lease is available now. A
         probe, not a reservation: the guardian still takes the lease itself."""
@@ -504,7 +508,8 @@ class Supervisor:
         if live >= cap:
             return False
         try:
-            probe = account_slot(self.store.locks, key, cap)
+            probe = account_slot(self.store.locks, key, cap,
+                                 skip_finishing_slot=kind in ("primary", "cold"))
         except RuntimeError:
             return True
         if probe is None:
@@ -1066,6 +1071,9 @@ class Supervisor:
                             )
                         elif not paused or continuing:
                             self.claim_candidate(candidate)
+                # Furthest along first: a PR ready to finish takes the next
+                # free slot before a newly claimed one starts its first pass.
+                for pr in sorted(self.owned, key=self.progress, reverse=True):
                     if pr in self.owned:
                         self.advance(pr)
                 if time.monotonic() >= next_drain:

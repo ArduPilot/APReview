@@ -217,14 +217,15 @@ def adopt(path, key, fd):
         return lock
 
 
-def account_slot(path, key, cap):
+def account_slot(path, key, cap, skip_finishing_slot=False):
     """One of `cap` session slots on an account (REVIEW_ACCOUNT_SLOTS). Sessions no longer hold the
     account's own key: that is left for the brief holders (quota probes, the
     wrapper's admission, stale refresh-lock cleanup). Several CLI sessions on
     one login refresh their token safely; this only bounds how many."""
     key = canonical(key)
     # highest first: a run capped at one session always finds slot 0
-    for slot in reversed(range(max(1, int(cap)))):
+    # slot 0 is kept for the passes that finish a PR, as in the permit pools
+    for slot in reversed(range(1 if skip_finishing_slot and int(cap) > 1 else 0, max(1, int(cap)))):
         lock = try_lock(path, "%s#%d" % (key, slot))
         if lock is not None:
             return lock
