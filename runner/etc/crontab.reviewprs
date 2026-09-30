@@ -71,7 +71,9 @@ MAILTO=""
 # using the box's own gh login rather than the bot token. It no-ops after
 # REVIEW_DEPRECATE_UNTIL, so a forgotten line costs nothing - but delete it then,
 # because after that date the bot is the only account this box needs.
-20 * * * *   $HOME/review/bin/deprecate-legacy-comments.sh >> $HOME/review/logs/deprecate.log 2>&1
+# Retired 2026-09-30: comments the old command posted as tridge are ignored
+# now, not deprecated; only AP-Review comments count as ours.
+#20 * * * *   $HOME/review/bin/deprecate-legacy-comments.sh >> $HOME/review/logs/deprecate.log 2>&1
 
 # Keep the runs dashboard current even when no run has fired recently. It is
 # published to $REVIEW_PUBLIC_URL/DevCallReviews/runs.html

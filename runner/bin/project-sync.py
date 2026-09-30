@@ -664,7 +664,7 @@ def main(argv=None):
     # Same list the runner posts under, newest first. Both are needed: the
     # older reviews predate the AP-Review account.
     accounts = tuple((os.environ.get("REVIEW_COMMENT_ACCOUNTS")
-                      or "AP-Review tridge").split())
+                      or "AP-Review").split())
     owners = swept_owners()
 
     wanted = reviewed_prs(owners, accounts)

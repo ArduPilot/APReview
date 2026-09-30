@@ -30,7 +30,7 @@ REVIEW_PUBLIC_URL="https://reviews.example.org"
 # Accounts whose AI comments count as ours, space separated, newest first. The
 # account you post as now, plus any it replaced - otherwise comments posted
 # before an account switch stop being recognised and get duplicated.
-#REVIEW_COMMENT_ACCOUNTS="AP-Review tridge"
+#REVIEW_COMMENT_ACCOUNTS="AP-Review"
 
 # Token for the account that posts comments (classic PAT, public_repo scope). gh
 # prefers this over its keyring, so a runner can post as a bot without changing
