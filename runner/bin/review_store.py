@@ -444,6 +444,16 @@ class Store:
         self.last_recovered = done
         return pending
 
+    def recover_slice(self, limit=100, seconds=30):
+        """One bounded slice of recovery for a caller with no controller of
+        its own (the cron drain): journalled operations a dead controller
+        never fanned out, and PRs left mid-promotion. The cursor persists so
+        successive calls walk the whole store."""
+        path = self.root / "drain-recovery.json"
+        pending = self.recover(read(path), limit=limit, seconds=seconds)
+        atomic(path, pending or None)
+        return pending
+
     # Dependencies first, so a bounded pass over a large outbox is not a
     # window of publishes all waiting on projections outside it.
     KIND_ORDER = {"projection": 0, "publish": 1, "comment": 2, "note": 2, "annotation": 3, "deprecate": 3, "board": 4}

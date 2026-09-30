@@ -18,5 +18,8 @@ g = GitHub(
     c.get("github_accounts"),
     writes=c.get("github_writes", False),
 )
+# A controller that died between journalling a page operation and fanning
+# it out leaves entries waiting on it for ever; recover before draining.
+s.recover_slice()
 debts = s.drain(Delivery(s, g, c))
 raise SystemExit(1 if debts else 0)

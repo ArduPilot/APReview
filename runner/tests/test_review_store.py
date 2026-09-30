@@ -190,6 +190,25 @@ class ReviewStore(unittest.TestCase):
         self.lock.close()
         self.store.drain(StubAdapter(self.root))
 
+    def test_a_journal_a_dead_controller_never_fanned_out_is_recovered_by_the_drain(self):
+        # the controller journalled a page operation and died before the
+        # outbox entries existed; a publish elsewhere waits on its projection
+        ident = self.store.journal("run", "discovery", PR, [
+            {"kind": "projection", "target": "page:end/p", "gate": "page",
+             "patches": {PR: {"ticket": 1, "removed": False}}}])
+        projection = delivery_id(PR, ident, "projection", "page:end/p")
+        waiting = dict(id="waiting", pr=PR, generation=1, kind="publish", target="page:end/p",
+                       dependencies=[projection], state="owed", failures=0, next_attempt=0)
+        atomic(self.root / "outbox" / "waiting.json", waiting)
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root))
+        self.assertTrue((self.root / "outbox" / "waiting.json").exists())
+        pending = self.store.recover_slice()
+        self.assertFalse(pending)
+        self.store.drain(StubAdapter(self.root))
+        self.assertEqual(read(self.root / "receipts" / (projection + ".json"))["state"], "published")
+        self.assertFalse((self.root / "outbox" / "waiting.json").exists())
+
     def test_receipt_wins_at_each_receipt_boundary(self):
         self.accept()
         entry = read(next((self.root / "outbox").glob("*.json")))
