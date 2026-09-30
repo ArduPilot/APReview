@@ -51,9 +51,9 @@
    "repo": "mavlink/mavlink",
    "key": "upstream-mavlink",
    "discovery": "explicit",
-   "post_comments": false,
+   "post_comments": true,
    "house_rules": "upstream",
-   "notes": "Not an ArduPilot repo: it serves every MAVLink implementation. A message or enum change affects PX4, QGC, MAVSDK and pymavlink users too, and XML dialect changes are effectively permanent once released. ArduPilot conventions - parameter name limits, new returning zeroed memory, per-subsystem commits - do not apply. Review for dialect and XML correctness, backward compatibility of message and enum changes, and whether common.xml is the right place versus a vendor dialect. Never tell an upstream author to follow an ArduPilot house rule. Comments are held for a human, never posted.",
+   "notes": "Not an ArduPilot repo: it serves every MAVLink implementation. A message or enum change affects PX4, QGC, MAVSDK and pymavlink users too, and XML dialect changes are effectively permanent once released. ArduPilot conventions - parameter name limits, new returning zeroed memory, per-subsystem commits - do not apply. Review for dialect and XML correctness, backward compatibility of message and enum changes, and whether common.xml is the right place versus a vendor dialect. Never tell an upstream author to follow an ArduPilot house rule. Comments are posted like any other repo (tridge, 2026-09-30).",
    "clone_dir": "upstream-mavlink"
   },
   {
