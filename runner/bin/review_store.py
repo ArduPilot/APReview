@@ -409,6 +409,17 @@ class Store:
                 raise ValueError("operation identity reused")
             if not old:
                 atomic(path, operation, self.crash, "operation")
+        # Fan out now where the page is free. Recovery is only the fallback
+        # for a controller that dies here: left to it alone, a new journal
+        # waited behind thousands of old ones for its outbox entries.
+        for intent in operation["intents"]:
+            try:
+                page = try_lock(self.locks, intent["target"])
+            except RuntimeError:
+                page = None
+            if page:
+                with page:
+                    self.materialize(operation["pr"], ident, intent, ident)
         return ident
 
     def snapshot(self):
@@ -424,6 +435,12 @@ class Store:
             done += 1
             if path.parent == self.root / "operations":
                 operation = read(path)
+                if not operation:
+                    continue
+                if all((self.root / "receipts" / (i["id"] + ".json")).exists() for i in operation["intents"]):
+                    # finished: its receipts are the record; keep the walk short
+                    unlink(path)
+                    continue
                 for intent in operation["intents"]:
                     if time.monotonic() >= deadline:
                         pending.insert(0, str(path))

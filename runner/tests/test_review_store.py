@@ -5,7 +5,7 @@ from pathlib import Path
 import subprocess
 import unittest
 
-from review_fixtures import BIN, PR, complete_claim, python, workspace
+from review_fixtures import BIN, PR, complete_claim, python, stop, workspace
 from review_lock import try_lock
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, read
 
@@ -190,13 +190,32 @@ class ReviewStore(unittest.TestCase):
         self.lock.close()
         self.store.drain(StubAdapter(self.root))
 
+    def test_a_journal_is_fanned_out_at_once_and_forgotten_when_delivered(self):
+        ident = self.store.journal("run", "discovery", PR, [
+            {"kind": "projection", "target": "page:end/q", "gate": "page",
+             "patches": {PR: {"ticket": 1, "removed": False}}}])
+        projection = delivery_id(PR, ident, "projection", "page:end/q")
+        self.assertTrue((self.root / "outbox" / (projection + ".json")).exists())
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root))
+        self.assertTrue((self.root / "receipts" / (projection + ".json")).exists())
+        self.store.recover_slice()
+        self.assertFalse((self.root / "operations" / (ident + ".json")).exists())
+
     def test_a_journal_a_dead_controller_never_fanned_out_is_recovered_by_the_drain(self):
         # the controller journalled a page operation and died before the
         # outbox entries existed; a publish elsewhere waits on its projection
+        # the page is busy at journal time, so nothing is fanned out then
+        holder = python("import sys,time; from review_lock import try_lock; l = try_lock(sys.argv[1], sys.argv[2]); "
+                        "print('held', flush=True); time.sleep(30)", self.store.locks, "page:end/p",
+                        stdout=subprocess.PIPE, text=True)
+        self.assertEqual(holder.stdout.readline().strip(), "held")
         ident = self.store.journal("run", "discovery", PR, [
             {"kind": "projection", "target": "page:end/p", "gate": "page",
              "patches": {PR: {"ticket": 1, "removed": False}}}])
+        stop(holder)
         projection = delivery_id(PR, ident, "projection", "page:end/p")
+        self.assertFalse((self.root / "outbox" / (projection + ".json")).exists())
         waiting = dict(id="waiting", pr=PR, generation=1, kind="publish", target="page:end/p",
                        dependencies=[projection], state="owed", failures=0, next_attempt=0)
         atomic(self.root / "outbox" / "waiting.json", waiting)
@@ -271,7 +290,9 @@ class ReviewStore(unittest.TestCase):
 
     def test_operation_journal_recovers_without_an_acceptance(self):
         ident = self.store.journal("run", "discovery", PR, [{"kind": "publish", "target": "page:end/a", "gate": "page"}])
-        self.assertFalse(list((self.root / "outbox").glob("*.json")))
+        # the controller died between the journal and its fan-out
+        for path in (self.root / "outbox").glob("*.json"):
+            path.unlink()
         self.lock.close()
         self.store.recover()
         self.assertEqual(read(next((self.root / "outbox").glob("*.json")))["generation"], ident)

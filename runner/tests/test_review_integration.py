@@ -484,7 +484,9 @@ class Integration(unittest.TestCase):
         mirror = self.mirror()
         self.store.journal("old-run", "discovery", "pr:rsyncproject/rsync#1",
                            [dict(kind="publish", target="page:review/RsyncReviews/index.html", gate="page")])
-        self.assertFalse(list((self.data / "outbox").glob("*.json")))
+        # the controller died between the journal and its fan-out
+        for path in (self.data / "outbox").glob("*.json"):
+            path.unlink()
         with self.assertRaisesRegex(TimeoutError, "delivery debts"):
             handoff(self.site, self.data, "RsyncProject/rsync", "old", mirror, wait=.1)
         self.assertEqual(load(self.site), DEFAULT)
