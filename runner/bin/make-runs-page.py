@@ -59,6 +59,9 @@ def parse_iso(s):
 
 # ---------------------------------------------------------------- runs
 runs = []
+# Accounts a supervisor run's wrapper recorded, by run directory: the row
+# itself comes from the run's records, but only the log names the accounts.
+sup_accounts = {}
 for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))):
     try:
         txt = open(path, errors='replace').read()
@@ -67,7 +70,16 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
     m = re.search(r'^reviewprs mode=(\S+)\s+host=\S+\s+start=(\S+)', txt, re.M)
     if not m:
         continue
-    if re.search(r'^supervisor run=', txt, re.M):
+    sv = re.search(r'^supervisor run=(\S+)', txt, re.M)
+    if sv:
+        meta = {}
+        cx = re.search(r'^codex account:  (\S+)  \(role \S+, home (.+)\)$', txt, re.M)
+        if cx:
+            meta['codex_account'], meta['codex_home'] = cx.groups()
+        ac = re.search(r'claude account: (\S+)', txt)
+        if ac and ac.group(1) != 'unknown':
+            meta['account'] = ac.group(1)
+        sup_accounts[os.path.basename(sv.group(1).rstrip('/'))] = meta
         continue  # the atomic summary owns this row and its usage
     mode, start = m.group(1), parse_iso(m.group(2))
     if not start or start < cutoff:
@@ -212,7 +224,7 @@ for sv in summaries(DATA):
         tin=usage.get('input_tokens', 0), tout=usage.get('output_tokens', 0),
         tcr=usage.get('cache_read_input_tokens', 0) + usage.get('cached_input_tokens', 0),
         tcw=usage.get('cache_creation_input_tokens', 0), waited=None,
-        prs=counts.get('accepted', 0), supervisor=True))
+        prs=counts.get('accepted', 0), supervisor=True, **sup_accounts.get(sv['name'], {})))
 
 runs.sort(key=lambda r: r['start'], reverse=True)
 

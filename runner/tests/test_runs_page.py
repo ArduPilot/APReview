@@ -60,12 +60,15 @@ class Dashboard(unittest.TestCase):
         (path / "status.json").write_text(json.dumps(dict(schema=1, **identity, state="running",
             attempt="a", provider="codex", heartbeat=0, session_id="session-one", usage={"input_tokens": 13})))
         self.log("rsync", 'reviewprs mode=rsync host=t start=' + datetime.datetime.now().astimezone().isoformat() +
+                 '\ncodex account:  acct-one  (role default, home /nowhere/codex)'
                  '\nsupervisor run=' + str(directory) + '\n')
         page = self.build()
         # one row in the Runs table, from the run's records, not the wrapper log
         self.assertEqual(len(self.state["runs"]), 1)
         row = self.state["runs"][0]
         self.assertEqual((row["mode"], row["status"], row["prs"], row["tin"]), ("all", "running", 1, 13))
+        # the accounts come from the wrapper's log, so the Codex delta can be read
+        self.assertEqual((row["codex_account"], row["codex_home"]), ("acct-one", "/nowhere/codex"))
         self.assertNotIn("Supervisor runs", page)
         self.assertIn(">all<", page)
 
