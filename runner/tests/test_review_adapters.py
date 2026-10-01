@@ -552,6 +552,29 @@ class PatchHistory(unittest.TestCase):
         init_submodules(second, False, self.root)
         self.assertTrue((second / "modules/sub/f").exists())
 
+    def test_a_worktree_git_cannot_remove_in_time_is_deleted_and_pruned(self):
+        import shutil
+        import subprocess
+        from unittest.mock import patch
+        from review_inference import cleanup
+        from review_store import Store
+        (self.root / "f").write_text("x")
+        self.commit("base")
+        worktree = self.root.parent / (self.root.name + "-slow")
+        self.addCleanup(shutil.rmtree, worktree, True)
+        self.git("worktree", "add", "-q", "--detach", str(worktree))
+        store = Store(self.root.parent / (self.root.name + "-store"))
+        self.addCleanup(shutil.rmtree, store.root, True)
+        real = subprocess.run
+        def slow(args, **kw):
+            if "remove" in args:
+                raise subprocess.TimeoutExpired(args, kw.get("timeout"))
+            return real(args, **kw)
+        with patch("review_inference.subprocess.run", side_effect=slow):
+            cleanup(store, {"worktree": str(worktree), "reference_clone": str(self.root)})
+        self.assertFalse(worktree.exists())
+        self.assertNotIn(str(worktree), self.git("worktree", "list"))
+
     def test_an_abbreviated_told_head_is_resolved_not_fetched_by_prefix(self):
         from unittest.mock import Mock
         (self.root / "text").write_text("one\n")

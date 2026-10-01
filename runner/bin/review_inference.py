@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -140,13 +141,21 @@ def cleanup(store, job):
     if lock is None:
         return
     with lock:
-        subprocess.run(
-            ["git", "-C", job["reference_clone"], "worktree", "remove", "--force", job["worktree"]],
-            capture_output=True,
-            timeout=20,
-            check=True,
-            pass_fds=(lock.fd,),
-        )
+        # An ardupilot worktree holds every submodule checkout; on a busy box
+        # removing it took longer than the twenty seconds it was given, and
+        # the failure was fatal to an attempt whose review had succeeded.
+        try:
+            subprocess.run(
+                ["git", "-C", job["reference_clone"], "worktree", "remove", "--force", job["worktree"]],
+                capture_output=True,
+                timeout=600,
+                check=True,
+                pass_fds=(lock.fd,),
+            )
+        except (subprocess.SubprocessError, OSError):
+            shutil.rmtree(job["worktree"], ignore_errors=True)
+            subprocess.run(["git", "-C", job["reference_clone"], "worktree", "prune"],
+                           capture_output=True, timeout=120, pass_fds=(lock.fd,))
 
 
 def main():
