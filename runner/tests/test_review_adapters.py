@@ -284,8 +284,13 @@ class DiscoveryContract(unittest.TestCase):
             self.discover.candidate(PR, "AIReview", manifests)["classification"], "REUSE"
         )
         self.assertEqual(self.discover.candidate(PR, "pr", manifests)["classification"], "REVIEW")
+        # a draft is dropped, unless it carries AIReview: someone asked for it
         self.meta["draft"] = True
+        self.meta["labels"] = []
         self.assertEqual(self.discover.candidate(PR, "pr")["classification"], "DROPPED")
+        self.meta["labels"] = [{"name": "AIReview"}]
+        self.assertEqual(self.discover.candidate(PR, "pr")["classification"], "REVIEW")
+        self.assertEqual(self.discover.candidate(PR, "AIReview", manifests)["classification"], "REUSE")
         self.meta["draft"] = False
         self.meta["state"] = "closed"
         self.assertEqual(self.discover.candidate(PR, "pr")["classification"], "DROPPED")

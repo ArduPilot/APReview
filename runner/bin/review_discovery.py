@@ -430,10 +430,12 @@ class Discovery:
         # A label PR at its published head is reused whatever its thread
         # says; the thread is the costly part of a candidate (several paged
         # calls), so it is read only when the review can use it.
+        # A draft is left alone unless someone asked for a review of it.
+        skip_draft = meta["draft"] and "AIReview" not in labels
         reuse = (
             (mode in LABELS or mode == "rsync")
             and meta["state"] == "open"
-            and not meta["draft"]
+            and not skip_draft
             and ("AIReview" if mode == "rsync" else mode) in labels
             and same_head(head, old.get("head"))
         )
@@ -522,7 +524,7 @@ class Discovery:
             )
             candidate["membership_removed"][target] = (
                 not candidate["open"]
-                or candidate["draft"]
+                or skip_draft
                 or (label is not None and label not in labels)
             )
 
@@ -532,8 +534,8 @@ class Discovery:
 
         if not candidate["open"]:
             return classify("DROPPED", "closed or merged")
-        if candidate["draft"]:
-            return classify("DROPPED", "draft")
+        if skip_draft:
+            return classify("DROPPED", "draft without AIReview")
         if (mode in LABELS or mode == "rsync") and (
             "AIReview" if mode == "rsync" else mode
         ) not in labels:

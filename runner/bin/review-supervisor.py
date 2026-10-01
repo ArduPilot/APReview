@@ -420,7 +420,7 @@ class Supervisor:
         if (
             fresh.get("classification") == "DROPPED"
             or fresh.get("open", True) is False
-            or fresh.get("draft", False)
+            or (fresh.get("draft", False) and "AIReview" not in fresh.get("labels", []))
         ):
             self.project(fresh, "refresh-" + str(fresh.get("observation", 0)))
             self.finish(pr, "dropped")
