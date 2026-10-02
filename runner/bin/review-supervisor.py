@@ -1058,6 +1058,7 @@ class Supervisor:
                 paused = pause is None
                 if pause:
                     pause.close()
+                loop_start = time.monotonic()
                 if not paused and not (self.directory / "abort.json").exists():
                     self.prefetch([
                         c for c in self.config["candidates"]
@@ -1091,14 +1092,25 @@ class Supervisor:
                             )
                         elif not paused or continuing:
                             self.claim_candidate(candidate)
+                admitted = time.monotonic()
                 # Furthest along first: a PR ready to finish takes the next
                 # free slot before a newly claimed one starts its first pass.
                 for pr in sorted(self.owned, key=self.progress, reverse=True):
                     if pr in self.owned:
                         self.advance(pr)
+                advanced = time.monotonic()
                 if time.monotonic() >= next_drain:
                     self.bounded_drain()
                     next_drain = time.monotonic() + 1
+                drained = time.monotonic()
+                if drained - loop_start > 20:
+                    # a slow pass of the loop delays every launch behind it;
+                    # say which step took the time
+                    print("loop %.0fs: admission %.0fs (%d pending), advance %.0fs (%d owned), drain %.0fs"
+                          % (drained - loop_start, admitted - loop_start,
+                             sum(1 for x in self.states.values() if x.get("review") == "pending"),
+                             advanced - admitted, len(self.owned), drained - advanced),
+                          file=sys.stderr, flush=True)
                 self.save()
                 time.sleep(0.05)
             self.save(force=True)
