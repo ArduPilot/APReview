@@ -245,7 +245,8 @@ for sv in summaries(DATA):
         tin=usage.get('input_tokens', 0), tout=usage.get('output_tokens', 0),
         tcr=usage.get('cache_read_input_tokens', 0) + usage.get('cached_input_tokens', 0),
         tcw=usage.get('cache_creation_input_tokens', 0), waited=None,
-        prs=counts.get('accepted', 0), supervisor=True, **sup_accounts.get(sv['name'], {})))
+        prs=counts.get('accepted', 0), supervisor=True,
+        in_review=sum(counts.get(k, 0) for k in ('claimed', 'reviewing', 'reconciling')), **sup_accounts.get(sv['name'], {})))
 
 runs.sort(key=lambda r: r['start'], reverse=True)
 
@@ -729,7 +730,7 @@ for r in runs:
         '<td class="wrap">%s</td>'
         '<td data-sort="%s">%s</td>'
         '<td data-sort="%s">%s</td>'
-        '<td data-sort="%d">%s</td>'
+        '<td data-sort="%d" class="wrap">%s</td>'
         '<td data-sort="%s" class="wrap">%s</td>'
         '<td data-sort="%s">%s</td>'
         '<td data-sort="%s">%s</td>'
@@ -748,7 +749,10 @@ for r in runs:
             {'ok': 0, 'running': 1, 'skipped': 2, 'quota': 3}.get(r['status'], 4), 
             '<span class="badge %s">%s</span>' % (BADGE.get(r['status'], 'b-fail'), r['status']),
             r['prs'] if r['prs'] is not None else -1,
-            r['prs'] if r['prs'] is not None else '&mdash;',
+            # PRs part way through show under the count, as Passes does, so
+            # the two columns agree while a run is still going
+            ('%d%s' % (r['prs'], '<br><span class="sub">+%d in review</span>' % r['in_review']
+                       if r.get('in_review') else '')) if r['prs'] is not None else '&mdash;',
             r.get('passes', -1) if r.get('passes') is not None else -1,
             # the count, with any retries and early failures in small print on
             # a second line: on one line this cell widened the whole table

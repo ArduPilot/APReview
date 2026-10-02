@@ -91,7 +91,8 @@ class Dashboard(unittest.TestCase):
         self.assertEqual((row["passes"], row["retried"], row["early"]), (1, 0, 1))
         # the breakdown sits under the count, so the column stays narrow
         self.assertIn('1<br><span class="sub">1 failed early</span>', page)
-        self.assertIn('<td data-sort="1">1</td>', page)
+        # one accepted, and the deferred PR is not in review, so no second line
+        self.assertIn('<td data-sort="1" class="wrap">1</td>', page)
         self.assertIn(">all<", page)
 
     def supervisor_run(self, name, codex_tokens, claude_tokens, account, home):
@@ -111,6 +112,17 @@ class Dashboard(unittest.TestCase):
                 usage={"input_tokens": tokens}, pr="pr:o/r#1", kind="cold" if provider == "codex" else "primary")))
         self.log(name, "reviewprs mode=%s host=t start=%s\ncodex account:  %s  (role default, home %s)\n"
                  "supervisor run=%s\n" % (name, datetime.datetime.now().astimezone().isoformat(), account, home, directory))
+
+    def test_a_running_run_shows_its_prs_in_review_under_the_count(self):
+        home = self.codex_quota("codex-shared", 10.0, 14.0)
+        self.supervisor_run("going", 100, 1000, "codex-shared", home)
+        summary = os.path.join(self.home, "review/data/runs/going/summary.json")
+        record = json.load(open(summary))
+        record["prs"] = {"pr:o/r#1": {"review": "accepted"}, "pr:o/r#2": {"review": "reviewing"},
+                         "pr:o/r#3": {"review": "reconciling"}}
+        json.dump(record, open(summary, "w"))
+        page = self.build()
+        self.assertIn('1<br><span class="sub">+2 in review</span>', page)
 
     def test_overlapping_runs_share_the_meters_by_their_own_tokens(self):
         # two runs over the same hour: a window would credit each with both
