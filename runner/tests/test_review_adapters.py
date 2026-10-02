@@ -476,6 +476,18 @@ class DiscoveryContract(unittest.TestCase):
         swept = discovery.swept()
         self.assertIn("owner/repo", swept)
 
+    def test_manifests_are_built_once_for_a_burst_of_refreshes(self):
+        discovery = Discovery(self.gh, self.config, self.store)
+        calls = []
+        real = discovery._manifests
+        discovery._manifests = lambda mode=None: calls.append(mode) or real(mode)
+        for _ in range(5):
+            discovery.manifests("followup")
+        self.assertEqual(calls, ["followup"])
+        discovery._manifest_cache["followup"] = (0, {})   # long expired
+        discovery.manifests("followup")
+        self.assertEqual(calls, ["followup", "followup"])
+
     def test_manifests_sweep_submodules_before_parsing_keys(self):
         import base64
         modules = "[submodule \"modules/mavlink\"]\n\turl = https://github.com/ArduPilot/mavlink\n"

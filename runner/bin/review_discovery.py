@@ -136,8 +136,24 @@ class Discovery:
                 )
         return {k: r for k, r in self.repos.items() if r.get("discovery") in ("main", "explicit")}
 
+    MANIFEST_AGE = 120
+
     def manifests(self, mode=None):
-        """Frozen imported manifests plus accepted store membership."""
+        """Frozen imported manifests plus accepted store membership, built
+        once per mode and reused briefly: each admission refresh asked for
+        them, and rebuilding meant reading the bundle chain of every PR on
+        every label page, seconds of CPU that threads could not share."""
+        # one thread builds; the others in a parallel prefetch wait for it
+        with self._sweep_lock:
+            cache = self.__dict__.setdefault("_manifest_cache", {})
+            hit = cache.get(mode)
+            if hit and time.monotonic() - hit[0] < self.MANIFEST_AGE:
+                return hit[1]
+            built = self._manifests(mode)
+            cache[mode] = (time.monotonic(), built)
+            return built
+
+    def _manifests(self, mode=None):
         if self.gh is not None and mode != "rsync":
             # submodule repositories' keys (mavlink-523) resolve only after the
             # sweep; a resumed run reaches here without discover()
