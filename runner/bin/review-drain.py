@@ -2,6 +2,7 @@
 """One finite outbox drain; no outer board lock."""
 
 import argparse
+import time
 from review_store import Store, read
 from review_github import GitHub
 from review_delivery import Delivery
@@ -9,7 +10,9 @@ from review_delivery import Delivery
 p = argparse.ArgumentParser()
 p.add_argument("--data", required=True)
 p.add_argument("--config", help="optional defaults; intents retain their frozen delivery settings")
+p.add_argument("--budget", type=float, default=240, help="seconds of passes")
 a = p.parse_args()
+BUDGET = a.budget
 c = read(a.config) if a.config else {}
 s = Store(a.data)
 g = GitHub(
@@ -21,5 +24,16 @@ g = GitHub(
 # A controller that died between journalling a page operation and fanning
 # it out leaves entries waiting on it for ever; recover before draining.
 s.recover_slice()
-debts = s.drain(Delivery(s, g, c))
+# One pass takes at most a hundred entries, a few seconds' work; an all run
+# queues some two thousand, so a single pass per cron slot left comments
+# hours behind. Keep passing while entries move, inside the five minutes.
+adapter = Delivery(s, g, c)
+deadline = time.monotonic() + BUDGET
+while True:
+    before = len(list((s.root / "outbox").glob("*.json")))
+    debts = s.drain(adapter, seconds=min(60, max(0, deadline - time.monotonic())))
+    if not debts or time.monotonic() >= deadline:
+        break
+    if len(list((s.root / "outbox").glob("*.json"))) >= before:
+        break
 raise SystemExit(1 if debts else 0)
