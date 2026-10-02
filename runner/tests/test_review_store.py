@@ -3,6 +3,7 @@
 import copy
 from pathlib import Path
 import subprocess
+import time
 import unittest
 
 from review_fixtures import BIN, PR, complete_claim, python, stop, workspace
@@ -501,6 +502,19 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(len(list(adapter.root.glob("*.json"))), 1)
         self.store.drain(adapter, seconds=0)
         self.assertEqual(len(list(adapter.root.glob("*.json"))), 1)
+
+    def test_a_started_delivery_gets_its_own_minute_not_the_budgets_remainder(self):
+        self.accept()
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        seen = []
+        real = adapter.deliver
+        adapter.deliver = lambda entry, deadline: seen.append(deadline - time.monotonic()) or real(entry, deadline)
+        self.store.drain(adapter, limit=1, seconds=0.5)
+        self.assertEqual(len(seen), 1)
+        self.assertGreater(seen[0], self.store.ENTRY_SECONDS - 5)
+        self.assertFalse([x for x in (read(p) for p in (self.root / "outbox").glob("*.json"))
+                          if x and x["failures"]])
 
     def test_changed_selected_pass_cannot_reuse_its_old_validation(self):
         claim = complete_claim(self.store, self.lock)

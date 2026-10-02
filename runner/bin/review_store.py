@@ -576,12 +576,19 @@ class Store:
             stack.close()
             raise
 
+    ENTRY_SECONDS = 60
+
     def drain(self, adapter, limit=100, seconds=60, snapshot=None):
         deadline = time.monotonic() + seconds
         snapshot = self.delivery_snapshot(limit) if snapshot is None else snapshot[:limit]
+        budget = deadline
         for selected in snapshot:
-            if time.monotonic() >= deadline:
+            if time.monotonic() >= budget:
                 break
+            # The budget decides only whether to start an entry; one started
+            # gets a full minute. Handing it what was left of a short budget
+            # failed publishes and comments on a deadline until they gave up.
+            deadline = max(budget, time.monotonic() + self.ENTRY_SECONDS)
             gate = selected.get("gate", "pr")
             key = selected["target"] if gate == "page" else selected["pr"]
             lock = try_lock(self.locks, key)
