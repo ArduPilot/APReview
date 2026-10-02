@@ -932,10 +932,19 @@ class Supervisor:
                 "board": "owed",
             }
 
+    DRAIN_BUSY = 5
+
     def bounded_drain(self, startup=False):
         start = time.monotonic()
         budget = self.startup_budget if startup else 100
         seconds = max(0, self.startup_deadline - start) if startup else 60
+        if not startup and any(x.get("review") in ("pending", "claimed", "reviewing", "reconciling")
+                               for x in getattr(self, "states", {}).values()):
+            # Deliveries run inside the scheduling loop. With PRs to admit or
+            # advance, a minute of page publishing per pass held every launch
+            # behind it (sixteen minutes before the first pass of one run);
+            # the cron drain and the next pass carry the rest.
+            seconds = min(seconds, self.DRAIN_BUSY)
         cursor = read(self.directory / "recovery.json")
         if startup and cursor is None:
             cursor = self.startup_work

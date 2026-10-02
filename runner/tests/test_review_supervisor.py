@@ -394,6 +394,20 @@ class ReviewSupervisor(unittest.TestCase):
                 pass
         self.assertEqual(supervisor.discovery.discover.call_count, 3)
 
+    def test_the_loops_own_drain_is_short_while_prs_wait(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.directory = self.root
+        supervisor.store = Mock()
+        supervisor.store.recover.return_value = None
+        supervisor.store.last_recovered = 0
+        supervisor.adapter = None
+        supervisor.states = {PR: {"review": "pending"}}
+        supervisor.bounded_drain()
+        self.assertLessEqual(supervisor.store.drain.call_args.kwargs["seconds"], supervisor.DRAIN_BUSY)
+        supervisor.states = {PR: {"review": "accepted"}}
+        supervisor.bounded_drain()
+        self.assertGreater(supervisor.store.drain.call_args.kwargs["seconds"], supervisor.DRAIN_BUSY)
+
     def test_terminal_transition_between_poll_and_schedule_does_not_retry(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root
