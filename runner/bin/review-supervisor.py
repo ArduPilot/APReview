@@ -322,6 +322,7 @@ class Supervisor:
             lock.close()
 
     PREFETCH_AGE = 60
+    ADMIT_BATCH = 16
 
     def prefetch(self, candidates):
         """Refresh the candidates about to be claimed in parallel. Each is a
@@ -1068,14 +1069,21 @@ class Supervisor:
                 if pause:
                     pause.close()
                 loop_start = time.monotonic()
+                # Admit a batch per pass. Refreshing every pending PR in one
+                # pass took ten minutes for 141 PRs, during which nothing
+                # launched, and the first prefetches had expired before their
+                # claims came round, so each was fetched twice.
+                batch = set()
                 if not paused and not (self.directory / "abort.json").exists():
-                    self.prefetch([
+                    eligible = [
                         c for c in self.config["candidates"]
                         if self.states[c["pr"]]["review"] == "pending"
                         and time.time() >= self.next_claim.get(c["pr"], 0)
                         and not (self.config["configuration"].get("quota", {}).get("paused"))
                         and time.time() < self.config["admission_deadline"]
-                    ])
+                    ][:self.ADMIT_BATCH]
+                    batch = {c["pr"] for c in eligible}
+                    self.prefetch(eligible)
                 for candidate in self.config["candidates"]:
                     pr = candidate["pr"]
                     state = self.states[pr]
@@ -1099,7 +1107,7 @@ class Supervisor:
                                 "deferred",
                                 "paused" if paused else state.get("reason", "admission deadline"),
                             )
-                        elif not paused or continuing:
+                        elif continuing or (not paused and (pr in batch or not self.discovery)):
                             self.claim_candidate(candidate)
                 admitted = time.monotonic()
                 # Furthest along first: a PR ready to finish takes the next
