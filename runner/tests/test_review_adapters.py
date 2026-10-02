@@ -326,6 +326,16 @@ class DiscoveryContract(unittest.TestCase):
         ]
         self.assertEqual(self.discover.candidate(PR, "followup")["classification"], "REUSE")
         self.discover.snapshot_diff.assert_not_called()
+        # an unchanged PR costs its issue comments only, not reviews and
+        # inline comments as well
+        self.assertEqual([c.kwargs.get("kinds") for c in self.gh.thread.call_args_list], [("comment",)])
+
+    def test_a_moved_followup_pr_reads_its_whole_thread(self):
+        self.gh.thread.return_value = [dict(kind="comment", login="old-bot", id=1, at="1",
+                                            body="AI-generated\nReviewed head `" + "b" * 40 + "`.")]
+        self.assertEqual(self.discover.candidate(PR, "followup")["classification"], "REVIEW")
+        self.assertEqual([c.kwargs.get("kinds") for c in self.gh.thread.call_args_list],
+                         [("comment",), ("review_comment", "review")])
 
     def test_label_discovery_excludes_board_and_followup_unions_it(self):
         self.discover.swept = Mock(return_value={"owner/repo": {}})

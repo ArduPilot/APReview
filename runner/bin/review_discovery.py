@@ -439,7 +439,20 @@ class Discovery:
             and ("AIReview" if mode == "rsync" else mode) in labels
             and same_head(head, old.get("head"))
         )
-        thread = [] if reuse else self.gh.thread(repo, number)
+        if reuse:
+            thread = []
+        elif mode == "followup":
+            # Our last comment, and the head it reviewed, are in the issue
+            # comments alone. Reviews and inline comments are only fetched
+            # for a PR that has moved on and will be reviewed: reading all
+            # three for every PR made a followup's discovery take minutes.
+            thread = self.gh.thread(repo, number, kinds=("comment",))
+            told = [c for c in thread if c["login"] in self.accounts and POST.MARKER in c["body"]]
+            last = max(told, key=lambda c: (c["at"] or "", c["id"])) if told else None
+            if last and not same_head(head, POST.told_head(last["body"])):
+                thread += self.gh.thread(repo, number, kinds=("review_comment", "review"))
+        else:
+            thread = self.gh.thread(repo, number)
         ours = [
             c
             for c in thread

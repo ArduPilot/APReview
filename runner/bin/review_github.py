@@ -148,13 +148,17 @@ class GitHub:
                 return out
         raise OSError("GitHub pagination bound exceeded")
 
-    def thread(self, repo, number, **kwargs):
+    THREAD = ("comment", "review_comment", "review")
+
+    def thread(self, repo, number, kinds=THREAD, **kwargs):
         out = []
         for kind, endpoint in (
             ("comment", f"issues/{number}/comments"),
             ("review_comment", f"pulls/{number}/comments"),
             ("review", f"pulls/{number}/reviews"),
         ):
+            if kind not in kinds:
+                continue
             for c in self.pages(f"repos/{repo}/{endpoint}", **kwargs):
                 out.append(
                     dict(
