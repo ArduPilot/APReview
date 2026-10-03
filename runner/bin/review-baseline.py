@@ -46,44 +46,57 @@ def runs(data, since):
     for directory in sorted(glob.glob(os.path.join(data, "runs", "*"))):
         run = load(os.path.join(directory, "run.json")) or {}
         created = run.get("created")
-        if not created or created < since:
+        summary = load(os.path.join(directory, "summary.json"), {})
+        # a run counts if it was active in the window, not only if it began there
+        if not created or (summary.get("heartbeat") or created) < since:
             continue
         state = load(os.path.join(directory, "state.json"), {})
-        summary = load(os.path.join(directory, "summary.json"), {})
         reasons = Counter((c.get("reason") or "?") for c in run.get("candidates", [])
                           if state.get(c["pr"], {}).get("review") == "accepted")
-        passes, minutes, first = Counter(), Counter(), None
+        # A pass counts once its guardian launched (launch.json exists), running
+        # or not. Its minutes run from launch to the last heartbeat: attempt
+        # time, including permit and account waits, not model time.
+        passes, minutes, first, reviewed = Counter(), Counter(), None, set()
         for job_path in glob.glob(os.path.join(directory, "attempts", "*", "job.json")):
             job = load(job_path, {})
-            status = load(os.path.join(os.path.dirname(job_path), "status.json"), {})
-            registered = job.get("registered")
-            if registered:
-                first = registered if first is None else min(first, registered)
-            if status.get("session_id") or status.get("sessions") or status.get("exit") is not None:
-                passes[job.get("kind", "?")] += 1
-                end = status.get("heartbeat")
-                if registered and end:
-                    minutes[job.get("kind", "?")] += (end - registered) / 60
+            attempt = os.path.dirname(job_path)
+            try:
+                launched = os.path.getmtime(os.path.join(attempt, "launch.json"))
+            except OSError:
+                continue
+            status = load(os.path.join(attempt, "status.json"), {})
+            first = launched if first is None else min(first, launched)
+            kind = job.get("kind", "?")
+            passes[kind] += 1
+            if kind == "primary":
+                reviewed.add("%s@%s" % (job.get("pr", "?").split(":", 1)[-1], (job.get("head") or "?")[:10]))
+            end = status.get("heartbeat")
+            if end and end > launched:
+                minutes[kind] += (end - launched) / 60
         out.append(dict(
             name=os.path.basename(directory), mode=run.get("mode", "?"), created=created,
             state=summary.get("state"),
             duration_min=((summary.get("heartbeat") or created) - created) / 60,
             launch_latency_min=(first - created) / 60 if first else None,
             outcomes=dict(Counter(v.get("review") for v in state.values())),
-            reviewed_because=dict(reasons), passes=dict(passes),
-            inference_min={k: round(v) for k, v in minutes.items()},
+            reviewed_because=dict(reasons), passes=dict(passes), reviewed=sorted(reviewed),
+            attempt_min={k: round(v) for k, v in minutes.items()},
         ))
     return out
 
 
 def outbox(data):
+    """Debt age from each entry's fixed creation time; entries from before
+    that field existed fall back to file mtime, which retries rewrite."""
     now, kinds, oldest = time.time(), Counter(), None
     for path in glob.glob(os.path.join(data, "outbox", "*.json")):
+        entry = load(path)
+        if entry is None:
+            continue
         try:
-            age = now - os.path.getmtime(path)
+            age = now - (entry.get("created") or os.path.getmtime(path))
         except OSError:
             continue
-        entry = load(path, {})
         kinds[entry.get("kind", "?")] += 1
         oldest = max(oldest or 0, age)
     return dict(entries=sum(kinds.values()), by_kind=dict(kinds),
@@ -103,10 +116,20 @@ def main():
                   storage=load(os.path.join(a.data, "gc", "last.json")))
     for r in report["runs"]:
         calls = per_run.get(r["name"], {})
-        r["github_calls"] = dict(sorted(((k[7:], v) for k, v in calls.items() if k.startswith("github/")),
+        own = {k: v for k, v in calls.items() if ":" not in k.split("/", 1)[0]}
+        r["github_calls"] = dict(sorted(((k[7:], v) for k, v in own.items()
+                                         if k.startswith("github/") and k != "github/git fetch"),
                                         key=lambda kv: -kv[1]))
-        r["github_seconds"] = round(sum(s for (n, k), s in seconds.items() if n == r["name"] and k.startswith("github/")))
-        r["site"] = {k[5:]: v for k, v in calls.items() if k.startswith("site/")}
+        r["git_fetches"] = own.get("github/git fetch", 0)
+        # summed over parallel requests: operation time, not elapsed time
+        r["github_op_seconds"] = round(sum(s for (n, k), s in seconds.items()
+                                           if n == r["name"] and k.startswith("github/") and k != "github/git fetch"))
+        r["github_accounts"] = {k[15:]: v for k, v in own.items() if k.startswith("github-account/")}
+        r["site"] = {k[5:]: v for k, v in own.items() if k.startswith("site/")}
+        r["local"] = {k[6:]: v for k, v in own.items() if k.startswith("local/")}
+        r["inference_launched"] = {k[19:]: v for k, v in own.items() if k.startswith("inference/launched ")}
+        # delivery the controller did for the whole store while it ran
+        r["executor_drain"] = {k[6:]: v for k, v in calls.items() if k.startswith("drain:")}
     report["other_processes"] = {k: dict(v) for k, v in sorted(per_day.items())}
     if a.save:
         os.makedirs(os.path.join(a.data, "metrics"), exist_ok=True)
@@ -118,7 +141,7 @@ def main():
     print("outbox: %(entries)d entries, oldest %(oldest_min)s min, %(by_kind)s" % report["outbox"])
     if report["storage"]:
         print("storage (last GC):", report["storage"].get("summary"))
-    print("%-40s %-8s %6s %7s %-28s %s" % ("run", "mode", "min", "launch", "passes", "github calls"))
+    print("%-40s %-8s %6s %7s %-28s %s" % ("run", "mode", "min", "1st pass", "passes", "github API calls"))
     for r in report["runs"]:
         print("%-40s %-8s %6.0f %7s %-28s %d %s" % (
             r["name"][:40], r["mode"], r["duration_min"],
