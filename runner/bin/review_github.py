@@ -38,6 +38,7 @@ class GitHub:
         self, endpoint, *, account="read", method="GET", payload=None, deadline=None, text=False
     ):
         query = (payload or {}).get("query", "").lstrip()
+        kind = review_metrics.github_class(endpoint, method, query)
         reading = method == "GET" or (endpoint == "graphql" and query.startswith("query"))
         if not reading and not self.writes:
             raise PermissionError("GitHub writes disabled at adapter boundary")
@@ -91,13 +92,13 @@ class GitHub:
                     timeout=timeout,
                 )
             except subprocess.TimeoutExpired as error:
-                review_metrics.count("github", review_metrics.github_class(endpoint, method),
-                                     time.monotonic() - started)
+                review_metrics.count("github", kind, time.monotonic() - started)
+                review_metrics.count("github-account", account)
                 if attempt < (2 if reading else 0):
                     continue
                 raise TimeoutError("GitHub request timed out") from error
-            review_metrics.count("github", review_metrics.github_class(endpoint, method),
-                                 time.monotonic() - started)
+            review_metrics.count("github", kind, time.monotonic() - started)
+            review_metrics.count("github-account", account)
             failure = None
             if result.returncode:
                 failure = result.stderr.strip()[:500]
@@ -123,6 +124,7 @@ class GitHub:
     @staticmethod
     def rate_reset(env):
         """When the spent allowance returns; the rate endpoint itself is free."""
+        review_metrics.count("github", "GET rate_limit")
         try:
             out = subprocess.run(["gh", "api", "rate_limit", "--jq", ".resources.core.reset"],
                                  capture_output=True, text=True, env=env, timeout=20)
