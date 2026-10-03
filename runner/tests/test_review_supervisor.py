@@ -407,6 +407,33 @@ class ReviewSupervisor(unittest.TestCase):
                                  [{"kind": "projection", "target": page, "gate": "page", "patches": {}}])
         self.assertEqual(len(projection()["dependencies"]), 1)
 
+    def test_an_observation_that_changes_nothing_visible_is_merged_not_journalled(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = Store(self.root / "data")
+        supervisor.run_id = str(self.root / "run")
+        supervisor.config = {"stub": True, "mode": "followup", "phases": {}, "configuration": {},
+                             "observation": 0}
+        page = "page:stub/end/a.html"
+        ops = lambda: sorted((supervisor.store.root / "operations").glob("*.json"))
+        rows = lambda: supervisor.store.merge_membership(page, {})
+        c = dict(candidate(), pr=PR, destinations=[page], ci={"state": "success", "at": "2026-10-04T01:00"})
+        supervisor._project(dict(c, observation=1), "discovery")
+        self.assertEqual(len(ops()), 1)                 # new on the page: journalled
+        # observed again: same CI state the same day, so the page is unchanged
+        supervisor.run_id = str(self.root / "run2")
+        supervisor._project(dict(c, observation=2, ci={"state": "success", "at": "2026-10-04T05:00"}),
+                            "discovery")
+        self.assertEqual(len(ops()), 1)
+        self.assertEqual(rows()[PR]["ticket"], 2)       # but its ticket still fences
+        # an older queued removal arriving late cannot undo it
+        supervisor.store.merge_membership(page, {PR: {"ticket": 1, "removed": True}})
+        self.assertFalse(rows()[PR]["removed"])
+        # a visible change is journalled
+        supervisor.run_id = str(self.root / "run3")
+        supervisor._project(dict(c, observation=3, ci={"state": "failure", "at": "2026-10-04T06:00"}),
+                            "discovery")
+        self.assertEqual(len(ops()), 2)
+
     def test_the_loops_own_drain_is_short_while_prs_wait(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root

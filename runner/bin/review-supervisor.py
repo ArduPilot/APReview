@@ -243,9 +243,53 @@ class Supervisor:
                     "dependencies": [delivery_id(pr, operation, "projection", target)],
                 }
             )
+        # Most projections change nothing a page shows: a reused PR is
+        # observed again every run. Merge those straight into membership, so
+        # the observation's ticket still fences older queued ones, and journal
+        # nothing for them; only a visible change earns a projection and a
+        # publish. A journalled operation keeps its exact intents on resume.
+        journalled = (self.store.root / "operations"
+                      / (digest([self.run_id, self.phase_name(phase), canonical(pr)]) + ".json"))
+        if intents and not journalled.exists():
+            kept = []
+            for projection, publish in zip(intents[::2], intents[1::2]):
+                if not self.merged_unchanged(projection["target"], pr, projection["patches"][pr]):
+                    kept += [projection, publish]
+            intents = kept
         if intents:
             intents.extend(self.landing_intents(pr, operation, intents, gate="page"))
             self.store.journal(self.run_id, self.phase_name(phase), pr, intents)
+
+    @staticmethod
+    def visible(row, claimed):
+        """What a page shows from a membership row (review_render): whether it
+        is listed, which generation, the CI state and the day it was seen,
+        and the progress note, which a claim overrides."""
+        if not row or row.get("removed", True):
+            return None
+        ci = row.get("ci") or {}
+        return (row.get("generation"), ci.get("state"), (ci.get("at") or "")[:10],
+                None if claimed else row.get("progress"))
+
+    def merged_unchanged(self, target, pr, patch):
+        """Merge one observation directly; True when the page would look the
+        same. Anything uncertain (page busy, a merge refused) journals."""
+        try:
+            lock = try_lock(self.store.locks, target)
+        except RuntimeError:
+            return False
+        if lock is None:
+            return False
+        try:
+            with lock:
+                path = self.store.root / "membership" / (digest(canonical(target)) + ".json")
+                claimed = self.store.claim(pr) is not None
+                before = self.visible(read(path, {}).get(pr), claimed)
+                after = self.visible(self.store._merge_membership(lock, target, {pr: patch}).get(pr), claimed)
+                review_metrics.count("local", "projection merged unchanged" if before == after else "projection changed")
+                return before == after
+        except (ValueError, OSError):
+            return False
 
     def save(self, force=False):
         now = time.monotonic()
