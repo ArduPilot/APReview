@@ -21,6 +21,8 @@ from urllib.request import urlopen
 from urllib.error import HTTPError
 from html import unescape
 
+import review_metrics
+
 LABELS = ("DevCallTopic", "DevCallEU", "AIReview")
 
 
@@ -188,7 +190,7 @@ class Discovery:
         for label, url in urls.items():
             if url not in self._pages:
                 try:
-                    with urlopen(url, timeout=20) as response:
+                    with review_metrics.timed("site", "manifest fetch"), urlopen(url, timeout=20) as response:
                         raw = response.read(16 * 1024 * 1024 + 1)
                 except HTTPError as error:
                     if error.code != 404:
@@ -631,7 +633,8 @@ class Discovery:
                 raise TimeoutError("refresh busy")
             # Fetches add objects/refs; they never check out the mutable base.
             for revision in dict.fromkeys([candidate["head"], candidate["base"]]):
-                git(clone, "fetch", "--no-tags", "origin", revision)
+                with review_metrics.timed("github", "git fetch"):
+                    git(clone, "fetch", "--no-tags", "origin", revision)
             if old:
                 old = self.told_commit(clone, candidate["repository"], old)
             candidate["merge_base"] = git(clone, "merge-base", candidate["base"], candidate["head"])
