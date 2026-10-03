@@ -45,10 +45,10 @@ def candidate(number=1, **changes):
                 created_at="2020-01-01", **changes)
 
 
-def complete_claim(store, lock, run="run", request="request", inputs=None):
+def complete_claim(store, lock, run="run", request="request", inputs=None, pr=PR):
     from review_schema import FILES
-    inputs = inputs or candidate()
-    claim = store.allocate(lock, PR, run, request, inputs)
+    inputs = inputs or candidate(int(pr.rsplit("#", 1)[1]))
+    claim = store.allocate(lock, pr, run, request, inputs)
     results = {}
     for kind, filename in FILES.items():
         path = store.root / "attempt-fixtures" / str(claim["generation"]) / kind
@@ -67,7 +67,7 @@ def complete_claim(store, lock, run="run", request="request", inputs=None):
                                           aborted=False, result_status="complete", empty=True))
         claim["attempts"].append(str(path))
         claim["selected"][kind] = str(path)
-    store.save_claim(lock, PR, claim)
+    store.save_claim(lock, pr, claim)
     return claim
 
 

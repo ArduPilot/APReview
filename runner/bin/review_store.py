@@ -662,11 +662,26 @@ class Store:
                             if prepared is not None:
                                 self.receipt(entry, **prepared)
                                 continue
+                            # A page renders its whole membership, so a render
+                            # begun after this entry's projection settled already
+                            # carries it; each re-render took seconds and an all
+                            # run owes dozens of the same page.
+                            whole = entry["kind"] == "publish" and not entry.get("retained")
+                            target = canonical(entry["target"]) if whole else None
+                            done = self.__dict__.setdefault("_rendered", {}).get(target)
+                            if done and all(not (self.root / "receipts" / (d + ".json")).exists()
+                                            or (self.root / "receipts" / (d + ".json")).stat().st_mtime <= done[0]
+                                            for d in entry.get("dependencies", [])):
+                                self.receipt(entry, **done[1])
+                                continue
                             entry["state"] = "sending"
                             entry["payload_digest"] = digest(entry.get("payload", {}))
                             atomic(path, entry)
+                            started = time.time()
                             result = adapter.deliver(entry, deadline)
                             self.crash("remote_effect")
+                            if whole:
+                                self._rendered[target] = (started, result)
                     self.receipt(entry, **result)
                     if entry["kind"] == "publish" and entry.get("gate") == "page":
                         self._coalesce(entry, result)

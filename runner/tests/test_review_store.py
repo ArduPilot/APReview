@@ -166,6 +166,22 @@ class ReviewStore(unittest.TestCase):
         self.assertTrue((outbox / "pub9.json").exists())
         self.assertFalse((self.root / "receipts" / "pub9.json").exists())
 
+    def test_a_page_renders_once_for_the_owed_publishes_of_several_prs(self):
+        self.accept()
+        self.lock.close()
+        other = "pr:owner/repo#2"
+        with try_lock(self.store.locks, other) as lock:
+            self.store.accept(lock, other, complete_claim(self.store, lock, pr=other), self.intents())
+        adapter = StubAdapter(self.root)
+        self.store.drain(adapter)
+        renders = [read(p)["entry"]["target"] for p in adapter.root.glob("*.json")
+                   if read(p)["entry"]["kind"] == "publish"]
+        self.assertEqual(sorted(renders), ["page:end/a", "page:end/b"])
+        for pr in (PR, other):
+            receipts = [read(p) for p in (self.root / "receipts").glob("*.json")]
+            self.assertTrue([r for r in receipts if r.get("pr") == pr and r.get("kind") == "comment"
+                             and r["state"] == "posted"], pr)
+
     def test_a_bounded_pass_takes_projections_before_the_publishes_that_wait_on_them(self):
         target = "page:end/shared"
         outbox = self.root / "outbox"
