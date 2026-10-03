@@ -555,11 +555,17 @@ class Store:
 
     SETTLED = ("published", "posted", "not_applicable", "synced", "held", "superseded")
 
-    def _coalesce(self, entry, result, started):
-        """One publish of a page satisfies every other owed publish of it whose
-        projection merged before that render began: the page renders the whole
-        membership. A projection merged during the upload is not on the page
-        it sent. Caller holds the page region."""
+    def page_state(self, target):
+        """Digest of a page's membership as it stands; caller holds the page."""
+        try:
+            return digest((self.root / "membership" / (digest(canonical(target)) + ".json")).read_bytes().hex())
+        except OSError:
+            return None
+
+    def _coalesce(self, entry, result, state):
+        """One publish of a page satisfies every other owed publish of it that
+        the render provably contained: the page renders its whole membership.
+        Caller holds the page region."""
         target = canonical(entry["target"])
         for path in (self.root / "outbox").glob("*.json"):
             other = read(path)
@@ -569,16 +575,27 @@ class Store:
             if (self.root / "receipts" / (other["id"] + ".json")).exists():
                 unlink(path)
                 continue
-            if not self.rendered_after(other, started):
+            if not self.contained(other, result, state):
                 continue
             self.receipt(other, **result)
 
-    def rendered_after(self, entry, started):
-        """Every dependency of entry settled before a render begun at started."""
+    def contained(self, entry, result, state):
+        """Whether a render made from page state `state`, which produced
+        `result`, contained everything entry waits on. A projection of the
+        same page is contained when the page is unchanged since that render:
+        merges take the page lock, which delivery holds. Any other dependency
+        (a landing page waits on label pages' publishes, under other locks)
+        must be one the render reports having read. Never by timestamp: a
+        receipt can be renamed into place after a render read the directory."""
+        target = canonical(entry["target"])
         for dep in entry.get("dependencies", []):
-            path = self.root / "receipts" / (dep + ".json")
-            receipt = read(path)
-            if not receipt or receipt["state"] not in self.SETTLED or path.stat().st_mtime > started:
+            receipt = read(self.root / "receipts" / (dep + ".json"))
+            if not receipt or receipt["state"] not in self.SETTLED:
+                return False
+            if receipt.get("kind") == "projection" and canonical(receipt["target"]) == target:
+                if state is None or self.page_state(target) != state:
+                    return False
+            elif dep not in result.get("consumed", ()):
                 return False
         return True
 
@@ -619,7 +636,7 @@ class Store:
             # gets a full minute. Handing it what was left of a short budget
             # failed publishes and comments on a deadline until they gave up.
             deadline = max(budget, time.monotonic() + self.ENTRY_SECONDS)
-            started = None
+            state = None
             gate = selected.get("gate", "pr")
             key = selected["target"] if gate == "page" else selected["pr"]
             lock = try_lock(self.locks, key)
@@ -678,20 +695,21 @@ class Store:
                             whole = entry["kind"] == "publish" and not entry.get("retained")
                             target = canonical(entry["target"]) if whole else None
                             done = self.__dict__.setdefault("_rendered", {}).get(target)
-                            if done and self.rendered_after(entry, done[0]):
+                            if done and self.contained(entry, done[1], done[0]):
                                 self.receipt(entry, **done[1])
                                 continue
-                            started = time.time()
+                            if whole:
+                                state = self.page_state(target)
                             entry["state"] = "sending"
                             entry["payload_digest"] = digest(entry.get("payload", {}))
                             atomic(path, entry)
                             result = adapter.deliver(entry, deadline)
                             self.crash("remote_effect")
                             if whole:
-                                self._rendered[target] = (started, result)
+                                self._rendered[target] = (state, result)
                     self.receipt(entry, **result)
-                    if entry["kind"] == "publish" and entry.get("gate") == "page" and started is not None:
-                        self._coalesce(entry, result, started)
+                    if entry["kind"] == "publish" and entry.get("gate") == "page" and state is not None:
+                        self._coalesce(entry, result, state)
                 except (OSError, TimeoutError) as error:
                     entry["failures"] += 1
                     entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))

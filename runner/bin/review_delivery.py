@@ -109,12 +109,17 @@ class Publication:
             date = path.split("/")[1]
             pages = {}
             revisions = {}
+            consumed = []
             for receipt_path in (self.store.root / "receipts").glob("*.json"):
                 receipt = read(receipt_path)
                 match = re.fullmatch(
                     r"page:([^/]+)/DevCallReviews/" + date + r"/([^/]+)/devcall_pr_reviews.html",
                     receipt["target"],
                 )
+                if match and receipt["state"] in ("published", "superseded"):
+                    # every label publish this render saw; the page then shows
+                    # that label at this revision or a later one
+                    consumed.append(receipt["id"])
                 if (
                     match
                     and receipt["state"] in ("published", "superseded")
@@ -129,6 +134,7 @@ class Publication:
             with review_metrics.timed("local", "render landing"):
                 raw = self.renderer.landing(date, pages)
         else:
+            consumed = []
             with review_metrics.timed("local", "render page"):
                 raw = self.renderer.render(target, retained)
         expected = verify(raw)
@@ -166,6 +172,7 @@ class Publication:
             revision=revision,
             anchors=re.findall(r'<section id="([^"]+)"', raw.decode()),
             url=self.url(target),
+            consumed=consumed,
         )
 
     def verify_comment(self, entry, deadline):
