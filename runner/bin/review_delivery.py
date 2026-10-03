@@ -11,6 +11,7 @@ from urllib.request import urlopen, Request
 from urllib.parse import quote
 
 from review_discovery import POST, module
+import review_metrics
 from review_lock import acquire, canonical, region
 from review_render import Renderer, anchor, bundle_at, sha, verify
 from review_store import atomic, digest, mkdir, read
@@ -90,7 +91,7 @@ class Publication:
 
     def fetch(self, target, deadline, expected=()):
         request = Request(self.url(target), headers={"Cache-Control": "no-cache"})
-        with urlopen(request, timeout=timeout(deadline)) as response:
+        with review_metrics.timed("site", "fetch page"), urlopen(request, timeout=timeout(deadline)) as response:
             raw = response.read(16 * 1024 * 1024 + 1)
         if len(raw) > 16 * 1024 * 1024:
             raise OSError("served page exceeds bound")
@@ -125,9 +126,11 @@ class Publication:
                         anchors=receipt.get("anchors", []),
                         target=receipt["target"],
                     )
-            raw = self.renderer.landing(date, pages)
+            with review_metrics.timed("local", "render landing"):
+                raw = self.renderer.landing(date, pages)
         else:
-            raw = self.renderer.render(target, retained)
+            with review_metrics.timed("local", "render page"):
+                raw = self.renderer.render(target, retained)
         expected = verify(raw)
         directory = self.store.root / "pages" / digest(target)
         mkdir(directory)
@@ -138,11 +141,12 @@ class Publication:
             raise OSError("no REVIEW_PUBLISH endpoint")
         # rsync's normal temp-file + rename, never --inplace. One page per transfer.
         destination = publish.rstrip("/") + "/" + str(Path(path).parent) + "/"
-        result = run_external(
-            ["rsync", "--mkpath", "--delay-updates", *endpoint.get("rsync_args", []), "--", str(source), destination],
-            capture_output=True,
-            timeout=timeout(deadline),
-        )
+        with review_metrics.timed("site", "rsync page"):
+            result = run_external(
+                ["rsync", "--mkpath", "--delay-updates", *endpoint.get("rsync_args", []), "--", str(source), destination],
+                capture_output=True,
+                timeout=timeout(deadline),
+            )
         if result.returncode:
             raise OSError("rsync failed: " + result.stderr.decode(errors="replace")[:500])
         served = self.fetch(target, deadline, expected["sections"])
