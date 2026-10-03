@@ -142,10 +142,20 @@ class Publication:
                 raw = self.renderer.render(target, retained)
         return raw, consumed
 
+    def destination(self, target):
+        """Where a page goes and is served from, under this configuration."""
+        endpoint, path = self.endpoint(target)
+        return [endpoint.get("publish") or os.environ.get("REVIEW_PUBLISH"), self.url(target)]
+
     def confirmed(self, entry):
+        """The page's last verified upload, if it went where this entry's
+        frozen configuration sends it; another server's upload proves nothing."""
         if entry.get("retained"):
             return None
-        return read(self.store.root / "pages" / digest(entry["target"]) / "confirmed.json")
+        record = read(self.store.root / "pages" / digest(entry["target"]) / "confirmed.json")
+        if not record or record.get("destination") != self.destination(entry["target"]):
+            return None
+        return {k: v for k, v in record.items() if k != "destination"}
 
     def current(self, entry):
         """What the page would be now, and the revision last published. A
@@ -210,7 +220,7 @@ class Publication:
         if not entry.get("retained"):
             # the page as last verified served: a later publish whose fresh
             # render has these bytes, with no upload since, needs no upload
-            atomic(directory / "confirmed.json", result)
+            atomic(directory / "confirmed.json", dict(result, destination=self.destination(target)))
         return result
 
     def verify_comment(self, entry, deadline):

@@ -878,6 +878,10 @@ class LocalPublication(unittest.TestCase):
             self.assertFalse(self.store.contained(later, confirmed, self.publisher))
         # a retained generation page is never settled this way
         self.assertIsNone(self.publisher.confirmed(dict(later, retained=True)))
+        # nor by an upload to another server
+        other = Publication(self.store, dict(self.config, endpoints={"test": dict(
+            self.config["endpoints"]["test"], url="http://elsewhere.invalid")}))
+        self.assertIsNone(other.confirmed(later))
 
     def test_a_landing_page_keeps_its_served_sections_in_its_route_history(self):
         target = "page:test/DevCallReviews/2026_10_04/A/devcall_pr_reviews.html"
