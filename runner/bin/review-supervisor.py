@@ -783,15 +783,22 @@ class Supervisor:
                 "dependencies": [delivery_id(pr, generation, "comment", pr)],
             }
         )
+        operation = digest([self.run_id, self.phase_name("discovery"), pr])
+        # Discovery can skip journalling a PR (pause fence busy, PR not new-
+        # owned then); a dependency on its projection would never settle and
+        # held the PR's publishes and comment for good.
+        discovered = (self.store.root / "operations" / (operation + ".json")).exists()
         for target in candidate.get("destinations", []):
             target = canonical(target)
-            operation = digest([self.run_id, self.phase_name("discovery"), pr])
+            dependency = delivery_id(pr, operation, "projection", target)
             intents.append(
                 {
                     "kind": "projection",
                     "target": target,
                     "patches": {pr: {"generation": generation}},
-                    "dependencies": [delivery_id(pr, operation, "projection", target)],
+                    "dependencies": [dependency] if discovered or any(
+                        (self.store.root / d / (dependency + ".json")).exists()
+                        for d in ("receipts", "outbox")) else [],
                 }
             )
             for intent in intents:

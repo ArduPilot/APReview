@@ -394,6 +394,19 @@ class ReviewSupervisor(unittest.TestCase):
                 pass
         self.assertEqual(supervisor.discovery.discover.call_count, 3)
 
+    def test_acceptance_waits_on_discoverys_projection_only_if_discovery_journalled_it(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = Store(self.root / "data")
+        supervisor.run_id = str(self.root / "run")
+        supervisor.config = {"stub": True, "mode": "followup", "phases": {}, "configuration": {}}
+        page = "page:stub/end/a.html"
+        c = dict(candidate(), pr=PR, destinations=[page])
+        projection = lambda: [x for x in supervisor.intents(c, 1) if x["kind"] == "projection"][0]
+        self.assertEqual(projection()["dependencies"], [])
+        supervisor.store.journal(supervisor.run_id, "discovery", PR,
+                                 [{"kind": "projection", "target": page, "gate": "page", "patches": {}}])
+        self.assertEqual(len(projection()["dependencies"]), 1)
+
     def test_the_loops_own_drain_is_short_while_prs_wait(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root
