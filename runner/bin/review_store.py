@@ -555,11 +555,11 @@ class Store:
 
     SETTLED = ("published", "posted", "not_applicable", "synced", "held", "superseded")
 
-    def _coalesce(self, entry, result):
+    def _coalesce(self, entry, result, started):
         """One publish of a page satisfies every other owed publish of it whose
-        projection is already merged: the page renders the whole membership,
-        and every progress step of every PR on it asked for the same thing.
-        Caller holds the page region."""
+        projection merged before that render began: the page renders the whole
+        membership. A projection merged during the upload is not on the page
+        it sent. Caller holds the page region."""
         target = canonical(entry["target"])
         for path in (self.root / "outbox").glob("*.json"):
             other = read(path)
@@ -569,10 +569,18 @@ class Store:
             if (self.root / "receipts" / (other["id"] + ".json")).exists():
                 unlink(path)
                 continue
-            dependencies = [read(self.root / "receipts" / (d + ".json")) for d in other.get("dependencies", [])]
-            if any(not d or d["state"] not in self.SETTLED for d in dependencies):
+            if not self.rendered_after(other, started):
                 continue
             self.receipt(other, **result)
+
+    def rendered_after(self, entry, started):
+        """Every dependency of entry settled before a render begun at started."""
+        for dep in entry.get("dependencies", []):
+            path = self.root / "receipts" / (dep + ".json")
+            receipt = read(path)
+            if not receipt or receipt["state"] not in self.SETTLED or path.stat().st_mtime > started:
+                return False
+        return True
 
     def side_locks(self, entry, dependencies, gate):
         """Keep destination ownership through both the adapter call and receipt."""
@@ -611,6 +619,7 @@ class Store:
             # gets a full minute. Handing it what was left of a short budget
             # failed publishes and comments on a deadline until they gave up.
             deadline = max(budget, time.monotonic() + self.ENTRY_SECONDS)
+            started = None
             gate = selected.get("gate", "pr")
             key = selected["target"] if gate == "page" else selected["pr"]
             lock = try_lock(self.locks, key)
@@ -669,22 +678,20 @@ class Store:
                             whole = entry["kind"] == "publish" and not entry.get("retained")
                             target = canonical(entry["target"]) if whole else None
                             done = self.__dict__.setdefault("_rendered", {}).get(target)
-                            if done and all(not (self.root / "receipts" / (d + ".json")).exists()
-                                            or (self.root / "receipts" / (d + ".json")).stat().st_mtime <= done[0]
-                                            for d in entry.get("dependencies", [])):
+                            if done and self.rendered_after(entry, done[0]):
                                 self.receipt(entry, **done[1])
                                 continue
+                            started = time.time()
                             entry["state"] = "sending"
                             entry["payload_digest"] = digest(entry.get("payload", {}))
                             atomic(path, entry)
-                            started = time.time()
                             result = adapter.deliver(entry, deadline)
                             self.crash("remote_effect")
                             if whole:
                                 self._rendered[target] = (started, result)
                     self.receipt(entry, **result)
-                    if entry["kind"] == "publish" and entry.get("gate") == "page":
-                        self._coalesce(entry, result)
+                    if entry["kind"] == "publish" and entry.get("gate") == "page" and started is not None:
+                        self._coalesce(entry, result, started)
                 except (OSError, TimeoutError) as error:
                     entry["failures"] += 1
                     entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
