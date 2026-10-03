@@ -579,6 +579,8 @@ class Store:
                 batch.append(other)
         # the batch is frozen before the render, so it can only have seen
         # their dependencies; anything settling later waits its own turn
+        if deadline and time.monotonic() >= deadline:
+            return
         if not batch or not self.current_matches(adapter, entry, result):
             return
         for other in batch:
