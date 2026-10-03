@@ -142,6 +142,11 @@ class Publication:
                 raw = self.renderer.render(target, retained)
         return raw, consumed
 
+    def confirmed(self, entry):
+        if entry.get("retained"):
+            return None
+        return read(self.store.root / "pages" / digest(entry["target"]) / "confirmed.json")
+
     def current(self, entry):
         """What the page would be now, and the revision last published. A
         render equal to an upload that is still the latest publication of the
@@ -193,7 +198,7 @@ class Publication:
             and not entry.get("retained")
             and rows.get(entry["pr"], {}).get("removed")
         )
-        return dict(
+        result = dict(
             state="superseded" if removed else "published",
             **served,
             revision=revision,
@@ -202,6 +207,11 @@ class Publication:
             consumed=consumed,
             epoch=epoch,
         )
+        if not entry.get("retained"):
+            # the page as last verified served: a later publish whose fresh
+            # render has these bytes, with no upload since, needs no upload
+            atomic(directory / "confirmed.json", result)
+        return result
 
     def verify_comment(self, entry, deadline):
         bundle = bundle_at(self.store, entry["pr"], entry["generation"])
@@ -589,6 +599,12 @@ class Delivery:
         if entry["kind"] == "board":
             return self.board.deliver(entry, deadline)
         raise OSError("unknown delivery kind")
+
+    def confirmed(self, entry):
+        selected = self.selected(entry)
+        if selected is not self:
+            return getattr(selected, "confirmed", lambda e: None)(entry)
+        return self.publication.confirmed(entry) if entry["kind"] == "publish" else None
 
     def current(self, entry):
         selected = self.selected(entry)

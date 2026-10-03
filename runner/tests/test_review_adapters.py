@@ -864,6 +864,21 @@ class LocalPublication(unittest.TestCase):
             atomic(claim, dict(generation=2, status="deferred", attempts=[], selected={}))
             self.assertFalse(Store.current_matches(self.publisher, entry, receipt))
 
+    def test_a_pages_confirmed_upload_settles_a_later_publish_until_it_changes(self):
+        target = "page:test/report.html"
+        self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
+        first = dict(id="pub1", pr=PR, generation="op1", kind="publish", target=target, gate="page")
+        later = dict(first, id="pub2", generation="op2")
+        with try_lock(self.store.locks, target):
+            self.publisher.deliver(first, time.monotonic() + 10)
+            confirmed = self.publisher.confirmed(later)
+            self.assertTrue(self.store.contained(later, confirmed, self.publisher))
+        self.store.merge_membership(target, {"pr:owner/repo#2": dict(ticket=2, removed=False)})
+        with try_lock(self.store.locks, target):
+            self.assertFalse(self.store.contained(later, confirmed, self.publisher))
+        # a retained generation page is never settled this way
+        self.assertIsNone(self.publisher.confirmed(dict(later, retained=True)))
+
     def test_a_landing_page_keeps_its_served_sections_in_its_route_history(self):
         target = "page:test/DevCallReviews/2026_10_04/A/devcall_pr_reviews.html"
         self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
@@ -1558,7 +1573,10 @@ class PhaseController(unittest.TestCase):
                 for intent in read(path)["intents"]
                 for patch in intent.get("patches", {}).values()
             ]
-            self.assertTrue(any(p["ticket"] == 99 and p["removed"] for p in patches))
+            # journalled, or (changing nothing a page shows) merged directly
+            row = controller.store.merge_membership("page:stub/report.html", {}).get(PR, {})
+            self.assertTrue(any(p["ticket"] == 99 and p["removed"] for p in patches)
+                            or (row.get("ticket") == 99 and row.get("removed")))
 
 
 if __name__ == "__main__":

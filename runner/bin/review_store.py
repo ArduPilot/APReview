@@ -7,6 +7,8 @@ import os
 from pathlib import Path
 import shutil
 import time
+
+import review_metrics
 import uuid
 
 from review_lock import acquire, canonical, region, try_lock
@@ -586,7 +588,15 @@ class Store:
         for other in batch:
             if deadline and time.monotonic() >= deadline:
                 return
-            self.receipt(other, **result)
+            self.settle_from(other, result)
+
+    def settle_from(self, entry, result):
+        """Receipt entry from another upload of its page, with its own state:
+        superseded when its PR has left the page, as delivery decides it."""
+        rows = read(self.root / "membership" / (digest(canonical(entry["target"])) + ".json"), {})
+        removed = (isinstance(entry["generation"], int) and not entry.get("retained")
+                   and rows.get(entry["pr"], {}).get("removed"))
+        self.receipt(entry, **dict(result, state="superseded" if removed else "published"))
 
     def settled(self, entry):
         for dep in entry.get("dependencies", []):
@@ -710,9 +720,13 @@ class Store:
                             # run owes dozens of the same page.
                             whole = entry["kind"] == "publish" and not entry.get("retained")
                             target = canonical(entry["target"]) if whole else None
-                            done = self.__dict__.setdefault("_rendered", {}).get(target)
+                            # an upload this drain made, or the page's last
+                            # verified upload by anyone, proven by rendering now
+                            done = self.__dict__.setdefault("_rendered", {}).get(target) or (
+                                getattr(adapter, "confirmed", lambda e: None)(entry) if whole else None)
                             if done and self.contained(entry, done, adapter):
-                                self.receipt(entry, **done)
+                                self.settle_from(entry, done)
+                                review_metrics.count("local", "publish settled by a render")
                                 continue
                             delivered = True
                             entry["state"] = "sending"
