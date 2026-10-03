@@ -97,8 +97,10 @@ class Publication:
             raise OSError("served page exceeds bound")
         return verify(raw, expected)
 
-    def render(self, entry):
-        """The page's bytes as the store stands, and the receipts it read."""
+    def render(self, entry, commit=False):
+        """The page's bytes as the store stands, and the receipts it read.
+        Nothing is saved: a landing page's routes are kept in
+        self.renderer.pending until the page is really published."""
         target = entry["target"]
         endpoint, path = self.endpoint(target)
         retained = (
@@ -133,22 +135,26 @@ class Publication:
                         target=receipt["target"],
                     )
             with review_metrics.timed("local", "render landing"):
-                raw = self.renderer.landing(date, pages)
+                raw = self.renderer.landing(date, pages, commit=commit)
         else:
             consumed = []
             with review_metrics.timed("local", "render page"):
                 raw = self.renderer.render(target, retained)
         return raw, consumed
 
-    def page_digest(self, entry):
-        """What the page would be now: equal to what was uploaded proves the
-        upload already shows the store's current state. Local work only."""
-        return verify(self.render(entry)[0])["page_digest"]
+    def current(self, entry):
+        """What the page would be now, and the revision last published. A
+        render equal to an upload that is still the latest publication of the
+        page proves that upload shows the store's current state. Local only."""
+        directory = self.store.root / "pages" / digest(entry["target"])
+        return dict(page_digest=verify(self.render(entry)[0])["page_digest"],
+                    revision=read(directory / "revision.json", 0))
 
     def deliver(self, entry, deadline):
         target = entry["target"]
         endpoint, path = self.endpoint(target)
         raw, consumed = self.render(entry)
+        landing = bool(re.fullmatch(r"DevCallReviews/\d{4}[-_]\d{2}[-_]\d{2}/devcall_pr_reviews.html", path))
         expected = verify(raw)
         directory = self.store.root / "pages" / digest(target)
         mkdir(directory)
@@ -172,6 +178,9 @@ class Publication:
             raise OSError("served page differs from rendered page")
         revision = read(directory / "revision.json", 0) + 1
         atomic(directory / "revision.json", revision)
+        if landing:
+            # routes saved only for a page that was really served
+            atomic(*self.renderer.pending)
         rows = read(self.store.root / "membership" / (digest(target) + ".json"), {})
         removed = (
             isinstance(entry["generation"], int)
@@ -574,11 +583,11 @@ class Delivery:
             return self.board.deliver(entry, deadline)
         raise OSError("unknown delivery kind")
 
-    def page_digest(self, entry):
+    def current(self, entry):
         selected = self.selected(entry)
         if selected is not self:
-            return getattr(selected, "page_digest", lambda e: None)(entry)
-        return self.publication.page_digest(entry) if entry["kind"] == "publish" else None
+            return getattr(selected, "current", lambda e: None)(entry)
+        return self.publication.current(entry) if entry["kind"] == "publish" else None
 
     def reconcile(self, entry, deadline):
         selected = self.selected(entry)

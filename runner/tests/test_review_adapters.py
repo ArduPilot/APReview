@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from review_fixtures import BIN, PR, candidate, complete_claim, stop, until, workspace, python
-from review_store import Store, atomic, delivery_id, read
+from review_store import Store, atomic, delivery_id, digest, read
 from review_lock import try_lock
 from review_github import GitHub
 from review_discovery import Discovery, POST, normal_patch, rebase_only
@@ -845,11 +845,26 @@ class LocalPublication(unittest.TestCase):
         entry = dict(id="pub", pr=PR, generation="op", kind="publish", target=target, gate="page")
         with try_lock(self.store.locks, target):
             receipt = self.publisher.deliver(entry, time.monotonic() + 10)
-            self.assertEqual(self.publisher.page_digest(entry), receipt["page_digest"])
+            self.assertTrue(Store.current_matches(self.publisher, entry, receipt))
+            # another publication of the page since: the upload is no longer
+            # what is served, whatever the render says
+            directory = self.store.root / "pages" / digest(target)
+            atomic(directory / "revision.json", receipt["revision"] + 1)
+            self.assertFalse(Store.current_matches(self.publisher, entry, receipt))
+            atomic(directory / "revision.json", receipt["revision"])
             # a claim change alters the page with membership untouched, so the
             # earlier upload no longer proves anything
             atomic(claim, dict(generation=2, status="deferred", attempts=[], selected={}))
-            self.assertNotEqual(self.publisher.page_digest(entry), receipt["page_digest"])
+            self.assertFalse(Store.current_matches(self.publisher, entry, receipt))
+
+    def test_a_probe_render_of_a_landing_page_saves_no_routes(self):
+        routes = self.store.root / "landing" / "2026_10_04.json"
+        renderer = Renderer(self.store)
+        renderer.landing("2026_10_04", {"A": dict(path="A/devcall_pr_reviews.html", anchors=["pr-1"], target=None)},
+                         commit=False)
+        self.assertFalse(routes.exists())
+        renderer.landing("2026_10_04", {"A": dict(path="A/devcall_pr_reviews.html", anchors=["pr-1"], target=None)})
+        self.assertEqual(read(routes), {"pr-1": "A/devcall_pr_reviews.html"})
 
     def test_publication_uses_frozen_rsync_auth_options(self):
         from review_delivery import run_external

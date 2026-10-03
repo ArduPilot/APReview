@@ -449,6 +449,34 @@ class ReviewStore(unittest.TestCase):
         delivered = sorted(read(p)["entry"]["id"] for p in adapter.root.glob("*.json"))
         self.assertEqual(delivered, ["land1", "land2"])
 
+    def test_coalescing_settles_only_what_was_ready_before_its_render(self):
+        landing = "page:end/2026_10_04/devcall_pr_reviews.html"
+        outbox, receipts = self.root / "outbox", self.root / "receipts"
+        self.store.receipt(dict(id="label1", pr="pr:o/r#1", generation="op1", kind="publish",
+                                target="page:end/2026_10_04/A/devcall_pr_reviews.html"), "published")
+        for n in (1, 2, 3):
+            atomic(outbox / f"land{n}.json", dict(id=f"land{n}", pr=f"pr:o/r#{n}", generation=f"op{n}",
+                                                  kind="publish", target=landing, gate="page", landing=True,
+                                                  dependencies=["label1" if n < 3 else "label3"], state="owed",
+                                                  failures=0, next_attempt=0))
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        real = adapter.current
+        def current(entry, calls=[]):
+            calls.append(1)
+            if len(calls) == 2:
+                # land3's dependency settles after the batch was chosen and
+                # before the render; the stub page does not change with it
+                self.store.receipt(dict(id="label3", pr="pr:o/r#3", generation="op3", kind="publish",
+                                        target="page:end/2026_10_04/A/devcall_pr_reviews.html"), "published")
+            return {"page_digest": "same"}
+        adapter.current = current
+        real_deliver = adapter.deliver
+        adapter.deliver = lambda entry, deadline: dict(real_deliver(entry, deadline), page_digest="same")
+        self.store.drain(adapter, limit=1)
+        settled = sorted(p.stem for p in receipts.glob("land*.json"))
+        self.assertEqual(settled, ["land1", "land2"])
+
     def test_tombstones_and_accepted_generation_are_independent(self):
         self.accept()
         page = "page:end/latest"

@@ -557,13 +557,13 @@ class Store:
 
     SETTLED = ("published", "posted", "not_applicable", "synced", "held", "superseded")
 
-    def _coalesce(self, entry, result, adapter):
+    def _coalesce(self, entry, result, adapter, deadline=None):
         """One publish of a page satisfies every other owed publish of it that
-        is ready, when the page rendered now is byte for byte what was
-        uploaded: the upload then shows everything the store holds. Caller
-        holds the page region."""
+        was ready before the page was rendered again here, when that render
+        is byte for byte what was uploaded: the upload then shows everything
+        those entries wait on. Caller holds the page region."""
         target = canonical(entry["target"])
-        current = None
+        batch = []
         for path in (self.root / "outbox").glob("*.json"):
             other = read(path)
             if (not other or other["id"] == entry["id"] or other["kind"] != "publish"
@@ -573,11 +573,14 @@ class Store:
             if (self.root / "receipts" / (other["id"] + ".json")).exists():
                 unlink(path)
                 continue
-            if not self.settled(other):
-                continue
-            if current is None:
-                current = self.page_digest(adapter, entry)
-            if not current or current != result.get("page_digest"):
+            if self.settled(other):
+                batch.append(other)
+        # the batch is frozen before the render, so it can only have seen
+        # their dependencies; anything settling later waits its own turn
+        if not batch or not self.current_matches(adapter, entry, result):
+            return
+        for other in batch:
+            if deadline and time.monotonic() >= deadline:
                 return
             self.receipt(other, **result)
 
@@ -590,20 +593,22 @@ class Store:
 
     def contained(self, entry, result, adapter):
         """A ready publish is satisfied by an earlier upload of its page when
-        the page rendered now, after its dependencies settled, has the same
-        bytes. A local render is the proof: membership alone is not, since a
-        page also shows claims and receipts, and receipt timestamps are not,
-        since a receipt can be renamed into place after a render read the
-        directory."""
-        return (self.settled(entry) and bool(result.get("page_digest"))
-                and self.page_digest(adapter, entry) == result["page_digest"])
+        that upload is still the page's latest publication and the page
+        rendered now, after the entry's dependencies settled, has the same
+        bytes. Membership alone is not proof, since a page also shows claims
+        and receipts; nor are receipt timestamps, since a receipt can be
+        renamed into place after a render read the directory."""
+        return self.settled(entry) and self.current_matches(adapter, entry, result)
 
     @staticmethod
-    def page_digest(adapter, entry):
+    def current_matches(adapter, entry, result):
         try:
-            return getattr(adapter, "page_digest", lambda e: None)(entry)
+            now = getattr(adapter, "current", lambda e: None)(entry)
         except (OSError, KeyError, ValueError):
-            return None
+            return False
+        if not now or not result.get("page_digest") or now.get("page_digest") != result["page_digest"]:
+            return False
+        return "revision" not in result or now.get("revision") == result["revision"]
 
     def side_locks(self, entry, dependencies, gate):
         """Keep destination ownership through both the adapter call and receipt."""
@@ -714,7 +719,7 @@ class Store:
                                 self._rendered[target] = result
                     self.receipt(entry, **result)
                     if entry["kind"] == "publish" and entry.get("gate") == "page" and delivered:
-                        self._coalesce(entry, result, adapter)
+                        self._coalesce(entry, result, adapter, deadline)
                 except (OSError, TimeoutError) as error:
                     entry["failures"] += 1
                     entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
@@ -743,11 +748,11 @@ class StubAdapter:
         result = {"state": entry.get("outcome", states.get(entry["kind"], "published")),
                   "payload_digest": entry["payload_digest"], "target_id": entry["id"]}
         if entry["kind"] == "publish":
-            result["page_digest"] = self.page_digest(entry)
+            result["page_digest"] = self.current(entry)["page_digest"]
         atomic(self.root / (entry["id"] + ".json"), {"entry": entry, "result": result})
         return result
 
-    def page_digest(self, entry):
+    def current(self, entry):
         """The stub's page is its membership, and for a landing page the label
         publishes it can see, as the real renderer reads them."""
         path = self.root.parent / "membership" / (digest(canonical(entry["target"])) + ".json")
@@ -757,7 +762,7 @@ class StubAdapter:
             page = "empty"
         if entry.get("landing"):
             page += " ".join(sorted(p.name for p in (self.root.parent / "receipts").glob("*.json")))
-        return digest(page)
+        return dict(page_digest=digest(page))
 
     def reconcile(self, entry, deadline):
         old = read(self.root / (entry["id"] + ".json"))

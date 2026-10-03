@@ -479,8 +479,10 @@ class Renderer:
             )
         return body
 
-    def landing(self, date, pages):
-        """Caller owns the landing page region. Keep served old routes."""
+    def landing(self, date, pages, commit=True):
+        """Caller owns the landing page region. Keep served old routes. With
+        commit false the routes are left in self.pending for the caller to
+        save once the page is really published; a probe render saves nothing."""
         path = self.store.root / "landing" / (date + ".json")
         previous = read(path, {})
         served = {a: [] for p in pages.values() for a in p["anchors"]}
@@ -497,7 +499,6 @@ class Renderer:
             routes[a] = previous[a] if previous.get(a) in candidates else candidates[0]
         for a in previous.keys() - routes.keys():
             routes[a] = None
-        atomic(path, routes)
         # The dated page is the call's report itself, as the command's was:
         # the highest-priority label's full page, with the others linked and
         # their anchors routed.
@@ -514,6 +515,11 @@ class Renderer:
             # the sections this body really has: the label's receipt was read
             # earlier, and its membership may have changed since
             local = set(re.findall(r'<section id="([^"]+)"', body))
+            # a section served here is a route to keep even before a label
+            # receipt records it
+            for a in local:
+                if routes.get(a) is None:
+                    routes[a] = pages[top]["path"]
         else:
             body = (
                 '<!-- reviewprs-manifest v1 heads="" -->\n<h1>Reviews for ' + escape(date) + "</h1>\n"
@@ -538,4 +544,7 @@ class Renderer:
             + mapping
             + ';const a=decodeURIComponent(location.hash.slice(1));if(routes[a])location.replace(routes[a]+"#"+encodeURIComponent(a));</script>\n'
         )
+        self.pending = (path, routes)
+        if commit:
+            atomic(path, routes)
         return seal(body)
