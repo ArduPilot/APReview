@@ -84,6 +84,8 @@ def _prepare(store, path, job, config):
     env["UV_CACHE_DIR"] = str(cache / "uv")
     env["PIP_CACHE_DIR"] = str(cache / "pip")
     env["npm_config_cache"] = str(cache / "npm")
+    # the wrapper exports it, but a systemd guardian need not inherit that
+    env.setdefault("CCACHE_DIR", str(cache.parent / "ccache"))
     for name in ("venvs", "uv", "pip", "npm"):
         mkdir(cache / name)
     env["REVIEW_DATA"] = str(store.root)
