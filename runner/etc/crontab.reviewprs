@@ -60,10 +60,10 @@ MAILTO=""
 # attempts by recorded identity; no-ops while an old run is active.
 50 * * * *   $HOME/review/bin/reap-orphans.sh >> $HOME/review/logs/reap.log 2>&1
 # Store garbage collection: reachability first, then age (review-gc.py).
-# Reports only until --apply is added; --legacy also removes the retired
-# path's work directories. It does nothing while a run is live, so it tries
-# hourly at :35, between the :13 and :47 runs.
-35 * * * *   nice ionice -c3 $HOME/review/bin/review-gc.py --stats >> $HOME/review/logs/gc.log 2>&1
+# --legacy also removes the retired path's work directories. It does nothing
+# while a run is live, so it tries hourly at :35, between the :13 and :47
+# runs, and stops deleting after its time budget.
+35 * * * *   nice ionice -c3 $HOME/review/bin/review-gc.py --apply --legacy --stats >> $HOME/review/logs/gc.log 2>&1
 
 # Sample Claude's real usage meter hourly, so the dashboard has a trace even
 # across stretches with no runs. `claude -p /usage` reports the true session and
