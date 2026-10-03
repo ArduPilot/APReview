@@ -249,62 +249,79 @@ class Supervisor:
             # Already journalled, perhaps with some destinations left out:
             # never rebuilt, since recovery fans out what is stored.
             return
-        if quiet and intents:
-            # A pure re-observation (discovery, reuse) usually changes nothing
-            # a page shows. Each destination's merge is worked out first and
-            # written directly only when the page would look the same, so its
-            # ticket still fences older queued observations and no debt is
-            # created; a visible change, a busy page or a refused merge
-            # journals a projection and publish as before.
+        if intents:
+            # Each row records what its page was last asked to show. A pure
+            # re-observation (discovery, reuse) that would show exactly that
+            # is merged directly, its ticket still fencing older queued
+            # observations, and journals nothing. Anything else journals a
+            # projection and publish, carrying what the page will now show;
+            # so a claim or comment that changes the page after its publish
+            # differs at the next observation, which publishes it.
             kept = []
             for projection, publish in zip(intents[::2], intents[1::2]):
-                if not self.merged_unchanged(projection["target"], pr, projection["patches"][pr]):
-                    kept += [projection, publish]
+                shown = self.examine(projection["target"], pr, projection["patches"][pr], quiet)
+                if shown is True:
+                    continue
+                if shown is not None:
+                    projection["patches"][pr]["shown"] = shown
+                kept += [projection, publish]
             intents = kept
         if intents:
             intents.extend(self.landing_intents(pr, operation, intents, gate="page"))
             self.store.journal(self.run_id, self.phase_name(phase), pr, intents)
 
-    @staticmethod
-    def visible(row, claim):
+    def visible(self, row, pr):
         """What a page shows from a membership row, as review_render does:
-        whether it is listed, which generation, the CI state and the day it
-        was seen, and the progress note, which a claim decides when there is
-        one."""
+        listed or not, the generation, CI state and the day it was seen, the
+        progress note (decided by the claim when there is one), and the
+        comment link or held command from that generation's receipts."""
         if not row or row.get("removed", False):
             return None
         ci = row.get("ci") or {}
         generation = row.get("generation")
+        claim = self.store.claim(pr)
         if claim:
             progress = ("accepted" if generation is not None and generation >= claim["generation"]
                         else claim["status"])
         else:
             progress = row.get("progress")
-        return (generation, ci.get("state"), (ci.get("at") or "")[:10], progress)
+        comments = []
+        if generation is not None:
+            from review_render import bundle_at
+            bundle = bundle_at(self.store, pr, generation) or {}
+            if not bundle.get("legacy"):
+                for intent in bundle.get("intents", []):
+                    if intent["kind"] in ("comment", "note"):
+                        r = read(self.store.root / "receipts" / (intent["id"] + ".json"), {})
+                        comments.append([r.get("url"), r.get("manual_command")])
+        return [generation, ci.get("state"), (ci.get("at") or "")[:10], progress, comments]
 
-    def merged_unchanged(self, target, pr, patch):
-        """Merge one observation directly; True when the page would look the
-        same. Anything uncertain (page busy, a merge refused) journals."""
+    def examine(self, target, pr, patch, quiet):
+        """True when a quiet observation was merged directly, the page showing
+        what it last was asked to; otherwise what the page will show after
+        this merge, or None when the page is busy or the merge refused. The
+        rows compared are exactly the rows written."""
         try:
             lock = try_lock(self.store.locks, target)
         except RuntimeError:
-            return False
+            return None
         if lock is None:
-            return False
+            return None
         try:
             with lock:
+                rows = self.store._merge_membership(lock, target, {pr: patch}, write=False)
                 path = self.store.root / "membership" / (digest(canonical(target)) + ".json")
-                claim = self.store.claim(pr)
-                before = self.visible(read(path, {}).get(pr), claim)
-                after = self.visible(self.store._merge_membership(lock, target, {pr: patch}, write=False).get(pr), claim)
-                if before != after:
-                    review_metrics.count("local", "projection changed")
-                    return False
-                self.store._merge_membership(lock, target, {pr: patch})
-                review_metrics.count("local", "projection merged unchanged")
-                return True
+                last = read(path, {}).get(pr, {}).get("shown")
+                after = self.visible(rows.get(pr), pr)
+                if quiet and after == last:
+                    rows[pr]["shown"] = last
+                    self.store.write_membership(lock, target, rows)
+                    review_metrics.count("local", "projection merged unchanged")
+                    return True
+                review_metrics.count("local", "projection journalled")
+                return after
         except (ValueError, OSError):
-            return False
+            return None
 
     def save(self, force=False):
         now = time.monotonic()
@@ -370,6 +387,13 @@ class Supervisor:
         candidate = state.get("candidate") or next(
             (c for c in self.config["candidates"] if c["pr"] == pr), None
         )
+        # the claim first: the page rendered for this projection shows it
+        lock = self.owned.get(pr)
+        if lock and review == "deferred":
+            claim = self.store.claim(pr)
+            if claim and claim["run"] == self.run_id:
+                claim["status"] = "deferred"
+                self.store.save_claim(lock, pr, claim)
         if candidate:
             self.project(
                 candidate,
@@ -382,10 +406,6 @@ class Supervisor:
             state["reason"] = reason
         lock = self.owned.pop(pr, None)
         if lock:
-            claim = self.store.claim(pr)
-            if claim and claim["run"] == self.run_id and review == "deferred":
-                claim["status"] = "deferred"
-                self.store.save_claim(lock, pr, claim)
             lock.close()
 
     PREFETCH_AGE = 60

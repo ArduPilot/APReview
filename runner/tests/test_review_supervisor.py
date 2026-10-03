@@ -438,6 +438,29 @@ class ReviewSupervisor(unittest.TestCase):
         # crash before journalling leaves the change still to be made
         self.assertEqual(rows()[PR]["ci"]["state"], "success")
 
+    def test_a_page_change_outside_membership_is_published_at_the_next_observation(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = Store(self.root / "data")
+        supervisor.run_id = str(self.root / "run")
+        supervisor.config = {"stub": True, "mode": "followup", "phases": {}, "configuration": {},
+                             "observation": 0}
+        page = "page:stub/end/a.html"
+        ops = lambda: len(list((supervisor.store.root / "operations").glob("*.json")))
+        ci = {"state": "success", "at": "2026-10-04T01:00"}
+        c = dict(candidate(), pr=PR, destinations=[page], ci=ci)
+        supervisor._project(dict(c, observation=1), "discovery", quiet=True)
+        supervisor.store.drain(StubAdapter(supervisor.store.root))
+        supervisor.run_id = str(self.root / "run2")
+        supervisor._project(dict(c, observation=2), "discovery", quiet=True)
+        self.assertEqual(ops(), 1)                       # unchanged: suppressed
+        # a claim appears after the page was published: what it shows differs
+        # from what it was last asked to show, so the next observation publishes
+        atomic(supervisor.store.pr_dir(PR) / "claim.json",
+               dict(generation=1, status="deferred", attempts=[], selected={}))
+        supervisor.run_id = str(self.root / "run3")
+        supervisor._project(dict(c, observation=3), "discovery", quiet=True)
+        self.assertEqual(ops(), 2)
+
     def test_a_partly_suppressed_discovery_resumes_and_feeds_acceptance(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.store = Store(self.root / "data")
@@ -447,7 +470,8 @@ class ReviewSupervisor(unittest.TestCase):
         a, b = "page:stub/end/a.html", "page:stub/end/b.html"
         ci = {"state": "success", "at": "2026-10-04T01:00"}
         supervisor.store.merge_membership(a, {PR: {"ticket": 1, "removed": False, "ci": ci,
-                                                   "progress": "discovery"}})
+                                                   "progress": "discovery",
+                                                   "shown": [None, "success", "2026-10-04", "discovery", []]}})
         c = dict(candidate(), pr=PR, destinations=[a, b], ci=ci, observation=2)
         supervisor._project(c, "discovery", quiet=True)     # a unchanged, b new
         [op] = (supervisor.store.root / "operations").glob("*.json")
