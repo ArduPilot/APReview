@@ -553,7 +553,6 @@ class Supervisor:
         return "failed" if cleanup_attempt(Path(path), time.monotonic() + 5) else "blocked"
 
     def start_attempt(self, candidate, kind, claim):
-        review_metrics.count("inference", kind)
         pr = candidate["pr"]
         state = self.states[pr]
         attempt_id = uuid.uuid4().hex
@@ -633,6 +632,7 @@ class Supervisor:
         state["attempts"].setdefault(kind, []).append(str(path))
         self.save(force=True)
         child = launch(self.store.root, path, self.owned[pr])
+        review_metrics.count("inference", "launched " + kind)
         if child:
             self.children.append(child)
 
@@ -963,6 +963,10 @@ class Supervisor:
         cursor = read(self.directory / "recovery.json")
         if startup and cursor is None:
             cursor = self.startup_work
+        with review_metrics.scope("drain"):
+            self._bounded_drain(start, budget, seconds, startup, cursor)
+
+    def _bounded_drain(self, start, budget, seconds, startup, cursor):
         pending = self.store.recover(cursor, limit=min(50, budget), seconds=seconds)
         atomic(self.directory / "recovery.json", pending or None)
         self.store.drain(
