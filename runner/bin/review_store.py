@@ -419,7 +419,9 @@ class Store:
         with lock:
             return self._merge_membership(lock, page, patches)
 
-    def _merge_membership(self, lock, page, patches):
+    def _merge_membership(self, lock, page, patches, write=True):
+        """Merge patches into a page's membership. With write false, return
+        what the rows would become and change nothing."""
         if lock.closed or lock.region != region(page):
             raise RuntimeError("membership page ownership required")
         path = self.root / "membership" / (digest(canonical(page)) + ".json")
@@ -444,7 +446,8 @@ class Store:
                 if generation >= row.get("generation", 0):
                     row["generation"] = generation
             rows[pr] = row
-        atomic(path, rows, self.crash, "membership")
+        if write:
+            atomic(path, rows, self.crash, "membership")
         return rows
 
     def journal(self, run, phase, pr, intents):

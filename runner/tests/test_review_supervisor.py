@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 from review_fixtures import BIN, PR, candidate, python, stop, until, workspace
 from review_lock import try_lock
-from review_store import Store, atomic, read
+from review_store import Store, StubAdapter, atomic, read
 
 SPEC = importlib.util.spec_from_file_location("review_supervisor", BIN / "review-supervisor.py")
 SUPERVISOR = importlib.util.module_from_spec(SPEC)
@@ -417,12 +417,13 @@ class ReviewSupervisor(unittest.TestCase):
         ops = lambda: sorted((supervisor.store.root / "operations").glob("*.json"))
         rows = lambda: supervisor.store.merge_membership(page, {})
         c = dict(candidate(), pr=PR, destinations=[page], ci={"state": "success", "at": "2026-10-04T01:00"})
-        supervisor._project(dict(c, observation=1), "discovery")
+        supervisor._project(dict(c, observation=1), "discovery", quiet=True)
         self.assertEqual(len(ops()), 1)                 # new on the page: journalled
+        supervisor.store.drain(StubAdapter(supervisor.store.root))
         # observed again: same CI state the same day, so the page is unchanged
         supervisor.run_id = str(self.root / "run2")
         supervisor._project(dict(c, observation=2, ci={"state": "success", "at": "2026-10-04T05:00"}),
-                            "discovery")
+                            "discovery", quiet=True)
         self.assertEqual(len(ops()), 1)
         self.assertEqual(rows()[PR]["ticket"], 2)       # but its ticket still fences
         # an older queued removal arriving late cannot undo it
@@ -431,8 +432,33 @@ class ReviewSupervisor(unittest.TestCase):
         # a visible change is journalled
         supervisor.run_id = str(self.root / "run3")
         supervisor._project(dict(c, observation=3, ci={"state": "failure", "at": "2026-10-04T06:00"}),
-                            "discovery")
+                            "discovery", quiet=True)
         self.assertEqual(len(ops()), 2)
+        # and a visible change is never written ahead of its journal, so a
+        # crash before journalling leaves the change still to be made
+        self.assertEqual(rows()[PR]["ci"]["state"], "success")
+
+    def test_a_partly_suppressed_discovery_resumes_and_feeds_acceptance(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = Store(self.root / "data")
+        supervisor.run_id = str(self.root / "run")
+        supervisor.config = {"stub": True, "mode": "followup", "phases": {}, "configuration": {},
+                             "observation": 0}
+        a, b = "page:stub/end/a.html", "page:stub/end/b.html"
+        ci = {"state": "success", "at": "2026-10-04T01:00"}
+        supervisor.store.merge_membership(a, {PR: {"ticket": 1, "removed": False, "ci": ci,
+                                                   "progress": "discovery"}})
+        c = dict(candidate(), pr=PR, destinations=[a, b], ci=ci, observation=2)
+        supervisor._project(c, "discovery", quiet=True)     # a unchanged, b new
+        [op] = (supervisor.store.root / "operations").glob("*.json")
+        self.assertEqual([i["target"] for i in read(op)["intents"] if i["kind"] == "projection"], [b])
+        # a resumed controller replays discovery: no identity error, no change
+        supervisor._project(c, "discovery", quiet=True)
+        self.assertEqual(len(list((supervisor.store.root / "operations").glob("*.json"))), 1)
+        # acceptance waits on discovery's projection of b only
+        deps = {x["target"]: x["dependencies"] for x in supervisor.intents(c, 1) if x["kind"] == "projection"}
+        self.assertEqual(deps[a], [])
+        self.assertEqual(len(deps[b]), 1)
 
     def test_the_loops_own_drain_is_short_while_prs_wait(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)

@@ -180,7 +180,7 @@ class Supervisor:
             else ""
         )
 
-    def project(self, candidate, phase, generation=None):
+    def project(self, candidate, phase, generation=None, quiet=False):
         root = self.config["configuration"].get("routing_root")
         pause = None
         if root and candidate["pr"] not in self.owned:
@@ -195,12 +195,12 @@ class Supervisor:
                 from review_routing import load, owner
                 if owner(load(root), candidate.get("mode", self.config["mode"]), candidate["repository"]) != "new":
                     return
-            self._project(candidate, phase, generation)
+            self._project(candidate, phase, generation, quiet)
         finally:
             if pause:
                 pause.close()
 
-    def _project(self, candidate, phase, generation=None):
+    def _project(self, candidate, phase, generation=None, quiet=False):
         pr = candidate["pr"]
         patch = {
             "ticket": candidate.get("observation", self.config["observation"]),
@@ -243,14 +243,19 @@ class Supervisor:
                     "dependencies": [delivery_id(pr, operation, "projection", target)],
                 }
             )
-        # Most projections change nothing a page shows: a reused PR is
-        # observed again every run. Merge those straight into membership, so
-        # the observation's ticket still fences older queued ones, and journal
-        # nothing for them; only a visible change earns a projection and a
-        # publish. A journalled operation keeps its exact intents on resume.
         journalled = (self.store.root / "operations"
                       / (digest([self.run_id, self.phase_name(phase), canonical(pr)]) + ".json"))
-        if intents and not journalled.exists():
+        if journalled.exists():
+            # Already journalled, perhaps with some destinations left out:
+            # never rebuilt, since recovery fans out what is stored.
+            return
+        if quiet and intents:
+            # A pure re-observation (discovery, reuse) usually changes nothing
+            # a page shows. Each destination's merge is worked out first and
+            # written directly only when the page would look the same, so its
+            # ticket still fences older queued observations and no debt is
+            # created; a visible change, a busy page or a refused merge
+            # journals a projection and publish as before.
             kept = []
             for projection, publish in zip(intents[::2], intents[1::2]):
                 if not self.merged_unchanged(projection["target"], pr, projection["patches"][pr]):
@@ -261,15 +266,21 @@ class Supervisor:
             self.store.journal(self.run_id, self.phase_name(phase), pr, intents)
 
     @staticmethod
-    def visible(row, claimed):
-        """What a page shows from a membership row (review_render): whether it
-        is listed, which generation, the CI state and the day it was seen,
-        and the progress note, which a claim overrides."""
-        if not row or row.get("removed", True):
+    def visible(row, claim):
+        """What a page shows from a membership row, as review_render does:
+        whether it is listed, which generation, the CI state and the day it
+        was seen, and the progress note, which a claim decides when there is
+        one."""
+        if not row or row.get("removed", False):
             return None
         ci = row.get("ci") or {}
-        return (row.get("generation"), ci.get("state"), (ci.get("at") or "")[:10],
-                None if claimed else row.get("progress"))
+        generation = row.get("generation")
+        if claim:
+            progress = ("accepted" if generation is not None and generation >= claim["generation"]
+                        else claim["status"])
+        else:
+            progress = row.get("progress")
+        return (generation, ci.get("state"), (ci.get("at") or "")[:10], progress)
 
     def merged_unchanged(self, target, pr, patch):
         """Merge one observation directly; True when the page would look the
@@ -283,11 +294,15 @@ class Supervisor:
         try:
             with lock:
                 path = self.store.root / "membership" / (digest(canonical(target)) + ".json")
-                claimed = self.store.claim(pr) is not None
-                before = self.visible(read(path, {}).get(pr), claimed)
-                after = self.visible(self.store._merge_membership(lock, target, {pr: patch}).get(pr), claimed)
-                review_metrics.count("local", "projection merged unchanged" if before == after else "projection changed")
-                return before == after
+                claim = self.store.claim(pr)
+                before = self.visible(read(path, {}).get(pr), claim)
+                after = self.visible(self.store._merge_membership(lock, target, {pr: patch}, write=False).get(pr), claim)
+                if before != after:
+                    review_metrics.count("local", "projection changed")
+                    return False
+                self.store._merge_membership(lock, target, {pr: patch})
+                review_metrics.count("local", "projection merged unchanged")
+                return True
         except (ValueError, OSError):
             return False
 
@@ -360,6 +375,8 @@ class Supervisor:
                 candidate,
                 review,
                 state.get("generation") if review in ("accepted", "reused") else None,
+                # reuse and drops change no claim; deferral and acceptance do
+                quiet=review in ("reused", "dropped"),
             )
         if reason:
             state["reason"] = reason
@@ -492,11 +509,11 @@ class Supervisor:
             )
         ):
             state["generation"] = current["generation"]
-            self.project(fresh, "reuse", current["generation"])
+            self.project(fresh, "reuse", current["generation"], quiet=True)
             self.finish(pr, "accepted" if same_request else "reused")
             return
         if fresh.get("classification") == "REUSE":
-            self.project(fresh, "reuse")
+            self.project(fresh, "reuse", quiet=True)
             self.finish(pr, "reused", fresh.get("reason"))
             return
         claim = self.store.claim(pr)
@@ -838,7 +855,9 @@ class Supervisor:
         # Discovery can skip journalling a PR (pause fence busy, PR not new-
         # owned then); a dependency on its projection would never settle and
         # held the PR's publishes and comment for good.
-        discovered = (self.store.root / "operations" / (operation + ".json")).exists()
+        # per intent: discovery may have journalled only some destinations
+        stored = read(self.store.root / "operations" / (operation + ".json"), {})
+        discovered = {i["id"] for i in stored.get("intents", [])}
         for target in candidate.get("destinations", []):
             target = canonical(target)
             dependency = delivery_id(pr, operation, "projection", target)
@@ -847,7 +866,7 @@ class Supervisor:
                     "kind": "projection",
                     "target": target,
                     "patches": {pr: {"generation": generation}},
-                    "dependencies": [dependency] if discovered or any(
+                    "dependencies": [dependency] if dependency in discovered or any(
                         (self.store.root / d / (dependency + ".json")).exists()
                         for d in ("receipts", "outbox")) else [],
                 }
@@ -982,7 +1001,7 @@ class Supervisor:
 
     def admit_snapshot(self):
         for candidate in self.config["candidates"]:
-            self.project(candidate, "discovery")
+            self.project(candidate, "discovery", quiet=True)
             self.states[candidate["pr"]] = {
                 "review": "pending",
                 "phase": self.config.get("active_phase", "initial"),
@@ -1092,7 +1111,7 @@ class Supervisor:
             os.environ["REVIEW_GUARDIAN_PLAIN"] = "1" if self.config["plain_guardians"] else "0"
             atomic(self.directory / "startup-runs.json", self.startup_runs)
             for candidate in self.config["candidates"]:
-                self.project(candidate, "discovery")
+                self.project(candidate, "discovery", quiet=True)
                 self.states.setdefault(
                     candidate["pr"],
                     {"review": "pending", "publish": {}, "comment": "owed", "board": "owed"},
