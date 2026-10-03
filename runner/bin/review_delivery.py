@@ -97,7 +97,8 @@ class Publication:
             raise OSError("served page exceeds bound")
         return verify(raw, expected)
 
-    def deliver(self, entry, deadline):
+    def render(self, entry):
+        """The page's bytes as the store stands, and the receipts it read."""
         target = entry["target"]
         endpoint, path = self.endpoint(target)
         retained = (
@@ -137,6 +138,17 @@ class Publication:
             consumed = []
             with review_metrics.timed("local", "render page"):
                 raw = self.renderer.render(target, retained)
+        return raw, consumed
+
+    def page_digest(self, entry):
+        """What the page would be now: equal to what was uploaded proves the
+        upload already shows the store's current state. Local work only."""
+        return verify(self.render(entry)[0])["page_digest"]
+
+    def deliver(self, entry, deadline):
+        target = entry["target"]
+        endpoint, path = self.endpoint(target)
+        raw, consumed = self.render(entry)
         expected = verify(raw)
         directory = self.store.root / "pages" / digest(target)
         mkdir(directory)
@@ -561,6 +573,12 @@ class Delivery:
         if entry["kind"] == "board":
             return self.board.deliver(entry, deadline)
         raise OSError("unknown delivery kind")
+
+    def page_digest(self, entry):
+        selected = self.selected(entry)
+        if selected is not self:
+            return getattr(selected, "page_digest", lambda e: None)(entry)
+        return self.publication.page_digest(entry) if entry["kind"] == "publish" else None
 
     def reconcile(self, entry, deadline):
         selected = self.selected(entry)

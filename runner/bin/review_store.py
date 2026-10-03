@@ -557,49 +557,53 @@ class Store:
 
     SETTLED = ("published", "posted", "not_applicable", "synced", "held", "superseded")
 
-    def page_state(self, target):
-        """Digest of a page's membership as it stands; caller holds the page."""
-        try:
-            return digest((self.root / "membership" / (digest(canonical(target)) + ".json")).read_bytes().hex())
-        except OSError:
-            return None
-
-    def _coalesce(self, entry, result, state):
+    def _coalesce(self, entry, result, adapter):
         """One publish of a page satisfies every other owed publish of it that
-        the render provably contained: the page renders its whole membership.
-        Caller holds the page region."""
+        is ready, when the page rendered now is byte for byte what was
+        uploaded: the upload then shows everything the store holds. Caller
+        holds the page region."""
         target = canonical(entry["target"])
+        current = None
         for path in (self.root / "outbox").glob("*.json"):
             other = read(path)
             if (not other or other["id"] == entry["id"] or other["kind"] != "publish"
-                    or other.get("gate") != "page" or canonical(other["target"]) != target):
+                    or other.get("gate") != "page" or canonical(other["target"]) != target
+                    or other.get("retained")):
                 continue
             if (self.root / "receipts" / (other["id"] + ".json")).exists():
                 unlink(path)
                 continue
-            if not self.contained(other, result, state):
+            if not self.settled(other):
                 continue
+            if current is None:
+                current = self.page_digest(adapter, entry)
+            if not current or current != result.get("page_digest"):
+                return
             self.receipt(other, **result)
 
-    def contained(self, entry, result, state):
-        """Whether a render made from page state `state`, which produced
-        `result`, contained everything entry waits on. A projection of the
-        same page is contained when the page is unchanged since that render:
-        merges take the page lock, which delivery holds. Any other dependency
-        (a landing page waits on label pages' publishes, under other locks)
-        must be one the render reports having read. Never by timestamp: a
-        receipt can be renamed into place after a render read the directory."""
-        target = canonical(entry["target"])
+    def settled(self, entry):
         for dep in entry.get("dependencies", []):
             receipt = read(self.root / "receipts" / (dep + ".json"))
             if not receipt or receipt["state"] not in self.SETTLED:
                 return False
-            if receipt.get("kind") == "projection" and canonical(receipt["target"]) == target:
-                if state is None or self.page_state(target) != state:
-                    return False
-            elif dep not in result.get("consumed", ()):
-                return False
         return True
+
+    def contained(self, entry, result, adapter):
+        """A ready publish is satisfied by an earlier upload of its page when
+        the page rendered now, after its dependencies settled, has the same
+        bytes. A local render is the proof: membership alone is not, since a
+        page also shows claims and receipts, and receipt timestamps are not,
+        since a receipt can be renamed into place after a render read the
+        directory."""
+        return (self.settled(entry) and bool(result.get("page_digest"))
+                and self.page_digest(adapter, entry) == result["page_digest"])
+
+    @staticmethod
+    def page_digest(adapter, entry):
+        try:
+            return getattr(adapter, "page_digest", lambda e: None)(entry)
+        except (OSError, KeyError, ValueError):
+            return None
 
     def side_locks(self, entry, dependencies, gate):
         """Keep destination ownership through both the adapter call and receipt."""
@@ -638,7 +642,7 @@ class Store:
             # gets a full minute. Handing it what was left of a short budget
             # failed publishes and comments on a deadline until they gave up.
             deadline = max(budget, time.monotonic() + self.ENTRY_SECONDS)
-            state = None
+            delivered = False
             gate = selected.get("gate", "pr")
             key = selected["target"] if gate == "page" else selected["pr"]
             lock = try_lock(self.locks, key)
@@ -697,21 +701,20 @@ class Store:
                             whole = entry["kind"] == "publish" and not entry.get("retained")
                             target = canonical(entry["target"]) if whole else None
                             done = self.__dict__.setdefault("_rendered", {}).get(target)
-                            if done and self.contained(entry, done[1], done[0]):
-                                self.receipt(entry, **done[1])
+                            if done and self.contained(entry, done, adapter):
+                                self.receipt(entry, **done)
                                 continue
-                            if whole:
-                                state = self.page_state(target)
+                            delivered = True
                             entry["state"] = "sending"
                             entry["payload_digest"] = digest(entry.get("payload", {}))
                             atomic(path, entry)
                             result = adapter.deliver(entry, deadline)
                             self.crash("remote_effect")
                             if whole:
-                                self._rendered[target] = (state, result)
+                                self._rendered[target] = result
                     self.receipt(entry, **result)
-                    if entry["kind"] == "publish" and entry.get("gate") == "page" and state is not None:
-                        self._coalesce(entry, result, state)
+                    if entry["kind"] == "publish" and entry.get("gate") == "page" and delivered:
+                        self._coalesce(entry, result, adapter)
                 except (OSError, TimeoutError) as error:
                     entry["failures"] += 1
                     entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
@@ -739,8 +742,22 @@ class StubAdapter:
                   "deprecate": "deprecated", "note": "posted"}
         result = {"state": entry.get("outcome", states.get(entry["kind"], "published")),
                   "payload_digest": entry["payload_digest"], "target_id": entry["id"]}
+        if entry["kind"] == "publish":
+            result["page_digest"] = self.page_digest(entry)
         atomic(self.root / (entry["id"] + ".json"), {"entry": entry, "result": result})
         return result
+
+    def page_digest(self, entry):
+        """The stub's page is its membership, and for a landing page the label
+        publishes it can see, as the real renderer reads them."""
+        path = self.root.parent / "membership" / (digest(canonical(entry["target"])) + ".json")
+        try:
+            page = path.read_bytes().hex()
+        except OSError:
+            page = "empty"
+        if entry.get("landing"):
+            page += " ".join(sorted(p.name for p in (self.root.parent / "receipts").glob("*.json")))
+        return digest(page)
 
     def reconcile(self, entry, deadline):
         old = read(self.root / (entry["id"] + ".json"))

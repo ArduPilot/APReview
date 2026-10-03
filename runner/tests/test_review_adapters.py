@@ -837,6 +837,20 @@ class LocalPublication(unittest.TestCase):
         self.publisher.verify_comment(comment, time.monotonic() + 5)
         self.assertEqual(verify(path.read_bytes())["sections"][0]["generation"], 1)
 
+    def test_a_local_render_proves_an_upload_current_or_not(self):
+        target = "page:test/report.html"
+        self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
+        claim = self.store.pr_dir(PR) / "claim.json"
+        atomic(claim, dict(generation=2, status="active", attempts=[], selected={}))
+        entry = dict(id="pub", pr=PR, generation="op", kind="publish", target=target, gate="page")
+        with try_lock(self.store.locks, target):
+            receipt = self.publisher.deliver(entry, time.monotonic() + 10)
+            self.assertEqual(self.publisher.page_digest(entry), receipt["page_digest"])
+            # a claim change alters the page with membership untouched, so the
+            # earlier upload no longer proves anything
+            atomic(claim, dict(generation=2, status="deferred", attempts=[], selected={}))
+            self.assertNotEqual(self.publisher.page_digest(entry), receipt["page_digest"])
+
     def test_publication_uses_frozen_rsync_auth_options(self):
         from review_delivery import run_external
         option = "--password-file=/outside/credentials with spaces"

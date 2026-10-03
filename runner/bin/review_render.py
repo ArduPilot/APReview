@@ -511,7 +511,9 @@ class Renderer:
             body = self.body(pages[top]["target"])
             head = body.index("</p>\n", body.index("<h1>")) + len("</p>\n")
             body = body[:head] + nav + body[head:]
-            local = set(pages[top]["anchors"])
+            # the sections this body really has: the label's receipt was read
+            # earlier, and its membership may have changed since
+            local = set(re.findall(r'<section id="([^"]+)"', body))
         else:
             body = (
                 '<!-- reviewprs-manifest v1 heads="" -->\n<h1>Reviews for ' + escape(date) + "</h1>\n"
