@@ -23,7 +23,6 @@ g = GitHub(
 )
 # A controller that died between journalling a page operation and fanning
 # it out leaves entries waiting on it for ever; recover before draining.
-s.recover_slice()
 # One pass takes at most a hundred entries, a few seconds' work; an all run
 # queues some two thousand, so a single pass per cron slot left comments
 # hours behind. Keep passing while entries settle, inside the five minutes.
@@ -32,6 +31,10 @@ s.recover_slice()
 adapter = Delivery(s, g, c)
 deadline = time.monotonic() + BUDGET
 while True:
+    if time.monotonic() < deadline - 30:
+        # a journal fans out only where its page was free; the rest wait for
+        # recovery, which one slice per cron slot reached hours late
+        s.recover_slice()
     before = {p.name for p in (s.root / "outbox").glob("*.json")}
     debts = s.drain(adapter, seconds=min(60, max(0, deadline - time.monotonic())))
     if not debts or time.monotonic() >= deadline:
