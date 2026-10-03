@@ -13,6 +13,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -347,6 +348,38 @@ class Dashboard(unittest.TestCase):
     def quota_section(self, page):
         self.assertIn("<h2>Quotas</h2>", page)
         return page.split("<h2>Quotas</h2>", 1)[1].split("</table>", 1)[0]
+
+    def queue_section(self, page):
+        self.assertIn("<h2>Queues</h2>", page)
+        return page.split("<h2>Queues</h2>", 1)[1].split("</table>", 1)[0]
+
+    def test_queues_show_the_outbox_by_kind_and_state(self):
+        data = os.path.join(self.home, "review", "data")
+        for d in ("outbox", "receipts", "operations"):
+            os.makedirs(os.path.join(data, d), exist_ok=True)
+
+        def put(directory, ident, **fields):
+            with open(os.path.join(data, directory, ident + ".json"), "w") as f:
+                json.dump(dict(id=ident, **fields), f)
+        put("receipts", "done", state="published")
+        put("outbox", "p1", kind="publish", failures=0, next_attempt=0, dependencies=["done"])
+        put("outbox", "c1", kind="comment", failures=0, next_attempt=0, dependencies=["p9"])
+        put("outbox", "c2", kind="comment", failures=2, next_attempt=time.time() + 600, error="GitHub deadline")
+        put("outbox", "b1", kind="board", failures=5, next_attempt=0, error="rate limit exceeded")
+        put("operations", "op1", pr="pr:o/r#1", intents=[{"id": "never-fanned", "kind": "publish", "target": "page:x"}])
+        sec = self.queue_section(self.build())
+        row = lambda name: re.search(r"<tr[^>]*><td>%s</td>(.*?)</tr>" % re.escape(name), sec).group(1)
+        nums = lambda name: re.findall(r'data-sort="(-?\d+)"', row(name))[:5]
+        self.assertEqual(nums("outbox (all)"), ["4", "1", "1", "1", "1"])
+        self.assertEqual(nums("outbox: comment"), ["2", "0", "1", "1", "0"])
+        self.assertIn("rate limit exceeded", row("outbox: board"))
+        self.assertIn('class="bad"', sec.split("outbox: board")[0].rsplit("<tr", 1)[1])
+        self.assertEqual(nums("page operations not yet in the outbox")[0], "1")
+
+    def test_an_empty_store_says_so(self):
+        sec = self.queue_section(self.build())
+        self.assertIn("empty", sec)
+        self.assertNotIn("unreadable", sec)
 
     def test_the_page_is_published_so_identities_are_masked(self):
         # not credentials, but stable identifiers, and this page is public

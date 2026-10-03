@@ -10,7 +10,7 @@ Data sources, and what is real vs derived:
     transcripts. Only token counts. So this page shows Claude tokens and says
     plainly that no percentage is available, rather than inventing one.
 """
-import json, os, re, glob, html, socket, datetime, sys
+import json, os, re, glob, html, socket, datetime, sys, time
 
 HOME = os.path.expanduser('~')
 LOGS = os.path.join(HOME, 'review', 'logs')
@@ -196,7 +196,8 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
 # shape as a wrapper log row. Their wrapper log is skipped above.
 from review_dashboard import summaries                         # noqa: E402
 DATA = os.environ.get('REVIEW_DATA', os.path.join(HOME, 'review', 'data'))
-for sv in summaries(DATA):
+SUMMARIES = summaries(DATA)
+for sv in SUMMARIES:
     try:
         cfg = json.load(open(os.path.join(DATA, 'runs', sv['name'], 'run.json')))
     except Exception:
@@ -676,6 +677,107 @@ def _rollover(q):
     return '<br>'.join(lines)
 
 
+def _age(seconds):
+    if seconds is None:
+        return '&mdash;'
+    m = seconds / 60.0
+    return '%.0fm' % m if m < 120 else ('%.0fh' % (m / 60) if m < 48 * 60 else '%.0fd' % (m / 1440))
+
+
+def queue_rows():
+    """Work waiting anywhere in the store: the outbox by kind, journalled
+    page operations not yet fanned out, and PRs and passes inside live runs."""
+    from review_store import Store
+    settled_states = Store.SETTLED
+    t = time.time()
+    rows = []
+    entries = []
+    for path in glob.glob(os.path.join(DATA, 'outbox', '*.json')):
+        try:
+            e = json.load(open(path))
+            e['_mtime'] = os.path.getmtime(path)
+        except Exception:
+            continue                    # removed by a drain mid-read
+        entries.append(e)
+    receipts = {}
+
+    def settled(dep):
+        if dep not in receipts:
+            try:
+                receipts[dep] = json.load(open(os.path.join(DATA, 'receipts', dep + '.json')))['state'] in settled_states
+            except Exception:
+                receipts[dep] = False
+        return receipts[dep]
+
+    kinds = {}
+    for e in entries:
+        k = kinds.setdefault(e.get('kind', '?'), dict(n=0, ready=0, waiting=0, retrying=0, dead=0, oldest=None, error=''))
+        k['n'] += 1
+        if e.get('failures', 0) >= 5:
+            k['dead'] += 1
+            k['error'] = k['error'] or str(e.get('error') or '')
+        elif e.get('next_attempt', 0) > t:
+            k['retrying'] += 1
+            k['error'] = k['error'] or str(e.get('error') or '')
+        elif all(settled(d) for d in e.get('dependencies', [])):
+            k['ready'] += 1
+        else:
+            k['waiting'] += 1
+        k['oldest'] = max(k['oldest'] or 0, t - e['_mtime'])
+    order = ['projection', 'publish', 'comment', 'note', 'annotation', 'deprecate', 'board']
+    total = dict(n=0, ready=0, waiting=0, retrying=0, dead=0, oldest=None)
+    for name in sorted(kinds, key=lambda x: (order.index(x) if x in order else 99, x)):
+        k = kinds[name]
+        for f in ('n', 'ready', 'waiting', 'retrying', 'dead'):
+            total[f] += k[f]
+        total['oldest'] = max(total['oldest'] or 0, k['oldest'])
+        rows.append(('outbox: %s' % name, k, k['error']))
+    rows.insert(0, ('outbox (all)', total, '' if entries else 'empty'))
+
+    ops, oldest = 0, None
+    for path in glob.glob(os.path.join(DATA, 'operations', '*.json')):
+        try:
+            op = json.load(open(path))
+            mtime = os.path.getmtime(path)
+        except Exception:
+            continue
+        if not all(os.path.exists(os.path.join(DATA, 'receipts', i['id'] + '.json'))
+                   or os.path.exists(os.path.join(DATA, 'outbox', i['id'] + '.json'))
+                   for i in op.get('intents', [])):
+            ops += 1
+            oldest = max(oldest or 0, t - mtime)
+    rows.append(('page operations not yet in the outbox', dict(n=ops, oldest=oldest),
+                 'fanned out by the next drain\'s recovery' if ops else ''))
+
+    pending = review = passes = 0
+    live = [sv for sv in SUMMARIES if sv.get('liveness') == 'live' and sv.get('state') != 'complete']
+    for sv in live:
+        c = sv.get('counts', {})
+        pending += c.get('pending', 0)
+        review += sum(c.get(x, 0) for x in ('claimed', 'reviewing', 'reconciling'))
+        passes += sum(1 for a in sv.get('attempts', [])
+                      if a.get('liveness') == 'live' and a.get('state') not in ('terminal', 'done', 'failed', 'starved'))
+    names = ', '.join(sv['name'].rsplit('-', 1)[0] for sv in live)
+    rows.append(('PRs waiting for admission', dict(n=pending), names))
+    rows.append(('PRs in review', dict(n=review), ''))
+    rows.append(('AI passes in progress', dict(n=passes), ''))
+
+    out = []
+    for name, k, note in rows:
+        cell = lambda f: ('<td data-sort="%d">%d</td>' % (k[f], k[f])) if f in k else '<td data-sort="-1">&mdash;</td>'
+        bad = k.get('dead') or (k.get('n') and name.startswith('outbox') and (k.get('oldest') or 0) > 3600)
+        out.append('<tr%s><td>%s</td>%s%s%s%s%s<td data-sort="%d">%s</td><td class="wrap"><span class="sub">%s</span></td></tr>' % (
+            ' class="bad"' if bad else '', html.escape(name), cell('n'), cell('ready'), cell('waiting'),
+            cell('retrying'), cell('dead'), k.get('oldest') or 0,
+            _age(k.get('oldest')) if k.get('n') else '&mdash;', html.escape(note[:90])))
+    return out
+
+
+try:
+    queue = queue_rows()
+except Exception as error:                 # the page must still build
+    queue = ['<tr><td colspan="8">queues unreadable: %s</td></tr>' % html.escape(str(error)[:120])]
+
 qrows = []
 for q in quotas:
     free = q.get('free_pct')
@@ -820,7 +922,7 @@ td.wrap{white-space:normal}
 table.runs th{white-space:normal}
 .badge{padding:1px 7px;border-radius:10px;font-size:12px;font-weight:600}
 /* an account at or below the threshold a run would ask for */
-td.bad{color:#b42318;font-weight:600}
+td.bad,tr.bad td{color:#b42318;font-weight:600}
 .b-ok{background:rgba(15,123,61,.14);color:var(--ok)}
 .b-skip{background:rgba(161,92,0,.14);color:var(--warn)}
 .b-run{background:rgba(29,78,216,.14);color:var(--run)}
@@ -859,6 +961,16 @@ a per-model window is shown but does not count towards it.</p>
 <thead><tr><th>Tool</th><th>Account</th><th>Signed in as</th><th>Free</th>
 <th>Windows</th><th>Rolls over</th><th>Reading</th></tr></thead>
 <tbody>__QROWS__</tbody></table></div>
+
+<h2>Queues</h2>
+<p class="sub">Work waiting in the review store when this page was built. The outbox
+holds page updates, comments, annotations and board syncs; <em>Waiting</em> entries
+need another delivery first, <em>Retrying</em> ones failed and back off, and after
+five failures an entry is <em>Given up</em> until someone looks at it.</p>
+<div class="scroll"><table class="sortable">
+<thead><tr><th>Queue</th><th>Items</th><th>Ready</th><th>Waiting</th><th>Retrying</th>
+<th>Given up</th><th>Oldest</th><th>Note</th></tr></thead>
+<tbody>__QUEUES__</tbody></table></div>
 
 <h2>Label coverage</h2>
 <p class="sub">Only <code>followup</code>, <code>all</code> and <code>rsync</code> appear as run rows.
@@ -950,6 +1062,7 @@ doc = (doc.replace('__DAYS__', str(DAYS))
           .replace('__RESET__', reset_at.strftime('%a %d %b') if reset_at else '?')
           .replace('__PROJ__', ('~%.0f%%' % projected) if projected is not None else '&mdash;')
           .replace('__QROWS__', '\n'.join(qrows))
+          .replace('__QUEUES__', '\n'.join(queue))
           .replace('__LROWS__', '\n'.join(lrows))
           .replace('__SROWS__', '\n'.join(srows))
           .replace('__ROWS__', '\n'.join(rows))
