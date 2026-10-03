@@ -2,6 +2,7 @@
 """Replay each durable boundary instead of inferring success from leftover JSON."""
 import copy
 from pathlib import Path
+import os
 import subprocess
 import time
 import unittest
@@ -378,8 +379,11 @@ class ReviewStore(unittest.TestCase):
             if point == "remote_effect" and state.get("kind") == "comment":
                 raise Crash()
         real_deliver = adapter.deliver
+        posts = []
         def deliver(entry, deadline):
             crash.__defaults__[0]["kind"] = entry["kind"]
+            if entry["kind"] == "comment":
+                posts.append(entry["id"])
             return real_deliver(entry, deadline)
         adapter.deliver = deliver
         self.store.crash = crash
@@ -390,10 +394,13 @@ class ReviewStore(unittest.TestCase):
         self.store.crash = lambda point: None
         self.store.drain(adapter)
         self.assertEqual(len(comments()), 1)
+        self.assertEqual(len(posts), 1)        # reconciled, never delivered again
         receipt = [read(p) for p in (self.root / "receipts").glob("*.json") if read(p)["kind"] == "comment"]
         self.assertEqual([r["state"] for r in receipt], ["posted"])
 
-    def test_an_upload_whose_receipt_was_lost_is_not_repeated(self):
+    def test_an_upload_whose_receipt_was_lost_reaches_one_receipt(self):
+        # the stub reconciles from its record; the production adapter
+        # re-renders and re-uploads a page, which is idempotent
         self.accept()
         self.lock.close()
         adapter = StubAdapter(self.root)
@@ -411,35 +418,36 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(effects[0].stat().st_mtime_ns, stamp)
         self.assertFalse(list((self.root / "outbox").glob("*.json")))
 
-    def test_a_page_change_during_its_upload_is_published_again(self):
-        target = "page:end/shared"
-        outbox = self.root / "outbox"
-        def entries(n):
-            return (dict(id=f"proj{n}", pr=f"pr:owner/repo#{n}", generation=f"op{n}", kind="projection",
-                         target=target, gate="page", patches={f"pr:owner/repo#{n}": {"ticket": n, "removed": False}},
-                         state="owed", failures=0, next_attempt=0),
-                    dict(id=f"pub{n}", pr=f"pr:owner/repo#{n}", generation=f"op{n}", kind="publish",
-                         target=target, gate="page", dependencies=[f"proj{n}"], state="owed",
-                         failures=0, next_attempt=0))
-        for entry in entries(1):
-            atomic(outbox / (entry["id"] + ".json"), entry)
+    def test_a_landing_render_does_not_settle_a_publish_whose_receipt_it_never_read(self):
+        # a landing page waits on label pages' publishes, which settle under
+        # other page locks: a receipt can be renamed into place after the
+        # landing render read the directory, with an mtime from before it
+        landing = "page:end/2026_10_04/devcall_pr_reviews.html"
+        outbox, receipts = self.root / "outbox", self.root / "receipts"
+        self.store.receipt(dict(id="label1", pr="pr:o/r#1", generation="op1", kind="publish",
+                                target="page:end/2026_10_04/A/devcall_pr_reviews.html"), "published")
+        for n in (1, 2):
+            atomic(outbox / f"land{n}.json", dict(id=f"land{n}", pr=f"pr:o/r#{n}", generation=f"op{n}",
+                                                  kind="publish", target=landing, gate="page", landing=True,
+                                                  dependencies=[f"label{n}"], state="owed", failures=0,
+                                                  next_attempt=0))
         self.lock.close()
         adapter = StubAdapter(self.root)
         real = adapter.deliver
         def deliver(entry, deadline):
+            seen = [p.stem for p in receipts.glob("*.json")]
             result = real(entry, deadline)
-            if entry["id"] == "pub1":
-                # another PR's row lands on the page while its upload is in flight
-                projection, publish = entries(2)
-                self.store._merge_membership(Mock(closed=False, region=region(target)), target, projection["patches"])
-                self.store.receipt(projection, "published")
-                atomic(outbox / "pub2.json", publish)
-            return result
+            if entry["id"] == "land1":
+                self.store.receipt(dict(id="label2", pr="pr:o/r#2", generation="op2", kind="publish",
+                                        target="page:end/2026_10_04/B/devcall_pr_reviews.html"), "published")
+                old = time.time() - 3600
+                os.utime(receipts / "label2.json", (old, old))
+            return dict(result, consumed=seen)
         adapter.deliver = deliver
         self.store.drain(adapter)
         self.store.drain(adapter)
         delivered = sorted(read(p)["entry"]["id"] for p in adapter.root.glob("*.json"))
-        self.assertEqual(delivered, ["pub1", "pub2"])
+        self.assertEqual(delivered, ["land1", "land2"])
 
     def test_tombstones_and_accepted_generation_are_independent(self):
         self.accept()
