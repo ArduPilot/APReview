@@ -67,7 +67,8 @@ class GC(unittest.TestCase):
 
     def gc(self, *args, ok=True):
         r = subprocess.run([sys.executable, str(BIN / "review-gc.py"), "--data", str(self.data),
-                            "--cache", str(self.cache), *args], capture_output=True, text=True)
+                            "--cache", str(self.cache), "--root", str(self.root), *args],
+                           capture_output=True, text=True)
         if not ok:
             return r
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -111,7 +112,7 @@ class GC(unittest.TestCase):
         report = self.gc("--apply")
         self.assertTrue((self.data / "pr34599").exists())
         self.assertTrue((self.cache / "venvs" / "stale").exists())
-        self.assertIn("a run or guardian is live", report["skipped"]["all rules"])
+        self.assertIn("a run or guardian is live, or a launched attempt is unresolved", report["skipped"]["all rules"])
 
     def test_store_state_at_the_top_is_never_litter(self):
         for name in ("held", "handoff"):
@@ -189,12 +190,45 @@ class GC(unittest.TestCase):
         self.gc("--apply", "--legacy")
         self.assertFalse((self.data / "fu_20260928_2037_EbmO").exists())
 
-    def test_legacy_directories_stay_while_the_retired_path_holds_its_lock(self):
+    def test_nothing_is_collected_while_the_retired_path_holds_its_lock(self):
         import fcntl
         with open(self.root / "etc" / "reviewprs.lock", "a") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
-            self.gc("--apply", "--legacy")
+            report = self.gc("--apply", "--legacy")
+        self.assertIn("the retired path's run lock is held", report["skipped"]["all rules"])
         self.assertTrue((self.data / "fu_20260928_2037_EbmO").exists())
+        self.assertTrue((self.data / "pr34599").exists())
+
+    def test_an_unresolved_launched_attempt_anywhere_stops_shared_cleanup(self):
+        attempt = self.data / "runs" / "followup-1" / "attempts" / "free"
+        write(attempt / "status.json", {"state": "cleanup_blocked"})
+        report = self.gc("--apply")
+        self.assertTrue((self.data / "pr34599").exists())
+        self.assertTrue(report["unresolved"])
+
+    def test_a_launch_in_an_earlier_boot_is_proof_enough(self):
+        attempt = self.data / "runs" / "followup-1" / "attempts" / "free"
+        (attempt / "status.json").unlink()
+        write(attempt / "launch.json", {"backend": "systemd", "boot": "00000000-old-boot"})
+        age_tree(self.data / "runs" / "followup-1")
+        report = self.gc("--apply")
+        self.assertFalse(report["unresolved"])
+        self.assertFalse((attempt / "cold-evidence").exists())
+
+    def test_a_store_root_swapped_for_a_link_is_refused(self):
+        real = self.root / "realdata"
+        self.data.rename(real)
+        self.data.symlink_to(real)
+        # GC resolves --data itself; what must not happen is following a link
+        # in place of a component it verified
+        sys.path.insert(0, str(BIN))
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("gc", BIN / "review-gc.py")
+        gc = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(gc)
+        collector = gc.GC(str(self.data), True, False, str(self.cache))
+        with self.assertRaises(OSError):
+            collector.root_fd(str(self.data) + "/")
 
     def test_an_attempt_with_no_status_is_kept_whole(self):
         attempt = self.data / "runs" / "followup-1" / "attempts" / "free"

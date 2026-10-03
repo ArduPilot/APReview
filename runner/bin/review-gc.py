@@ -25,6 +25,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from review_guardian import alive  # noqa: E402
+from review_lock import boot_id  # noqa: E402
 from review_lock import acquire  # noqa: E402
 from review_schema import FILES  # noqa: E402
 
@@ -161,6 +162,19 @@ def pinned_attempts(data):
     return pins
 
 
+def cleaned(attempt):
+    """Proof the attempt's processes are gone: a terminal status, written only
+    once cleanup found the payload empty, or a launch in an earlier boot,
+    since nothing survives a reboot. A missing status alone proves nothing."""
+    status = load(attempt / "status.json")
+    if status and status.get("state") == "terminal":
+        return True
+    launch = load(attempt / "launch.json")
+    if launch and launch.get("boot") and launch["boot"] != boot_id():
+        return True
+    return False
+
+
 def live(record_path):
     record = load(record_path, {})
     return bool(record) and alive(record)
@@ -180,6 +194,7 @@ class GC:
     def __init__(self, data, apply, legacy, cache, budget=600):
         self.data, self.apply, self.legacy = Path(data), apply, legacy
         self.roots = (os.path.realpath(data) + "/", os.path.realpath(cache) + "/")
+        self.root_fds = {}
         self.now = time.time()
         self.deadline = time.monotonic() + budget
         self.removed = {}
@@ -188,23 +203,40 @@ class GC:
     def spent(self):
         return self.apply and time.monotonic() > self.deadline
 
+    @staticmethod
+    def walk_open(start_fd, parts):
+        """Open each component below start_fd refusing links (no trailing
+        slash, so O_NOFOLLOW really refuses a directory link)."""
+        fd = os.dup(start_fd)
+        try:
+            for part in filter(None, parts):
+                nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                os.close(fd)
+                fd = nxt
+            return fd
+        except OSError:
+            os.close(fd)
+            raise
+
+    def root_fd(self, root):
+        """The store or cache root, opened once from / one component at a
+        time without following links, and kept for the whole collection."""
+        if root not in self.root_fds:
+            top = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                self.root_fds[root] = self.walk_open(top, root.strip("/").split("/"))
+            finally:
+                os.close(top)
+        return self.root_fds[root]
+
     def parent_fd(self, path):
         """A descriptor for path's parent, opened one component at a time from
-        the store or cache root without following any link, so no ancestor
-        swapped for a symlink can carry the deletion elsewhere."""
+        a verified root without following any link, so no ancestor swapped
+        for a symlink can carry the deletion elsewhere."""
         for root in self.roots:
             if (str(path.parent) + "/").startswith(root):
                 parts = str(path.parent)[len(root):].split("/") if str(path.parent) + "/" != root else []
-                fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-                try:
-                    for part in filter(None, parts):
-                        nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
-                        os.close(fd)
-                        fd = nxt
-                    return fd
-                except OSError:
-                    os.close(fd)
-                    raise
+                return self.walk_open(self.root_fd(root), parts)
         raise OSError("outside the store")
 
     def remove(self, rule, path):
@@ -220,6 +252,9 @@ class GC:
             st = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
             directory = stat.S_ISDIR(st.st_mode)
             files, size = tally(path) if directory else (1, st.st_size)
+            if self.spent():
+                self.skip(rule, "time budget spent")
+                return
             r = self.removed.setdefault(rule, [0, 0, 0])
             r[0] += 1
             r[1] += files
@@ -247,10 +282,11 @@ class GC:
             for attempt in run.glob("attempts/*"):
                 if live(attempt / "status.json") or live(attempt / "manager.json"):
                     return True
-                status = load(attempt / "status.json")
-                if status and status.get("state") not in (None, "terminal") and not run_finished(run, self.now):
-                    return True
-        return False
+                # launched but never proved empty: its payload may still run,
+                # or start, and open shared caches, whatever the run's age
+                if (attempt / "launch.json").exists() and not cleaned(attempt):
+                    self.unresolved = getattr(self, "unresolved", []) + [str(attempt)]
+        return bool(getattr(self, "unresolved", None))
 
     def settled_attempt(self, attempt, pins, processes):
         """Why an attempt must stay, or None. Its guardian must have finished
@@ -262,10 +298,7 @@ class GC:
             return "guardian alive"
         if (attempt / "wt").exists():
             return "worktree present"
-        status = load(attempt / "status.json")
-        if status is None or status.get("state") != "terminal":
-            # terminal is written only once cleanup found the payload empty;
-            # without it there is no proof the attempt's processes are gone
+        if not cleaned(attempt):
             return "no cleanup proof"
         if newer_than(attempt, self.now - EVIDENCE_DAYS * 86400) or used(attempt, processes):
             return "recent"
@@ -335,6 +368,8 @@ class GC:
                 self.skip(area, "symlink")
                 continue
             for entry in sorted((self.data / area).glob("*")):
+                if self.spent():
+                    return
                 if used(entry, processes):
                     self.skip(area, "in use")
                 elif newer_than(entry, cutoff):
@@ -349,6 +384,8 @@ class GC:
             self.skip("venvs", "symlink")
             return
         for entry in sorted(Path(cache, "venvs").glob("*")):
+            if self.spent():
+                return
             if used(entry, processes):
                 self.skip("venvs", "in use")
             elif newer_than(entry, cutoff):
@@ -377,6 +414,7 @@ def main():
     p.add_argument("--stats", action="store_true", help="count files and bytes per area afterwards")
     p.add_argument("--cache", default=os.path.join(os.environ.get("REVIEW_ROOT", os.path.expanduser("~/review")), "cache"))
     p.add_argument("--budget", type=float, default=600, help="seconds of deletion while admission is held")
+    p.add_argument("--root", default=os.environ.get("REVIEW_ROOT", os.path.expanduser("~/review")))
     a = p.parse_args()
     data = os.path.realpath(a.data)
     gc = GC(data, a.apply, a.legacy, a.cache, a.budget)
@@ -391,33 +429,37 @@ def main():
     fence = acquire(os.path.join(data, "locks"), "maintenance", time.monotonic() + 5) if a.apply else None
     legacy = None
     try:
+        if a.apply:
+            # The retired path's run lock, where its runner takes it: while a
+            # retired runner holds it, it may use any shared area, so nothing
+            # is collected at all.
+            try:
+                legacy = open(os.path.join(a.root, "etc", "reviewprs.lock"), "a")
+                fcntl.flock(legacy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                if legacy:
+                    legacy.close()
+                legacy = None
         if a.apply and fence is None:
             gc.skip("all rules", "a controller holds the maintenance lock")
+        elif a.apply and legacy is None:
+            gc.skip("all rules", "the retired path's run lock is held")
         elif gc.any_live():
-            gc.skip("all rules", "a run or guardian is live")
+            gc.skip("all rules", "a run or guardian is live, or a launched attempt is unresolved")
         else:
-            if a.legacy and a.apply:
-                # the retired path's run lock: held, its runner cannot start
-                try:
-                    legacy = open(os.path.join(os.path.dirname(data), "etc", "reviewprs.lock"), "a")
-                    fcntl.flock(legacy, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except OSError:
-                    if legacy:
-                        legacy.close()
-                    legacy = None
-                    gc.legacy = False
-                    gc.skip("legacy work dirs", "the retired path's lock is held")
             processes = in_use()
             gc.attempts(pinned_attempts(data), processes)
             gc.litter(processes)
             gc.scratch(processes)
             gc.venvs(os.path.realpath(a.cache), processes)
     finally:
+        for fd in gc.root_fds.values():
+            os.close(fd)
         if legacy:
             legacy.close()
         if fence:
             fence.close()
-    report = dict(at=gc.now, applied=a.apply,
+    report = dict(at=gc.now, applied=a.apply, unresolved=getattr(gc, "unresolved", [])[:20],
                   removed={k: dict(entries=v[0], files=v[1], bytes=v[2]) for k, v in gc.removed.items()},
                   skipped=gc.skipped)
     if a.stats:
