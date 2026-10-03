@@ -63,9 +63,11 @@ class GC(unittest.TestCase):
             age_tree(p)
         age_tree(self.cache / "venvs" / "stale", time.time() - 20 * 86400)
 
-    def gc(self, *args):
+    def gc(self, *args, ok=True):
         r = subprocess.run([sys.executable, str(BIN / "review-gc.py"), "--data", str(self.data),
                             "--cache", str(self.cache), *args], capture_output=True, text=True)
+        if not ok:
+            return r
         self.assertEqual(r.returncode, 0, r.stderr)
         return json.loads((self.data / "gc" / "last.json").read_text())
 
@@ -99,6 +101,56 @@ class GC(unittest.TestCase):
         self.assertFalse((self.data / "tmp" / "old-scratch").exists())
         self.assertFalse((self.cache / "venvs" / "stale").exists())
         self.assertTrue((self.cache / "venvs" / "used").exists())
+
+    def test_nothing_shared_is_collected_while_a_run_is_live(self):
+        sys.path.insert(0, str(BIN))
+        from review_guardian import identity
+        write(self.data / "runs" / "all-2" / "controller.json", identity(os.getpid()))
+        report = self.gc("--apply")
+        self.assertTrue((self.data / "pr34599").exists())
+        self.assertTrue((self.cache / "venvs" / "stale").exists())
+        self.assertIn("a run or guardian is live", report["skipped"]["litter"])
+
+    def test_store_state_at_the_top_is_never_litter(self):
+        for name in ("held", "handoff"):
+            write(self.data / name / "x")
+            age_tree(self.data / name)
+        write(self.data / "legacy-facts.json", {})
+        write(self.data / "something-new.json", {})
+        self.gc("--apply")
+        for name in ("held", "handoff", "legacy-facts.json", "something-new.json"):
+            self.assertTrue((self.data / name).exists(), name)
+
+    def test_a_symlinked_run_is_not_followed(self):
+        outside = self.root / "elsewhere"
+        write(outside / "attempts" / "x" / "cold-evidence" / "keep.o")
+        age_tree(outside)
+        (self.data / "runs" / "linked").symlink_to(outside)
+        self.gc("--apply")
+        self.assertTrue((outside / "attempts" / "x" / "cold-evidence" / "keep.o").exists())
+
+    def test_an_owner_record_pins_its_attempt(self):
+        attempt = self.data / "runs" / "followup-1" / "attempts" / "free"
+        write(self.data / "owners" / "7.json", {"attempt": str(attempt)})
+        self.gc("--apply")
+        self.assertTrue((attempt / "cold-evidence").exists())
+
+    def test_an_unreadable_claim_stops_the_collector(self):
+        write(self.data / "results" / "o" / "r" / "2" / "claim.json", "{not json")
+        r = self.gc("--apply", ok=False)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertTrue((self.data / "pr34599").exists())
+
+    def test_old_runs_keep_the_guardian_proofs(self):
+        attempt = self.data / "runs" / "followup-1" / "attempts" / "free"
+        write(attempt / "empty.json", {})
+        write(attempt / "manager.json", {})
+        old = time.time() - 40 * 86400
+        write(self.data / "runs" / "followup-1" / "run.json", {"created": old})
+        age_tree(self.data / "runs" / "followup-1")
+        self.gc("--apply")
+        self.assertEqual(sorted(p.name for p in attempt.iterdir()),
+                         ["empty.json", "job.json", "launch.json", "manager.json", "status.json"])
 
     def test_legacy_directories_need_their_own_flag(self):
         self.gc("--apply", "--legacy")

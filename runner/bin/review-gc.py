@@ -30,16 +30,20 @@ OWNED = {
     "runs", "receipts", "outbox", "operations", "membership", "results", "pages", "landing",
     "owners", "metrics", "gc", "references", "mirror", "locks", "observation.json",
     "drain-recovery.json", "recovery.json", "runs.html", "tmp", "scratch",
+    "held", "handoff", "legacy-facts.json", "quota.json", "stub-deliveries",
 }
 # Caches agents made inside the store before passes were given shared ones
 # under $REVIEW_ROOT/cache are litter like the rest once they go quiet.
 # the retired prompt-driven path's work directories; removed only with --legacy
 LEGACY = ("fu_", "allrun", "aireview-", "aireview_", "followup-", "allruns-")
-KEEP = {"job.json", "status.json", "launch.json", "payload.log", *FILES.values()}
+# records the dashboard reads, and the guardian's proofs that cleanup needs
+PROOFS = {"job.json", "status.json", "launch.json", "manager.json", "empty.json"}
+KEEP = PROOFS | {"payload.log", *FILES.values()}
 EVIDENCE_DAYS = 2
 LITTER_DAYS = 2
 SCRATCH_DAYS = 7
 OLD_RUN_DAYS = 30
+GONE_RUN_DAYS = 90
 VENV_DAYS = 14
 
 
@@ -119,27 +123,52 @@ def in_use():
 
 
 def used(path, paths):
-    prefix = str(path).rstrip("/") + "/"
-    return any(p == str(path) or p.startswith(prefix) for p in paths)
+    path = os.path.realpath(path)
+    prefix = path.rstrip("/") + "/"
+    return any(p == path or p.startswith(prefix) for p in paths)
+
+
+def strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for v in value.values():
+            yield from strings(v)
+    elif isinstance(value, list):
+        for v in value:
+            yield from strings(v)
 
 
 def pinned_attempts(data):
-    """Every attempt any PR's current claim names, selected or not."""
+    """Every attempt any PR's current claim or any owner record names. An
+    unreadable record stops the collector: a lost pin is a lost pass."""
     pins = set()
-    for claim_path in Path(data, "results").glob("*/*/*/claim.json"):
-        claim = load(claim_path, {})
-        pins.update(os.path.realpath(p) for p in claim.get("attempts", []))
-        pins.update(os.path.realpath(p) for p in (claim.get("selected") or {}).values())
+    runs = os.path.realpath(os.path.join(data, "runs")) + "/"
+    for record in [*Path(data, "results").glob("*/*/*/claim.json"), *Path(data, "owners").glob("*.json")]:
+        value = load(record)
+        if value is None:
+            if record.exists():
+                raise SystemExit("unreadable %s: not collecting" % record)
+            continue
+        for text in strings(value):
+            if text.startswith("/"):
+                real = os.path.realpath(text)
+                if real.startswith(runs) and "/attempts/" in real:
+                    pins.add(real.split("/attempts/")[0] + "/attempts/" + real.split("/attempts/")[1].split("/")[0])
     return pins
 
 
+def live(record_path):
+    record = load(record_path, {})
+    return bool(record) and alive(record)
+
+
 def run_finished(run, now):
+    if live(run / "controller.json"):
+        return False
     summary = load(run / "summary.json", {})
     if summary.get("state") == "complete":
         return True
-    controller = load(run / "controller.json", {})
-    if controller and alive(controller):
-        return False
     beat = summary.get("heartbeat") or load(run / "run.json", {}).get("created") or 0
     return now - beat > 86400
 
@@ -170,23 +199,37 @@ class GC:
         self.skipped.setdefault(rule, {}).setdefault(why, 0)
         self.skipped[rule][why] += 1
 
+    def any_live(self):
+        """A run or a guardian is live: shared caches and litter may be in use
+        by something that has not opened them yet, so their rules wait."""
+        for run in self.data.glob("runs/*"):
+            if live(run / "controller.json"):
+                return True
+            for attempt in run.glob("attempts/*"):
+                if live(attempt / "status.json") or live(attempt / "manager.json"):
+                    return True
+        return False
+
     def attempts(self, pins, processes):
         for run in sorted(self.data.glob("runs/*")):
-            if not run.is_dir():
+            if not run.is_dir() or run.is_symlink():
                 continue
             if not run_finished(run, self.now):
                 self.skip("attempt evidence", "run live")
                 continue
             created = load(run / "run.json", {}).get("created") or run.stat().st_mtime
             old = self.now - created > OLD_RUN_DAYS * 86400
+            if (self.now - created > GONE_RUN_DAYS * 86400 and not used(run, processes)
+                    and not any(p.startswith(os.path.realpath(run) + "/") for p in pins)):
+                self.remove("expired run", run)
+                continue
             for attempt in sorted(run.glob("attempts/*")):
                 if not attempt.is_dir() or attempt.is_symlink():
                     continue            # agents write stray files here too
                 if os.path.realpath(attempt) in pins:
                     self.skip("attempt evidence", "named by a claim")
                     continue
-                status = load(attempt / "status.json", {})
-                if status and alive(status):
+                if live(attempt / "status.json") or live(attempt / "manager.json"):
                     self.skip("attempt evidence", "guardian alive")
                     continue
                 if (attempt / "wt").exists():
@@ -196,7 +239,7 @@ class GC:
                 if newer_than(attempt, self.now - EVIDENCE_DAYS * 86400) or used(attempt, processes):
                     self.skip("attempt evidence", "recent")
                     continue
-                keep = {"status.json", "job.json"} if old else KEEP
+                keep = PROOFS if old else KEEP
                 for entry in attempt.iterdir():
                     if entry.name not in keep:
                         self.remove("old run" if old else "attempt evidence", entry)
@@ -205,7 +248,8 @@ class GC:
         cutoff = self.now - LITTER_DAYS * 86400
         for entry in sorted(self.data.iterdir()):
             name = entry.name
-            if name in OWNED:
+            # store state is JSON at the top; an unknown one is kept, not guessed at
+            if name in OWNED or name.endswith(".json"):
                 continue
             if name.startswith(LEGACY):
                 if self.legacy and not used(entry, processes):
@@ -217,12 +261,17 @@ class GC:
                 self.skip("litter", "in use")
             elif newer_than(entry, cutoff):
                 self.skip("litter", "recent")
+            elif used(entry, in_use()):          # look again just before
+                self.skip("litter", "in use")
             else:
                 self.remove("litter", entry)
 
     def scratch(self, processes):
         cutoff = self.now - SCRATCH_DAYS * 86400
         for area in ("tmp", "scratch"):
+            if (self.data / area).is_symlink():
+                self.skip(area, "symlink")
+                continue
             for entry in sorted((self.data / area).glob("*")):
                 if used(entry, processes):
                     self.skip(area, "in use")
@@ -234,6 +283,9 @@ class GC:
     def venvs(self, cache, processes):
         """Shared virtualenvs nobody has touched in VENV_DAYS."""
         cutoff = self.now - VENV_DAYS * 86400
+        if Path(cache, "venvs").is_symlink():
+            self.skip("venvs", "symlink")
+            return
         for entry in sorted(Path(cache, "venvs").glob("*")):
             if used(entry, processes):
                 self.skip("venvs", "in use")
@@ -263,20 +315,27 @@ def main():
     p.add_argument("--stats", action="store_true", help="count files and bytes per area afterwards")
     p.add_argument("--cache", default=os.path.join(os.environ.get("REVIEW_ROOT", os.path.expanduser("~/review")), "cache"))
     a = p.parse_args()
-    gc = GC(a.data, a.apply, a.legacy)
+    data = os.path.realpath(a.data)
+    gc = GC(data, a.apply, a.legacy)
     started = time.monotonic()
     processes = in_use()
-    gc.attempts(pinned_attempts(a.data), processes)
-    gc.litter(processes)
-    gc.scratch(processes)
-    gc.venvs(a.cache, processes)
-    report = dict(at=gc.now, applied=a.apply, seconds=round(time.monotonic() - started),
+    gc.attempts(pinned_attempts(data), processes)
+    if gc.any_live():
+        for rule in ("litter", "tmp", "scratch", "venvs", "legacy work dirs"):
+            gc.skip(rule, "a run or guardian is live")
+    else:
+        gc.litter(processes)
+        gc.scratch(processes)
+        gc.venvs(os.path.realpath(a.cache), processes)
+    report = dict(at=gc.now, applied=a.apply,
                   removed={k: dict(entries=v[0], files=v[1], bytes=v[2]) for k, v in gc.removed.items()},
                   skipped=gc.skipped)
     if a.stats:
         report["areas"] = gc.stats()
         report["summary"] = "%d files, %.1f GB" % (sum(x["files"] for x in report["areas"].values()),
                                                    sum(x["bytes"] for x in report["areas"].values()) / 1e9)
+    report["seconds"] = round(time.monotonic() - started)
+    a.data = data
     os.makedirs(os.path.join(a.data, "gc"), exist_ok=True)
     with open(os.path.join(a.data, "gc", "last.json.tmp"), "w") as f:
         json.dump(report, f, indent=1)
