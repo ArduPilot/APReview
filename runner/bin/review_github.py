@@ -9,6 +9,8 @@ import re
 import os
 from pathlib import Path
 import subprocess
+
+import review_metrics
 import time
 from urllib.parse import urlencode
 
@@ -78,6 +80,7 @@ class GitHub:
                 time.sleep(2 * attempt)
                 if deadline and time.monotonic() >= deadline:
                     raise TimeoutError("GitHub deadline")
+            started = time.monotonic()
             try:
                 result = subprocess.run(
                     command,
@@ -88,9 +91,13 @@ class GitHub:
                     timeout=timeout,
                 )
             except subprocess.TimeoutExpired as error:
+                review_metrics.count("github", review_metrics.github_class(endpoint, method),
+                                     time.monotonic() - started)
                 if attempt < (2 if reading else 0):
                     continue
                 raise TimeoutError("GitHub request timed out") from error
+            review_metrics.count("github", review_metrics.github_class(endpoint, method),
+                                 time.monotonic() - started)
             failure = None
             if result.returncode:
                 failure = result.stderr.strip()[:500]
