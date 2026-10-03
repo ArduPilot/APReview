@@ -57,6 +57,8 @@ def _prepare(store, path, job, config):
             pass_fds=(lock.fd,),
         )
     mkdir(logs)
+    scratch = path / "scratch"
+    mkdir(scratch)
     job.update(
         worktree=str(worktree),
         reference_clone=str(reference),
@@ -74,6 +76,16 @@ def _prepare(store, path, job, config):
     ]
     env["PATH"] = os.pathsep.join([str(BIN), str(worktree / "Tools" / "autotest"), *paths])
     env["BUILDLOGS"] = str(logs)
+    # Scratch work stays inside the attempt, where GC finds it; caches are
+    # shared across attempts, outside the store.
+    cache = Path(env.get("REVIEW_ROOT") or os.environ.get("REVIEW_ROOT") or store.root.parent) / "cache"
+    env["REVIEW_SCRATCH"] = env["TMPDIR"] = str(scratch)
+    env["REVIEW_VENVS"] = str(cache / "venvs")
+    env["UV_CACHE_DIR"] = str(cache / "uv")
+    env["PIP_CACHE_DIR"] = str(cache / "pip")
+    env["npm_config_cache"] = str(cache / "npm")
+    for name in ("venvs", "uv", "pip", "npm"):
+        mkdir(cache / name)
     env["REVIEW_DATA"] = str(store.root)
     env["REVIEW_HEAVY_SIZE"] = str(config.get("heavy_size", 4))
     env["REVIEW_HEAVY_WAIT"] = str(config.get("permit_timeout", 120))

@@ -1202,6 +1202,12 @@ class RealInference(unittest.TestCase):
             observed = read(path / "observed.json")
             self.assertEqual(observed["cwd"], str(path / "wt"))
             self.assertEqual(observed["env"]["BUILDLOGS"], str(path / "buildlogs"))
+            # scratch work stays inside the attempt, where GC can find it
+            self.assertEqual(observed["env"]["REVIEW_SCRATCH"], str(path / "scratch"))
+            self.assertEqual(observed["env"]["TMPDIR"], str(path / "scratch"))
+            self.assertTrue((path / "scratch").is_dir())
+            for cache in ("UV_CACHE_DIR", "PIP_CACHE_DIR", "npm_config_cache", "REVIEW_VENVS"):
+                self.assertFalse(observed["env"][cache].startswith(str(self.store.root) + "/"), cache)
             self.assertNotIn(str(self.reference / "Tools/autotest"), observed["env"]["PATH"])
             self.assertIn(provider + "-test-model", observed["argv"])
             self.assertIn("Frozen " + kind + " prompt", " ".join(observed["argv"]))
