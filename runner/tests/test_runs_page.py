@@ -376,6 +376,18 @@ class Dashboard(unittest.TestCase):
         self.assertIn('class="bad"', sec.split("outbox: board")[0].rsplit("<tr", 1)[1])
         self.assertEqual(nums("page operations not yet in the outbox")[0], "1")
 
+    def test_the_last_gc_count_is_shown_and_marked_when_huge(self):
+        gc = os.path.join(self.home, "review", "data", "gc")
+        os.makedirs(gc)
+        with open(os.path.join(gc, "last.json"), "w") as f:
+            json.dump({"at": time.time() - 600, "summary": "4811363 files, 224.0 GB",
+                       "areas": {"runs": {"files": 984403, "bytes": 1}, "litter": {"files": 711052, "bytes": 1},
+                                 "legacy": {"files": 2379878, "bytes": 1}}}, f)
+        sec = self.queue_section(self.build())
+        row = sec.split("store files (last GC)")[0].rsplit("<tr", 1)[1]
+        self.assertIn('class="bad"', row)
+        self.assertIn("3090930 files of agent litter", sec)
+
     def test_an_empty_store_says_so(self):
         sec = self.queue_section(self.build())
         self.assertIn("empty", sec)

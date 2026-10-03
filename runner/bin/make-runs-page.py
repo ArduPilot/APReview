@@ -762,10 +762,21 @@ def queue_rows():
     rows.append(('PRs in review', dict(n=review), ''))
     rows.append(('AI passes in progress', dict(n=passes), ''))
 
+    gc = None
+    try:
+        gc = json.load(open(os.path.join(DATA, 'gc', 'last.json')))
+    except Exception:
+        pass
+    if gc and gc.get('areas'):
+        files = sum(a['files'] for a in gc['areas'].values())
+        waste = sum(a['files'] for k, a in gc['areas'].items() if k in ('litter', 'legacy'))
+        rows.append(('store files (last GC)', dict(n=files, oldest=t - gc['at']),
+                     '%s; %d files of agent litter and retired work dirs' % (gc.get('summary', ''), waste)))
     out = []
     for name, k, note in rows:
         cell = lambda f: ('<td data-sort="%d">%d</td>' % (k[f], k[f])) if f in k else '<td data-sort="-1">&mdash;</td>'
-        bad = k.get('dead') or (k.get('n') and name.startswith('outbox') and (k.get('oldest') or 0) > 3600)
+        bad = k.get('dead') or (k.get('n') and name.startswith('outbox') and (k.get('oldest') or 0) > 3600) \
+            or (name.startswith('store files') and k['n'] > 1000000)
         out.append('<tr%s><td>%s</td>%s%s%s%s%s<td data-sort="%d">%s</td><td class="wrap"><span class="sub">%s</span></td></tr>' % (
             ' class="bad"' if bad else '', html.escape(name), cell('n'), cell('ready'), cell('waiting'),
             cell('retrying'), cell('dead'), k.get('oldest') or 0,
