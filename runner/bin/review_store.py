@@ -372,8 +372,10 @@ class Store:
         if (self.root / "receipts" / (ident + ".json")).exists():
             unlink(path)
             return
+        # created never changes: the age of an obligation, unlike the file's
+        # mtime, which every retry rewrites
         entry = read(path) or dict(intent, pr=pr, generation=generation, state="owed",
-                                   failures=0, next_attempt=0)
+                                   failures=0, next_attempt=0, created=time.time())
         if generation != current and intent["kind"] in ("comment", "note") and entry["state"] not in ("sending", "uncertain"):
             self.receipt(entry, "superseded")
         elif not path.exists():
