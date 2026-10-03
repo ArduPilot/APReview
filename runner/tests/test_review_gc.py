@@ -37,8 +37,9 @@ class GC(unittest.TestCase):
         write(run / "summary.json", {"state": "complete", "heartbeat": OLD})
         for name in ("free", "claimed", "fresh", "worktree"):
             a = run / "attempts" / name
-            for keep in ("job.json", "status.json", "launch.json", "review.json", "payload.log"):
+            for keep in ("job.json", "launch.json", "review.json", "payload.log"):
                 write(a / keep, {})
+            write(a / "status.json", {"state": "terminal"})
             write(a / "cold-evidence" / "build" / "big.o")
         (run / "attempts" / "worktree" / "wt").mkdir()
         write(run / "attempts" / "stray.txt")
@@ -109,7 +110,7 @@ class GC(unittest.TestCase):
         report = self.gc("--apply")
         self.assertTrue((self.data / "pr34599").exists())
         self.assertTrue((self.cache / "venvs" / "stale").exists())
-        self.assertIn("a run or guardian is live", report["skipped"]["litter"])
+        self.assertIn("a run or guardian is live", report["skipped"]["all rules"])
 
     def test_store_state_at_the_top_is_never_litter(self):
         for name in ("held", "handoff"):
@@ -151,6 +152,37 @@ class GC(unittest.TestCase):
         self.gc("--apply")
         self.assertEqual(sorted(p.name for p in attempt.iterdir()),
                          ["empty.json", "job.json", "launch.json", "manager.json", "status.json"])
+
+    def test_a_busy_admission_fence_stops_all_deletion(self):
+        sys.path.insert(0, str(BIN))
+        from review_lock import try_lock
+        with try_lock(self.data / "locks", "pause", shared=True):
+            report = self.gc("--apply")
+        self.assertIn("admission fence busy", report["skipped"]["all rules"])
+        self.assertTrue((self.data / "pr34599").exists())
+        self.assertTrue((self.data / "runs/followup-1/attempts/free/cold-evidence").exists())
+
+    def test_a_symlinked_attempts_directory_is_not_followed(self):
+        outside = self.root / "elsewhere2"
+        write(outside / "x" / "cold-evidence" / "keep.o")
+        write(outside / "x" / "status.json", {"state": "terminal"})
+        age_tree(outside)
+        run = self.data / "runs" / "rerouted"
+        write(run / "run.json", {"created": OLD})
+        write(run / "summary.json", {"state": "complete", "heartbeat": OLD})
+        (run / "attempts").symlink_to(outside)
+        age_tree(run)
+        self.gc("--apply")
+        self.assertTrue((outside / "x" / "cold-evidence" / "keep.o").exists())
+
+    def test_an_attempt_whose_cleanup_is_unresolved_keeps_everything(self):
+        attempt = self.data / "runs" / "followup-1" / "attempts" / "free"
+        write(attempt / "status.json", {"state": "running"})
+        old = time.time() - 100 * 86400
+        write(self.data / "runs" / "followup-1" / "run.json", {"created": old})
+        age_tree(self.data / "runs" / "followup-1")
+        self.gc("--apply")
+        self.assertTrue((attempt / "cold-evidence").exists())   # neither expired nor trimmed
 
     def test_legacy_directories_need_their_own_flag(self):
         self.gc("--apply", "--legacy")

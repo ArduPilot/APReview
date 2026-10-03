@@ -23,6 +23,7 @@ import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from review_guardian import alive  # noqa: E402
+from review_lock import acquire  # noqa: E402
 from review_schema import FILES  # noqa: E402
 
 # what the store and its runtime own at its top level
@@ -174,13 +175,23 @@ def run_finished(run, now):
 
 
 class GC:
-    def __init__(self, data, apply, legacy):
+    def __init__(self, data, apply, legacy, cache, budget=600):
         self.data, self.apply, self.legacy = Path(data), apply, legacy
+        self.roots = (os.path.realpath(data) + "/", os.path.realpath(cache) + "/")
         self.now = time.time()
+        self.deadline = time.monotonic() + budget
         self.removed = {}
         self.skipped = {}
 
     def remove(self, rule, path):
+        # every ancestor resolved: a symlinked runs/ or attempts/ must not
+        # carry a deletion out of the store
+        if not (os.path.realpath(path.parent) + "/").startswith(self.roots):
+            self.skip(rule, "outside the store")
+            return
+        if self.apply and time.monotonic() > self.deadline:
+            self.skip(rule, "time budget spent")
+            return
         files, size = tally(path) if path.is_dir() else (1, path.lstat().st_size)
         r = self.removed.setdefault(rule, [0, 0, 0])
         r[0] += 1
@@ -210,34 +221,46 @@ class GC:
                     return True
         return False
 
+    def settled_attempt(self, attempt, pins, processes):
+        """Why an attempt must stay, or None. Its guardian must have finished
+        cleanup (a terminal status): a dead guardian alone does not prove its
+        payload's processes are gone."""
+        if os.path.realpath(attempt) in pins:
+            return "named by a claim"
+        if live(attempt / "status.json") or live(attempt / "manager.json"):
+            return "guardian alive"
+        if (attempt / "wt").exists():
+            return "worktree present"
+        status = load(attempt / "status.json")
+        if status is not None and status.get("state") != "terminal":
+            return "cleanup unresolved"
+        if newer_than(attempt, self.now - EVIDENCE_DAYS * 86400) or used(attempt, processes):
+            return "recent"
+        return None
+
     def attempts(self, pins, processes):
+        if (self.data / "runs").is_symlink():
+            self.skip("attempt evidence", "runs is a symlink")
+            return
         for run in sorted(self.data.glob("runs/*")):
-            if not run.is_dir() or run.is_symlink():
+            if not run.is_dir() or run.is_symlink() or (run / "attempts").is_symlink():
                 continue
             if not run_finished(run, self.now):
                 self.skip("attempt evidence", "run live")
                 continue
             created = load(run / "run.json", {}).get("created") or run.stat().st_mtime
             old = self.now - created > OLD_RUN_DAYS * 86400
-            if (self.now - created > GONE_RUN_DAYS * 86400 and not used(run, processes)
-                    and not any(p.startswith(os.path.realpath(run) + "/") for p in pins)):
-                self.remove("expired run", run)
-                continue
-            for attempt in sorted(run.glob("attempts/*")):
-                if not attempt.is_dir() or attempt.is_symlink():
-                    continue            # agents write stray files here too
-                if os.path.realpath(attempt) in pins:
-                    self.skip("attempt evidence", "named by a claim")
+            attempts = [a for a in sorted(run.glob("attempts/*")) if a.is_dir() and not a.is_symlink()]
+            if self.now - created > GONE_RUN_DAYS * 86400 and not used(run, processes):
+                # the whole run only when every attempt in it could go
+                held = [why for why in (self.settled_attempt(a, pins, processes) for a in attempts) if why]
+                if not held:
+                    self.remove("expired run", run)
                     continue
-                if live(attempt / "status.json") or live(attempt / "manager.json"):
-                    self.skip("attempt evidence", "guardian alive")
-                    continue
-                if (attempt / "wt").exists():
-                    # a worktree is removed through git, by the guardian's cleanup
-                    self.skip("attempt evidence", "worktree present")
-                    continue
-                if newer_than(attempt, self.now - EVIDENCE_DAYS * 86400) or used(attempt, processes):
-                    self.skip("attempt evidence", "recent")
+            for attempt in attempts:
+                why = self.settled_attempt(attempt, pins, processes)
+                if why:
+                    self.skip("attempt evidence", why)
                     continue
                 keep = PROOFS if old else KEEP
                 for entry in attempt.iterdir():
@@ -252,10 +275,12 @@ class GC:
             if name in OWNED or name.endswith(".json"):
                 continue
             if name.startswith(LEGACY):
-                if self.legacy and not used(entry, processes):
-                    self.remove("legacy work dirs", entry)
+                if not self.legacy:
+                    self.skip("legacy work dirs", "needs --legacy")
+                elif used(entry, processes) or newer_than(entry, cutoff):
+                    self.skip("legacy work dirs", "in use or recent")
                 else:
-                    self.skip("legacy work dirs", "needs --legacy" if not self.legacy else "in use")
+                    self.remove("legacy work dirs", entry)
                 continue
             if used(entry, processes):
                 self.skip("litter", "in use")
@@ -314,19 +339,30 @@ def main():
     p.add_argument("--legacy", action="store_true", help="also remove the retired path's work directories")
     p.add_argument("--stats", action="store_true", help="count files and bytes per area afterwards")
     p.add_argument("--cache", default=os.path.join(os.environ.get("REVIEW_ROOT", os.path.expanduser("~/review")), "cache"))
+    p.add_argument("--budget", type=float, default=600, help="seconds of deletion while admission is held")
     a = p.parse_args()
     data = os.path.realpath(a.data)
-    gc = GC(data, a.apply, a.legacy)
+    gc = GC(data, a.apply, a.legacy, a.cache, a.budget)
     started = time.monotonic()
-    processes = in_use()
-    gc.attempts(pinned_attempts(data), processes)
-    if gc.any_live():
-        for rule in ("litter", "tmp", "scratch", "venvs", "legacy work dirs"):
-            gc.skip(rule, "a run or guardian is live")
+    # Deleting holds the admission fence: with "pause" held exclusively no
+    # run can start (run-reviewprs.sh defers it to its next slot), so nothing
+    # can begin using what is being removed. Collection happens only when no
+    # run or guardian is live, with pins read under the fence.
+    fence = acquire(os.path.join(data, "locks"), "pause", time.monotonic() + 5) if a.apply else None
+    if a.apply and fence is None:
+        gc.skip("all rules", "admission fence busy")
+    elif gc.any_live():
+        gc.skip("all rules", "a run or guardian is live")
     else:
-        gc.litter(processes)
-        gc.scratch(processes)
-        gc.venvs(os.path.realpath(a.cache), processes)
+        try:
+            processes = in_use()
+            gc.attempts(pinned_attempts(data), processes)
+            gc.litter(processes)
+            gc.scratch(processes)
+            gc.venvs(os.path.realpath(a.cache), processes)
+        finally:
+            if fence:
+                fence.close()
     report = dict(at=gc.now, applied=a.apply,
                   removed={k: dict(entries=v[0], files=v[1], bytes=v[2]) for k, v in gc.removed.items()},
                   skipped=gc.skipped)
