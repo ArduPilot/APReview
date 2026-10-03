@@ -695,7 +695,8 @@ def queue_rows():
     for path in glob.glob(os.path.join(DATA, 'outbox', '*.json')):
         try:
             e = json.load(open(path))
-            e['_mtime'] = os.path.getmtime(path)
+            # created is fixed; mtime moves with every retry
+            e['_mtime'] = e.get('created') or os.path.getmtime(path)
         except Exception:
             continue                    # removed by a drain mid-read
         entries.append(e)
