@@ -26,14 +26,16 @@ g = GitHub(
 s.recover_slice()
 # One pass takes at most a hundred entries, a few seconds' work; an all run
 # queues some two thousand, so a single pass per cron slot left comments
-# hours behind. Keep passing while entries move, inside the five minutes.
+# hours behind. Keep passing while entries settle, inside the five minutes.
+# Settled, not a shrinking outbox: a running controller adds entries faster
+# than one pass removes them, and that stopped the drain after one pass.
 adapter = Delivery(s, g, c)
 deadline = time.monotonic() + BUDGET
 while True:
-    before = len(list((s.root / "outbox").glob("*.json")))
+    before = {p.name for p in (s.root / "outbox").glob("*.json")}
     debts = s.drain(adapter, seconds=min(60, max(0, deadline - time.monotonic())))
     if not debts or time.monotonic() >= deadline:
         break
-    if len(list((s.root / "outbox").glob("*.json"))) >= before:
+    if before <= {p.name for p in (s.root / "outbox").glob("*.json")}:
         break
 raise SystemExit(1 if debts else 0)
