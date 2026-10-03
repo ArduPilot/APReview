@@ -13,12 +13,15 @@ import time
 WIDTH = 32
 TABLE = 1 << 20
 MAGIC = b"RVW\x01"
-FIXED = {"board": 0, "refresh": 1, "pause": 2, "observation": 3, "quota": 4}
+# maintenance: every controller holds it shared for its life; store GC takes
+# it exclusively, so nothing can start or resume while it deletes. Region 5
+# is the layout marker.
+FIXED = {"board": 0, "refresh": 1, "pause": 2, "observation": 3, "quota": 4, "maintenance": 6}
 POOLS = {"claude": 256, "codex": 512, "heavy": 768}
 KINDS = {"pr": 0, "page": 1, "run": 2, "account": 3}
 HEADER_KINDS = {name: index for index, name in enumerate(
     ("board", "refresh", "pause", "observation", "quota", "permit:claude",
-     "permit:codex", "permit:heavy", "pr", "page", "run", "account"))}
+     "permit:codex", "permit:heavy", "pr", "page", "run", "account", "maintenance"))}
 # The first reserved region holds the file-wide layout marker.
 LAYOUT = 5 * WIDTH
 _owned = []
@@ -83,7 +86,8 @@ def rank(key):
     kind = key.split(":", 1)[0]
     if kind == "permit":
         return 7 if key.startswith("permit:heavy:") else 4
-    return {"run": 0, "pr": 1, "pause": 2, "observation": 2,
+    # maintenance comes straight after a controller's run lock
+    return {"run": 0, "maintenance": 1, "pr": 1, "pause": 2, "observation": 2,
             "refresh": 3, "account": 5, "quota": 6, "page": 8, "board": 9}[kind]
 
 
