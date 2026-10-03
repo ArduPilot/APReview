@@ -647,25 +647,33 @@ def _mask(ident):
     return "%s&hellip;" % ident[:8] if len(ident) > 8 else ident
 
 
+ROLLOVER_NAMES = {'session': '5h', 'weekly_all': 'weekly'}
+
+
 def _rollover(q):
-    """Soonest reset among the windows that gate work, as a local time."""
+    """Each window that gates work and when it resets, soonest first, as
+    local times: a Claude account has a five-hour and a weekly window and
+    either can be the one that stops work."""
     when = []
     for w in q.get('windows') or []:
         if w.get('scoped') or not w.get('resets_at'):
             continue
         t = parse_iso(w['resets_at'])
         if t:
-            when.append(t)
+            when.append((t, w.get('kind') or '?'))
     if not when:
         return '&mdash;'
-    soonest = min(when)
-    hours = (soonest - now).total_seconds() / 3600.0
-    # The CLIs report these in UTC while every other time on this page is the
-    # box's own, written by `date -Is`. Rendering one column in another zone
-    # reads as a wrong answer rather than a different one.
-    return '%s <span class="sub">(%s)</span>' % (
-        soonest.astimezone().strftime('%a %d %b %H:%M'),
-        'now' if hours < 0 else ('%.0fh' % hours if hours < 48 else '%.0fd' % (hours / 24)))
+    lines = []
+    for t, kind in sorted(when):
+        hours = (t - now).total_seconds() / 3600.0
+        # The CLIs report these in UTC while every other time on this page is
+        # the box's own, written by `date -Is`. Rendering one column in
+        # another zone reads as a wrong answer rather than a different one.
+        lines.append('%s%s <span class="sub">(%s)</span>' % (
+            '%s ' % html.escape(ROLLOVER_NAMES.get(kind, kind)) if len(when) > 1 else '',
+            t.astimezone().strftime('%a %d %b %H:%M'),
+            'now' if hours < 0 else ('%.0fh' % hours if hours < 48 else '%.0fd' % (hours / 24))))
+    return '<br>'.join(lines)
 
 
 qrows = []

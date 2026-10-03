@@ -410,7 +410,7 @@ class Dashboard(unittest.TestCase):
         self.assertIn(local, sec)
         self.assertNotIn(when.strftime("%a %d %b %H:%M"), sec)
 
-    def test_rollover_is_the_soonest_window_that_gates_work(self):
+    def test_rollover_lists_every_window_that_gates_work_soonest_first(self):
         soon = datetime.datetime.now().astimezone() + datetime.timedelta(hours=2)
         late = datetime.datetime.now().astimezone() + datetime.timedelta(days=5)
         self.quota_record("claude", "claude-a", free=40.0, windows=[
@@ -419,8 +419,12 @@ class Dashboard(unittest.TestCase):
             {"kind": "session", "used_pct": 10, "scoped": False,
              "resets_at": soon.isoformat()}])
         sec = self.quota_section(self.build())
-        self.assertIn(soon.strftime("%H:%M"), sec)
-        self.assertNotIn(late.strftime("%a %d %b %H:%M"), sec)
+        five = "5h " + soon.strftime("%a %d %b %H:%M")
+        # converted at that instant: a daylight-saving change may fall between
+        week = "weekly " + late.astimezone().strftime("%a %d %b %H:%M")
+        self.assertIn(five, sec)
+        self.assertIn(week, sec)
+        self.assertLess(sec.index(five), sec.index(week))
 
     def test_a_per_model_window_is_shown_but_does_not_set_the_rollover(self):
         soon = datetime.datetime.now().astimezone() + datetime.timedelta(hours=1)
