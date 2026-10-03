@@ -14,6 +14,22 @@ import time
 _lock = threading.Lock()
 _counts = {}
 _context = {}
+_local = threading.local()
+
+
+class scope:
+    """Count the enclosed work separately, as "<name>:<tier>/<what>": a
+    controller's own delivery pass is executor work, not its run's."""
+
+    def __init__(self, name):
+        self.name = name
+
+    def __enter__(self):
+        self.outer = getattr(_local, "scope", None)
+        _local.scope = self.name
+
+    def __exit__(self, *exc):
+        _local.scope = self.outer
 
 
 def context(**fields):
@@ -21,8 +37,9 @@ def context(**fields):
 
 
 def count(tier, what, seconds=0.0, n=1):
+    scope = getattr(_local, "scope", None)
     with _lock:
-        c = _counts.setdefault(tier + "/" + what, [0, 0.0])
+        c = _counts.setdefault((scope + ":" if scope else "") + tier + "/" + what, [0, 0.0])
         c[0] += n
         c[1] += seconds
 
@@ -39,11 +56,11 @@ class timed:
         count(*self.key, seconds=time.monotonic() - self.start)
 
 
-def github_class(endpoint, method="GET"):
+def github_class(endpoint, method="GET", query=""):
     """An endpoint with its numbers and hashes folded, so calls group by kind."""
     path = endpoint.split("?", 1)[0]
     if path == "graphql":
-        return "graphql"
+        return "graphql " + ("mutation" if query.lstrip().startswith("mutation") else "query")
     if path.startswith("search/"):
         return "search"
     match = re.match(r"repos/[^/]+/[^/]+/(.*)", path)
@@ -56,8 +73,9 @@ def github_class(endpoint, method="GET"):
 def flush():
     data = _context.get("data") or os.environ.get("REVIEW_DATA")
     with _lock:
-        counts = {k: [v[0], round(v[1], 3)] for k, v in _counts.items() if v[0]}
+        taken = {k: list(v) for k, v in _counts.items() if v[0]}
         _counts.clear()
+    counts = {k: [v[0], round(v[1], 3)] for k, v in taken.items()}
     if not data or not counts:
         return
     line = json.dumps(dict(at=time.time(), pid=os.getpid(),
@@ -70,11 +88,18 @@ def flush():
         fd = os.open(os.path.join(directory, time.strftime("%Y-%m-%d") + ".jsonl"),
                      os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
-            os.write(fd, line.encode())
+            data = line.encode()
+            while data:
+                data = data[os.write(fd, data):]
         finally:
             os.close(fd)
     except OSError:
-        pass                            # metrics never fail the work
+        # metrics never fail the work; keep the counts for the next flush
+        with _lock:
+            for k, (n, s) in taken.items():
+                c = _counts.setdefault(k, [0, 0.0])
+                c[0] += n
+                c[1] += s
 
 
 atexit.register(flush)

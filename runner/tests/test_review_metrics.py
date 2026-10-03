@@ -18,7 +18,8 @@ class Metrics(unittest.TestCase):
         self.assertEqual(M.github_class("repos/a/b/commits/" + "c" * 40 + "/check-runs?per_page=100&page=2"),
                          "GET commits/SHA/check-runs")
         self.assertEqual(M.github_class("repos/a/b/issues/7/comments", "POST"), "POST issues/N/comments")
-        self.assertEqual(M.github_class("graphql", "POST"), "graphql")
+        self.assertEqual(M.github_class("graphql", "POST", "query { x }"), "graphql query")
+        self.assertEqual(M.github_class("graphql", "POST", " mutation { y }"), "graphql mutation")
         self.assertEqual(M.github_class("search/issues?q=x"), "search")
 
     def test_counts_reach_the_store_once_per_flush_and_per_process(self):
@@ -38,6 +39,22 @@ class Metrics(unittest.TestCase):
         self.assertEqual(lines[1]["counts"], {"site/rsync page": [1, 3.0]})
         self.assertEqual({x["process"] for x in lines}, {"drain"})
         self.assertEqual(len({x["pid"] for x in lines}), 2)
+
+    def test_scoped_work_is_counted_apart(self):
+        M.count("github", "x")
+        with M.scope("drain"):
+            M.count("github", "x")
+        self.assertEqual(M._counts.pop("github/x")[0], 1)
+        self.assertEqual(M._counts.pop("drain:github/x")[0], 1)
+
+    def test_a_failed_write_keeps_the_counts(self):
+        M._counts.clear()
+        M.context(data="/proc/no-such-dir", process="t")
+        M.count("github", "y", 1.0)
+        M.flush()
+        self.assertEqual(M._counts["github/y"], [1, 1.0])
+        M._counts.clear()
+        M._context.clear()
 
     def test_no_data_directory_writes_nothing(self):
         env = {k: v for k, v in os.environ.items() if k != "REVIEW_DATA"}
