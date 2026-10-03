@@ -148,7 +148,8 @@ class Publication:
         page proves that upload shows the store's current state. Local only."""
         directory = self.store.root / "pages" / digest(entry["target"])
         return dict(page_digest=verify(self.render(entry)[0])["page_digest"],
-                    revision=read(directory / "revision.json", 0))
+                    revision=read(directory / "revision.json", 0),
+                    epoch=read(directory / "epoch.json", 0))
 
     def deliver(self, entry, deadline):
         target = entry["target"]
@@ -163,6 +164,11 @@ class Publication:
         publish = endpoint.get("publish") or os.environ.get("REVIEW_PUBLISH")
         if not publish:
             raise OSError("no REVIEW_PUBLISH endpoint")
+        # Counted before the remote effect: an upload that then fails or dies
+        # may still have replaced the page, so any cached proof of an earlier
+        # upload must stop counting from here.
+        epoch = read(directory / "epoch.json", 0) + 1
+        atomic(directory / "epoch.json", epoch)
         # rsync's normal temp-file + rename, never --inplace. One page per transfer.
         destination = publish.rstrip("/") + "/" + str(Path(path).parent) + "/"
         with review_metrics.timed("site", "rsync page"):
@@ -194,6 +200,7 @@ class Publication:
             anchors=re.findall(r'<section id="([^"]+)"', raw.decode()),
             url=self.url(target),
             consumed=consumed,
+            epoch=epoch,
         )
 
     def verify_comment(self, entry, deadline):

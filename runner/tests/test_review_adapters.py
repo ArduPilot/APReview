@@ -6,6 +6,7 @@ import copy
 import importlib.util
 import os
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -852,10 +853,27 @@ class LocalPublication(unittest.TestCase):
             atomic(directory / "revision.json", receipt["revision"] + 1)
             self.assertFalse(Store.current_matches(self.publisher, entry, receipt))
             atomic(directory / "revision.json", receipt["revision"])
+            # an upload that replaced the page and then failed its check leaves
+            # the revision alone, but its epoch still invalidates the proof
+            atomic(directory / "epoch.json", receipt["epoch"] + 1)
+            self.assertFalse(Store.current_matches(self.publisher, entry, receipt))
+            atomic(directory / "epoch.json", receipt["epoch"])
+            self.assertTrue(Store.current_matches(self.publisher, entry, receipt))
             # a claim change alters the page with membership untouched, so the
             # earlier upload no longer proves anything
             atomic(claim, dict(generation=2, status="deferred", attempts=[], selected={}))
             self.assertFalse(Store.current_matches(self.publisher, entry, receipt))
+
+    def test_a_landing_page_keeps_its_served_sections_in_its_route_history(self):
+        target = "page:test/DevCallReviews/2026_10_04/A/devcall_pr_reviews.html"
+        self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
+        renderer = Renderer(self.store)
+        page = dict(path="A/devcall_pr_reviews.html", anchors=[], target=target)
+        body = renderer.landing("2026_10_04", {"A": page}).decode()
+        served = re.findall(r'<section id="([^"]+)"', body)
+        self.assertTrue(served)
+        routes = read(self.store.root / "landing" / "2026_10_04.json")
+        self.assertTrue(set(served) <= set(routes))
 
     def test_a_probe_render_of_a_landing_page_saves_no_routes(self):
         routes = self.store.root / "landing" / "2026_10_04.json"

@@ -537,8 +537,10 @@ class Renderer:
                 else "Review unavailable: " + escape(a)
             )
             body += "</p>\n"
-        routes = {a: t for a, t in routes.items() if a not in local}
-        mapping = json.dumps(routes, sort_keys=True).replace("<", "\\u003c")
+        # the saved history keeps every route; only the redirect skips the
+        # sections this page serves itself
+        redirect = {a: t for a, t in routes.items() if a not in local}
+        mapping = json.dumps(redirect, sort_keys=True).replace("<", "\\u003c")
         body += (
             "<script>const routes="
             + mapping

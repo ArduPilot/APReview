@@ -562,6 +562,8 @@ class Store:
         was ready before the page was rendered again here, when that render
         is byte for byte what was uploaded: the upload then shows everything
         those entries wait on. Caller holds the page region."""
+        if deadline and time.monotonic() >= deadline:
+            return
         target = canonical(entry["target"])
         batch = []
         for path in (self.root / "outbox").glob("*.json"):
@@ -608,7 +610,8 @@ class Store:
             return False
         if not now or not result.get("page_digest") or now.get("page_digest") != result["page_digest"]:
             return False
-        return "revision" not in result or now.get("revision") == result["revision"]
+        # no upload of the page, successful or not, since this one
+        return all(now.get(k) == result[k] for k in ("revision", "epoch") if k in result)
 
     def side_locks(self, entry, dependencies, gate):
         """Keep destination ownership through both the adapter call and receipt."""
