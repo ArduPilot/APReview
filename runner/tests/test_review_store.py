@@ -5,9 +5,10 @@ from pathlib import Path
 import subprocess
 import time
 import unittest
+from unittest.mock import Mock
 
 from review_fixtures import BIN, PR, complete_claim, python, stop, workspace
-from review_lock import try_lock
+from review_lock import region, try_lock
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, read
 
 
@@ -360,6 +361,85 @@ class ReviewStore(unittest.TestCase):
         self.store.drain(adapter)
         self.assertEqual(effects[0].stat().st_mtime_ns, first)
         self.assertFalse(list((self.root / "outbox").glob("*.json")))
+
+    def test_an_older_observation_arriving_late_never_overrides_a_newer_one(self):
+        page = "page:end/latest"
+        self.store.merge_membership(page, {PR: {"ticket": 10, "removed": False}})
+        self.store.merge_membership(page, {PR: {"ticket": 12, "removed": False}})
+        rows = self.store.merge_membership(page, {PR: {"ticket": 11, "removed": True}})
+        self.assertFalse(rows[PR]["removed"])
+        self.assertEqual(rows[PR]["ticket"], 12)
+
+    def test_a_lost_comment_response_is_reconciled_not_reposted(self):
+        self.accept()
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        def crash(point, state={}):
+            if point == "remote_effect" and state.get("kind") == "comment":
+                raise Crash()
+        real_deliver = adapter.deliver
+        def deliver(entry, deadline):
+            crash.__defaults__[0]["kind"] = entry["kind"]
+            return real_deliver(entry, deadline)
+        adapter.deliver = deliver
+        self.store.crash = crash
+        with self.assertRaises(Crash):
+            self.store.drain(adapter)
+        comments = lambda: [p for p in adapter.root.glob("*.json") if read(p)["entry"]["kind"] == "comment"]
+        self.assertEqual(len(comments()), 1)
+        self.store.crash = lambda point: None
+        self.store.drain(adapter)
+        self.assertEqual(len(comments()), 1)
+        receipt = [read(p) for p in (self.root / "receipts").glob("*.json") if read(p)["kind"] == "comment"]
+        self.assertEqual([r["state"] for r in receipt], ["posted"])
+
+    def test_an_upload_whose_receipt_was_lost_is_not_repeated(self):
+        self.accept()
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        def crash(point):
+            if point == "receipt_file":
+                raise Crash()
+        self.store.crash = crash
+        with self.assertRaises(Crash):
+            self.store.drain(adapter, limit=1)
+        effects = list(adapter.root.glob("*.json"))
+        self.assertEqual(len(effects), 1)
+        stamp = effects[0].stat().st_mtime_ns
+        self.store.crash = lambda point: None
+        self.store.drain(adapter)
+        self.assertEqual(effects[0].stat().st_mtime_ns, stamp)
+        self.assertFalse(list((self.root / "outbox").glob("*.json")))
+
+    def test_a_page_change_during_its_upload_is_published_again(self):
+        target = "page:end/shared"
+        outbox = self.root / "outbox"
+        def entries(n):
+            return (dict(id=f"proj{n}", pr=f"pr:owner/repo#{n}", generation=f"op{n}", kind="projection",
+                         target=target, gate="page", patches={f"pr:owner/repo#{n}": {"ticket": n, "removed": False}},
+                         state="owed", failures=0, next_attempt=0),
+                    dict(id=f"pub{n}", pr=f"pr:owner/repo#{n}", generation=f"op{n}", kind="publish",
+                         target=target, gate="page", dependencies=[f"proj{n}"], state="owed",
+                         failures=0, next_attempt=0))
+        for entry in entries(1):
+            atomic(outbox / (entry["id"] + ".json"), entry)
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        real = adapter.deliver
+        def deliver(entry, deadline):
+            result = real(entry, deadline)
+            if entry["id"] == "pub1":
+                # another PR's row lands on the page while its upload is in flight
+                projection, publish = entries(2)
+                self.store._merge_membership(Mock(closed=False, region=region(target)), target, projection["patches"])
+                self.store.receipt(projection, "published")
+                atomic(outbox / "pub2.json", publish)
+            return result
+        adapter.deliver = deliver
+        self.store.drain(adapter)
+        self.store.drain(adapter)
+        delivered = sorted(read(p)["entry"]["id"] for p in adapter.root.glob("*.json"))
+        self.assertEqual(delivered, ["pub1", "pub2"])
 
     def test_tombstones_and_accepted_generation_are_independent(self):
         self.accept()
