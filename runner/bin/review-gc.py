@@ -14,10 +14,12 @@ Receipts, operations, membership and generations are never touched here.
 Reports by default; --apply deletes. Statistics go to gc/last.json."""
 
 import argparse
+import fcntl
 import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import sys
 import time
 
@@ -183,28 +185,54 @@ class GC:
         self.removed = {}
         self.skipped = {}
 
+    def spent(self):
+        return self.apply and time.monotonic() > self.deadline
+
+    def parent_fd(self, path):
+        """A descriptor for path's parent, opened one component at a time from
+        the store or cache root without following any link, so no ancestor
+        swapped for a symlink can carry the deletion elsewhere."""
+        for root in self.roots:
+            if (str(path.parent) + "/").startswith(root):
+                parts = str(path.parent)[len(root):].split("/") if str(path.parent) + "/" != root else []
+                fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+                try:
+                    for part in filter(None, parts):
+                        nxt = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                        os.close(fd)
+                        fd = nxt
+                    return fd
+                except OSError:
+                    os.close(fd)
+                    raise
+        raise OSError("outside the store")
+
     def remove(self, rule, path):
-        # every ancestor resolved: a symlinked runs/ or attempts/ must not
-        # carry a deletion out of the store
-        if not (os.path.realpath(path.parent) + "/").startswith(self.roots):
-            self.skip(rule, "outside the store")
-            return
-        if self.apply and time.monotonic() > self.deadline:
+        if self.spent():
             self.skip(rule, "time budget spent")
             return
-        files, size = tally(path) if path.is_dir() else (1, path.lstat().st_size)
-        r = self.removed.setdefault(rule, [0, 0, 0])
-        r[0] += 1
-        r[1] += files
-        r[2] += size
-        if self.apply:
-            if path.is_dir() and not path.is_symlink():
-                shutil.rmtree(path, ignore_errors=True)
-            else:
-                try:
-                    path.unlink()
-                except OSError:
-                    pass
+        try:
+            parent = self.parent_fd(path)
+        except OSError:
+            self.skip(rule, "outside the store, or reached through a link")
+            return
+        try:
+            st = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+            directory = stat.S_ISDIR(st.st_mode)
+            files, size = tally(path) if directory else (1, st.st_size)
+            r = self.removed.setdefault(rule, [0, 0, 0])
+            r[0] += 1
+            r[1] += files
+            r[2] += size
+            if self.apply:
+                if directory:
+                    shutil.rmtree(path.name, dir_fd=parent, ignore_errors=True)
+                else:
+                    os.unlink(path.name, dir_fd=parent)
+        except OSError:
+            pass
+        finally:
+            os.close(parent)
 
     def skip(self, rule, why):
         self.skipped.setdefault(rule, {}).setdefault(why, 0)
@@ -219,6 +247,9 @@ class GC:
             for attempt in run.glob("attempts/*"):
                 if live(attempt / "status.json") or live(attempt / "manager.json"):
                     return True
+                status = load(attempt / "status.json")
+                if status and status.get("state") not in (None, "terminal") and not run_finished(run, self.now):
+                    return True
         return False
 
     def settled_attempt(self, attempt, pins, processes):
@@ -232,8 +263,10 @@ class GC:
         if (attempt / "wt").exists():
             return "worktree present"
         status = load(attempt / "status.json")
-        if status is not None and status.get("state") != "terminal":
-            return "cleanup unresolved"
+        if status is None or status.get("state") != "terminal":
+            # terminal is written only once cleanup found the payload empty;
+            # without it there is no proof the attempt's processes are gone
+            return "no cleanup proof"
         if newer_than(attempt, self.now - EVIDENCE_DAYS * 86400) or used(attempt, processes):
             return "recent"
         return None
@@ -243,6 +276,8 @@ class GC:
             self.skip("attempt evidence", "runs is a symlink")
             return
         for run in sorted(self.data.glob("runs/*")):
+            if self.spent():
+                return
             if not run.is_dir() or run.is_symlink() or (run / "attempts").is_symlink():
                 continue
             if not run_finished(run, self.now):
@@ -270,6 +305,8 @@ class GC:
     def litter(self, processes):
         cutoff = self.now - LITTER_DAYS * 86400
         for entry in sorted(self.data.iterdir()):
+            if self.spent():
+                return
             name = entry.name
             # store state is JSON at the top; an unknown one is kept, not guessed at
             if name in OWNED or name.endswith(".json"):
@@ -348,21 +385,38 @@ def main():
     # run can start (run-reviewprs.sh defers it to its next slot), so nothing
     # can begin using what is being removed. Collection happens only when no
     # run or guardian is live, with pins read under the fence.
-    fence = acquire(os.path.join(data, "locks"), "pause", time.monotonic() + 5) if a.apply else None
-    if a.apply and fence is None:
-        gc.skip("all rules", "admission fence busy")
-    elif gc.any_live():
-        gc.skip("all rules", "a run or guardian is live")
-    else:
-        try:
+    # Every controller holds "maintenance" shared for its life (taken right
+    # after its run lock), so holding it exclusively means no run is going and
+    # none can start, resume or recover until it is released.
+    fence = acquire(os.path.join(data, "locks"), "maintenance", time.monotonic() + 5) if a.apply else None
+    legacy = None
+    try:
+        if a.apply and fence is None:
+            gc.skip("all rules", "a controller holds the maintenance lock")
+        elif gc.any_live():
+            gc.skip("all rules", "a run or guardian is live")
+        else:
+            if a.legacy and a.apply:
+                # the retired path's run lock: held, its runner cannot start
+                try:
+                    legacy = open(os.path.join(os.path.dirname(data), "etc", "reviewprs.lock"), "a")
+                    fcntl.flock(legacy, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    if legacy:
+                        legacy.close()
+                    legacy = None
+                    gc.legacy = False
+                    gc.skip("legacy work dirs", "the retired path's lock is held")
             processes = in_use()
             gc.attempts(pinned_attempts(data), processes)
             gc.litter(processes)
             gc.scratch(processes)
             gc.venvs(os.path.realpath(a.cache), processes)
-        finally:
-            if fence:
-                fence.close()
+    finally:
+        if legacy:
+            legacy.close()
+        if fence:
+            fence.close()
     report = dict(at=gc.now, applied=a.apply,
                   removed={k: dict(entries=v[0], files=v[1], bytes=v[2]) for k, v in gc.removed.items()},
                   skipped=gc.skipped)

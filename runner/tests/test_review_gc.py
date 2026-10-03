@@ -32,6 +32,7 @@ class GC(unittest.TestCase):
         base.mkdir(parents=True, exist_ok=True)
         self.root = Path(tempfile.mkdtemp(prefix="gc-", dir=base))
         self.data, self.cache = self.root / "data", self.root / "cache"
+        (self.root / "etc").mkdir()
         run = self.data / "runs" / "followup-1"
         write(run / "run.json", {"created": OLD})
         write(run / "summary.json", {"state": "complete", "heartbeat": OLD})
@@ -153,12 +154,12 @@ class GC(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in attempt.iterdir()),
                          ["empty.json", "job.json", "launch.json", "manager.json", "status.json"])
 
-    def test_a_busy_admission_fence_stops_all_deletion(self):
+    def test_a_controller_holding_maintenance_stops_all_deletion(self):
         sys.path.insert(0, str(BIN))
         from review_lock import try_lock
-        with try_lock(self.data / "locks", "pause", shared=True):
+        with try_lock(self.data / "locks", "maintenance", shared=True):
             report = self.gc("--apply")
-        self.assertIn("admission fence busy", report["skipped"]["all rules"])
+        self.assertIn("a controller holds the maintenance lock", report["skipped"]["all rules"])
         self.assertTrue((self.data / "pr34599").exists())
         self.assertTrue((self.data / "runs/followup-1/attempts/free/cold-evidence").exists())
 
@@ -187,6 +188,20 @@ class GC(unittest.TestCase):
     def test_legacy_directories_need_their_own_flag(self):
         self.gc("--apply", "--legacy")
         self.assertFalse((self.data / "fu_20260928_2037_EbmO").exists())
+
+    def test_legacy_directories_stay_while_the_retired_path_holds_its_lock(self):
+        import fcntl
+        with open(self.root / "etc" / "reviewprs.lock", "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.gc("--apply", "--legacy")
+        self.assertTrue((self.data / "fu_20260928_2037_EbmO").exists())
+
+    def test_an_attempt_with_no_status_is_kept_whole(self):
+        attempt = self.data / "runs" / "followup-1" / "attempts" / "free"
+        (attempt / "status.json").unlink()
+        age_tree(self.data / "runs" / "followup-1")
+        self.gc("--apply")
+        self.assertTrue((attempt / "cold-evidence").exists())
 
     def test_a_directory_a_process_is_using_is_kept(self):
         child = subprocess.Popen(["sleep", "30"], cwd=self.data / "pr34599")
