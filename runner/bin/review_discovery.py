@@ -664,7 +664,8 @@ class Discovery:
             pass
         try:
             full = self.gh.request(f"repos/{repository}/commits/{told}")["sha"]
-            git(clone, "fetch", "--no-tags", "origin", full)
+            with review_metrics.timed("github", "git fetch"):
+                git(clone, "fetch", "--no-tags", "origin", full)
             return full
         except (OSError, KeyError, TypeError, subprocess.TimeoutExpired):
             return None
