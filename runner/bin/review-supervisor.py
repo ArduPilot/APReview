@@ -11,7 +11,7 @@ import time
 import uuid
 
 from review_guardian import alive, cleanup_attempt, identity, launch
-from review_lock import account_slot, canonical, permit, try_lock
+from review_lock import account_slot, acquire, canonical, permit, try_lock
 from review_schema import FILES, read_result
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, mkdir, read
 import review_metrics
@@ -1028,6 +1028,12 @@ class Supervisor:
         self.lock = try_lock(self.store.locks, "run:" + self.run_id)
         if self.lock is None:
             return 75
+        # held shared for the controller's life: store GC deletes only while it
+        # holds this exclusively, so no run starts, resumes or recovers then
+        self.maintenance = acquire(self.store.locks, "maintenance", time.monotonic() + 900, shared=True)
+        if self.maintenance is None:
+            self.lock.close()
+            return 75
         try:
             self.config = read(self.directory / "run.json")
             self.states = read(self.directory / "state.json", {})
@@ -1154,6 +1160,7 @@ class Supervisor:
             for lock in self.owned.values():
                 lock.close()
             self.owned.clear()
+            self.maintenance.close()
             self.lock.close()
 
 
