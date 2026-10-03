@@ -503,6 +503,20 @@ class ReviewStore(unittest.TestCase):
         self.store.drain(adapter, seconds=0)
         self.assertEqual(len(list(adapter.root.glob("*.json"))), 1)
 
+    def test_blocked_entries_do_not_fill_the_drains_snapshot(self):
+        self.accept()
+        self.lock.close()
+        outbox = self.root / "outbox"
+        ready = sorted(read(p)["id"] for p in outbox.glob("*.json")
+                       if not read(p).get("dependencies"))
+        self.assertTrue(ready)
+        for i in range(5):
+            blocked = dict(read(outbox / (ready[0] + ".json")), id="blocked%d" % i,
+                           next_attempt=0, dependencies=["never-settles"])
+            atomic(outbox / ("blocked%d.json" % i), blocked)
+        snapshot = self.store.delivery_snapshot(limit=len(ready))
+        self.assertEqual(sorted(x["id"] for x in snapshot), ready)
+
     def test_a_started_delivery_gets_its_own_minute_not_the_budgets_remainder(self):
         self.accept()
         self.lock.close()

@@ -529,7 +529,29 @@ class Store:
         # another drain may receipt and remove an entry between glob and read
         snapshot = sorted((x for x in (read(p) for p in (self.root / "outbox").glob("*.json")) if x),
                           key=lambda x: (x["next_attempt"], self.KIND_ORDER.get(x["kind"], 5), x["id"]))
-        return [x for x in snapshot if x["next_attempt"] <= time.time() and x["failures"] < 5][:limit]
+        # Only entries whose dependencies have settled: a blocked entry keeps
+        # its place at the head, and a hundred of them filled every pass while
+        # ready entries behind them waited.
+        # A dependency queued and itself ready counts: it settles earlier in
+        # the same pass (projections sort before the publishes they feed).
+        now = time.time()
+        queued = {x["id"]: x for x in snapshot}
+        settled = {}
+
+        def ok(dep):
+            if dep not in settled:
+                settled[dep] = False            # a cycle is not ready
+                receipt = read(self.root / "receipts" / (dep + ".json"))
+                if receipt:
+                    settled[dep] = receipt["state"] in self.SETTLED
+                elif dep in queued:
+                    settled[dep] = ready(queued[dep])
+            return settled[dep]
+
+        def ready(x):
+            return x["next_attempt"] <= now and x["failures"] < 5 and all(map(ok, x.get("dependencies", [])))
+
+        return [x for x in snapshot if ready(x)][:limit]
 
     SETTLED = ("published", "posted", "not_applicable", "synced", "held", "superseded")
 
