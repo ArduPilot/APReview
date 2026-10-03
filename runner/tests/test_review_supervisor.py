@@ -461,6 +461,50 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor._project(dict(c, observation=3), "discovery", quiet=True)
         self.assertEqual(ops(), 2)
 
+    def quiet_supervisor(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = Store(self.root / "data")
+        supervisor.run_id = str(self.root / "run0")
+        supervisor.config = {"stub": True, "mode": "followup", "phases": {}, "observation": 0,
+                             "configuration": {"endpoints": {"stub": {"publish": "A", "url": "http://a"}}}}
+        return supervisor
+
+    def observe(self, supervisor, c, n, **changes):
+        supervisor.run_id = str(self.root / ("run%d" % n))
+        before = len(list((supervisor.store.root / "operations").glob("*.json")))
+        supervisor._project(dict(c, observation=n, **changes), "discovery", quiet=True)
+        supervisor.store.drain(StubAdapter(supervisor.store.root))
+        return len(list((supervisor.store.root / "operations").glob("*.json"))) - before
+
+    def test_a_row_without_a_record_of_what_it_showed_always_publishes(self):
+        supervisor = self.quiet_supervisor()
+        page = "page:stub/end/a.html"
+        # a row from before records existed, then a per-page removal
+        supervisor.store.merge_membership(page, {PR: {"ticket": 1, "removed": False}})
+        c = dict(candidate(), pr=PR, destinations=[page], membership_removed={page: True})
+        self.assertEqual(self.observe(supervisor, c, 2), 1)
+
+    def test_a_busy_page_leaves_an_unknown_record_that_never_matches(self):
+        supervisor = self.quiet_supervisor()
+        page = "page:stub/end/a.html"
+        ok, bad = {"state": "success", "at": "2026-10-04T01:00"}, {"state": "failure", "at": "2026-10-04T02:00"}
+        c = dict(candidate(), pr=PR, destinations=[page])
+        self.observe(supervisor, c, 1, ci=ok)
+        with patch.object(SUPERVISOR, "try_lock", return_value=None):
+            self.assertEqual(self.observe(supervisor, c, 2, ci=bad), 1)
+        # back to passing: the page shows failing, so this must publish
+        self.assertEqual(self.observe(supervisor, c, 3, ci=ok), 1)
+        self.assertEqual(self.observe(supervisor, c, 4, ci=ok), 0)
+
+    def test_a_new_destination_publishes_even_when_nothing_else_changed(self):
+        supervisor = self.quiet_supervisor()
+        page = "page:stub/end/a.html"
+        c = dict(candidate(), pr=PR, destinations=[page])
+        self.observe(supervisor, c, 1)
+        self.assertEqual(self.observe(supervisor, c, 2), 0)
+        supervisor.config["configuration"]["endpoints"]["stub"]["url"] = "http://b"
+        self.assertEqual(self.observe(supervisor, c, 3), 1)
+
     def test_a_partly_suppressed_discovery_resumes_and_feeds_acceptance(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.store = Store(self.root / "data")
@@ -471,7 +515,8 @@ class ReviewSupervisor(unittest.TestCase):
         ci = {"state": "success", "at": "2026-10-04T01:00"}
         supervisor.store.merge_membership(a, {PR: {"ticket": 1, "removed": False, "ci": ci,
                                                    "progress": "discovery",
-                                                   "shown": [None, "success", "2026-10-04", "discovery", []]}})
+                                                   "shown": {"view": [None, "success", "2026-10-04", "discovery", [], None],
+                                                             "destination": supervisor.destination(a), "at": 1}}})
         c = dict(candidate(), pr=PR, destinations=[a, b], ci=ci, observation=2)
         supervisor._project(c, "discovery", quiet=True)     # a unchanged, b new
         [op] = (supervisor.store.root / "operations").glob("*.json")

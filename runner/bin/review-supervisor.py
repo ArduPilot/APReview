@@ -262,13 +262,32 @@ class Supervisor:
                 shown = self.examine(projection["target"], pr, projection["patches"][pr], quiet)
                 if shown is True:
                     continue
-                if shown is not None:
-                    projection["patches"][pr]["shown"] = shown
+                # always recorded, as known or unknown, so no older record can
+                # survive to match a state the page no longer shows
+                projection["patches"][pr]["shown"] = shown
                 kept += [projection, publish]
             intents = kept
         if intents:
             intents.extend(self.landing_intents(pr, operation, intents, gate="page"))
             self.store.journal(self.run_id, self.phase_name(phase), pr, intents)
+
+    def legacy_facts(self, pr):
+        """The handoff's title, author and verdict corrections for a legacy
+        review, which the renderer applies; cached while the file is."""
+        path = self.store.root / "legacy-facts.json"
+        try:
+            stamp = path.stat().st_mtime_ns
+        except OSError:
+            return None
+        if getattr(self, "_facts", (None,))[0] != stamp:
+            self._facts = (stamp, read(path, {}))
+        return self._facts[1].get(pr)
+
+    def destination(self, target):
+        """Where a page is published under this run's frozen configuration."""
+        endpoint, path = canonical(target)[5:].split("/", 1)
+        configured = self.config["configuration"].get("endpoints", {}).get(endpoint, {})
+        return [configured.get("publish") or os.environ.get("REVIEW_PUBLISH"), configured.get("url"), path]
 
     def visible(self, row, pr):
         """What a page shows from a membership row, as review_render does:
@@ -285,43 +304,49 @@ class Supervisor:
                         else claim["status"])
         else:
             progress = row.get("progress")
-        comments = []
+        comments, facts = [], None
         if generation is not None:
             from review_render import bundle_at
             bundle = bundle_at(self.store, pr, generation) or {}
-            if not bundle.get("legacy"):
+            if bundle.get("legacy"):
+                facts = self.legacy_facts(pr)
+            else:
                 for intent in bundle.get("intents", []):
                     if intent["kind"] in ("comment", "note"):
                         r = read(self.store.root / "receipts" / (intent["id"] + ".json"), {})
                         comments.append([r.get("url"), r.get("manual_command")])
-        return [generation, ci.get("state"), (ci.get("at") or "")[:10], progress, comments]
+        return [generation, ci.get("state"), (ci.get("at") or "")[:10], progress, comments, facts]
 
     def examine(self, target, pr, patch, quiet):
-        """True when a quiet observation was merged directly, the page showing
-        what it last was asked to; otherwise what the page will show after
-        this merge, or None when the page is busy or the merge refused. The
-        rows compared are exactly the rows written."""
+        """True when a quiet observation was merged directly, the page being
+        known to have been asked to show exactly this, at this destination.
+        Otherwise the record its journalled projection carries: what the
+        page will show, or unknown when the page is busy or the merge
+        refused. A missing or unknown record never matches. The rows
+        compared are exactly the rows written."""
+        unknown = {"unknown": True, "at": time.time_ns()}
         try:
             lock = try_lock(self.store.locks, target)
         except RuntimeError:
-            return None
+            return unknown
         if lock is None:
-            return None
+            return unknown
         try:
             with lock:
                 rows = self.store._merge_membership(lock, target, {pr: patch}, write=False)
                 path = self.store.root / "membership" / (digest(canonical(target)) + ".json")
-                last = read(path, {}).get(pr, {}).get("shown")
-                after = self.visible(rows.get(pr), pr)
-                if quiet and after == last:
-                    rows[pr]["shown"] = last
+                last = read(path, {}).get(pr, {}).get("shown") or {}
+                now = {"view": self.visible(rows.get(pr), pr), "destination": self.destination(target),
+                       "at": time.time_ns()}
+                if (quiet and not last.get("unknown") and "view" in last
+                        and [last["view"], last.get("destination")] == [now["view"], now["destination"]]):
                     self.store.write_membership(lock, target, rows)
                     review_metrics.count("local", "projection merged unchanged")
                     return True
                 review_metrics.count("local", "projection journalled")
-                return after
+                return now
         except (ValueError, OSError):
-            return None
+            return unknown
 
     def save(self, force=False):
         now = time.monotonic()

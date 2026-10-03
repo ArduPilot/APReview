@@ -432,12 +432,16 @@ class Store:
             if "ticket" in patch and patch["ticket"] > old["ticket"]:
                 row.update(ticket=patch["ticket"], removed=patch["removed"])
                 row.pop("candidate", None)
-                for field in ("ci", "progress", "unreachable", "shown"):
+                for field in ("ci", "progress", "unreachable"):
                     if field in patch:
                         row[field] = patch[field]
                 current = self.current(pr)
                 if not row["removed"] and current:
                     row["generation"] = max(row.get("generation", 0), current["generation"])
+            # what the page was last asked to show: the newest record wins,
+            # whatever the observation's ticket
+            if "shown" in patch and patch["shown"]["at"] > (row.get("shown") or {}).get("at", -1):
+                row["shown"] = patch["shown"]
             if "generation" in patch and not row["removed"]:
                 generation = patch["generation"]
                 accepted = {b["generation"] for b in self.chain(pr)}
