@@ -14,6 +14,7 @@ from review_guardian import alive, cleanup_attempt, identity, launch
 from review_lock import account_slot, canonical, permit, try_lock
 from review_schema import FILES, read_result
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, mkdir, read
+import review_metrics
 from review_discovery import Discovery, LABELS
 from review_github import GitHub, RateLimited
 from review_delivery import Delivery
@@ -106,6 +107,8 @@ class Supervisor:
         self.directory = Path(directory).resolve()
         mkdir(self.directory)
         self.run_id = str(self.directory)
+        review_metrics.context(process="controller", run=self.directory.name, data=str(self.store.root))
+        self.last_metrics = time.monotonic()
         self.lock = None
         self.owned = {}
         self.children = []
@@ -246,6 +249,9 @@ class Supervisor:
 
     def save(self, force=False):
         now = time.monotonic()
+        if force or now - getattr(self, "last_metrics", now) > 60:
+            review_metrics.flush()
+            self.last_metrics = now
         if not force and now - self.last_save < 3:
             return
         receipts = self.store.receipt_index()
@@ -547,6 +553,7 @@ class Supervisor:
         return "failed" if cleanup_attempt(Path(path), time.monotonic() + 5) else "blocked"
 
     def start_attempt(self, candidate, kind, claim):
+        review_metrics.count("inference", kind)
         pr = candidate["pr"]
         state = self.states[pr]
         attempt_id = uuid.uuid4().hex

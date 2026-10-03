@@ -6,6 +6,7 @@ import time
 from review_store import Store, read
 from review_github import GitHub
 from review_delivery import Delivery
+import review_metrics
 
 p = argparse.ArgumentParser()
 p.add_argument("--data", required=True)
@@ -15,6 +16,7 @@ a = p.parse_args()
 BUDGET = a.budget
 c = read(a.config) if a.config else {}
 s = Store(a.data)
+review_metrics.context(process="drain", data=a.data)
 g = GitHub(
     c.get("github_recordings"),
     c.get("github_mode", "live"),
