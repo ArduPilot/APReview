@@ -5,6 +5,7 @@ Tiers, most expensive first: inference, github, site (the publishing host),
 local. Nothing is written unless a data directory is known."""
 
 import atexit
+import fcntl
 import json
 import os
 import re
@@ -88,6 +89,9 @@ def flush():
         fd = os.open(os.path.join(directory, time.strftime("%Y-%m-%d") + ".jsonl"),
                      os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
+            # one writer at a time, so a fragment's repair newline cannot land
+            # after another process's whole record and swallow it
+            fcntl.flock(fd, fcntl.LOCK_EX)
             data = line.encode()
             written = os.write(fd, data)
             if written != len(data):
