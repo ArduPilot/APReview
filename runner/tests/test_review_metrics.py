@@ -56,6 +56,34 @@ class Metrics(unittest.TestCase):
         M._counts.clear()
         M._context.clear()
 
+    def test_a_short_write_keeps_the_counts_and_the_log_parseable(self):
+        data = tempfile.mkdtemp()
+        M._counts.clear()
+        M.context(data=data, process="t")
+        M.count("github", "z", 2.0)
+        real = os.write
+        calls = []
+        def short(fd, b):
+            calls.append(len(b))
+            return real(fd, b[:5] if len(calls) == 1 else b)
+        M.os.write = short
+        try:
+            M.flush()
+        finally:
+            M.os.write = real
+        self.assertEqual(M._counts["github/z"], [1, 2.0])
+        M.flush()
+        [log] = os.listdir(os.path.join(data, "metrics"))
+        good = []
+        for line in open(os.path.join(data, "metrics", log)):
+            try:
+                good.append(json.loads(line))
+            except ValueError:
+                pass
+        self.assertEqual([x["counts"] for x in good], [{"github/z": [1, 2.0]}])
+        M._counts.clear()
+        M._context.clear()
+
     def test_no_data_directory_writes_nothing(self):
         env = {k: v for k, v in os.environ.items() if k != "REVIEW_DATA"}
         cwd = tempfile.mkdtemp()

@@ -89,8 +89,12 @@ def flush():
                      os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
             data = line.encode()
-            while data:
-                data = data[os.write(fd, data):]
+            written = os.write(fd, data)
+            if written != len(data):
+                # end the fragment so the next record still parses, and keep
+                # these counts for the next flush
+                os.write(fd, b"\n")
+                raise OSError("short metrics write")
         finally:
             os.close(fd)
     except OSError:
