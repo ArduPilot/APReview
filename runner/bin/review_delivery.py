@@ -610,6 +610,12 @@ class Delivery:
             return self.board.deliver(entry, deadline)
         raise OSError("unknown delivery kind")
 
+    def destination_of(self, entry):
+        selected = self.selected(entry)
+        if selected is not self:
+            return getattr(selected, "destination_of", lambda e: None)(entry)
+        return self.publication.destination(entry["target"]) if entry["kind"] == "publish" else None
+
     def confirmed(self, entry):
         selected = self.selected(entry)
         if selected is not self:

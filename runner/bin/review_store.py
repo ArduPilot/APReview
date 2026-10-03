@@ -432,7 +432,7 @@ class Store:
             if "ticket" in patch and patch["ticket"] > old["ticket"]:
                 row.update(ticket=patch["ticket"], removed=patch["removed"])
                 row.pop("candidate", None)
-                for field in ("ci", "progress", "unreachable"):
+                for field in ("ci", "progress", "unreachable", "shown"):
                     if field in patch:
                         row[field] = patch[field]
                 current = self.current(pr)
@@ -449,6 +449,12 @@ class Store:
         if write:
             atomic(path, rows, self.crash, "membership")
         return rows
+
+    def write_membership(self, lock, page, rows):
+        """Write rows worked out under this same page lock (a dry merge)."""
+        if lock.closed or lock.region != region(page):
+            raise RuntimeError("membership page ownership required")
+        atomic(self.root / "membership" / (digest(canonical(page)) + ".json"), rows, self.crash, "membership")
 
     def journal(self, run, phase, pr, intents):
         if any(x["kind"] not in ("publish", "projection") or x.get("gate") != "page" or
@@ -575,7 +581,7 @@ class Store:
             other = read(path)
             if (not other or other["id"] == entry["id"] or other["kind"] != "publish"
                     or other.get("gate") != "page" or canonical(other["target"]) != target
-                    or other.get("retained")):
+                    or other.get("retained") or not self.same_destination(adapter, entry, other)):
                 continue
             if (self.root / "receipts" / (other["id"] + ".json")).exists():
                 unlink(path)
@@ -592,6 +598,13 @@ class Store:
             if deadline and time.monotonic() >= deadline:
                 return
             self.settle_from(other, result)
+
+    @staticmethod
+    def same_destination(adapter, entry, other):
+        """Entries carry their own frozen endpoint configuration; an upload
+        settles another entry only if both go to the same place."""
+        where = getattr(adapter, "destination_of", None)
+        return where is None or where(entry) == where(other)
 
     def settle_from(self, entry, result):
         """Receipt entry from another upload of its page, with its own state:
@@ -723,10 +736,9 @@ class Store:
                             # run owes dozens of the same page.
                             whole = entry["kind"] == "publish" and not entry.get("retained")
                             target = canonical(entry["target"]) if whole else None
-                            # an upload this drain made, or the page's last
-                            # verified upload by anyone, proven by rendering now
-                            done = self.__dict__.setdefault("_rendered", {}).get(target) or (
-                                getattr(adapter, "confirmed", lambda e: None)(entry) if whole else None)
+                            # the page's last verified upload to this entry's
+                            # destination, proven by rendering now
+                            done = getattr(adapter, "confirmed", lambda e: None)(entry) if whole else None
                             if done and self.contained(entry, done, adapter):
                                 self.settle_from(entry, done)
                                 review_metrics.count("local", "publish settled by a render")
@@ -737,8 +749,6 @@ class Store:
                             atomic(path, entry)
                             result = adapter.deliver(entry, deadline)
                             self.crash("remote_effect")
-                            if whole:
-                                self._rendered[target] = result
                     self.receipt(entry, **result)
                     if entry["kind"] == "publish" and entry.get("gate") == "page" and delivered:
                         self._coalesce(entry, result, adapter, deadline)
@@ -771,8 +781,15 @@ class StubAdapter:
                   "payload_digest": entry["payload_digest"], "target_id": entry["id"]}
         if entry["kind"] == "publish":
             result["page_digest"] = self.current(entry)["page_digest"]
+            if not entry.get("retained"):
+                atomic(self.root / "confirmed" / (digest(canonical(entry["target"])) + ".json"), result)
         atomic(self.root / (entry["id"] + ".json"), {"entry": entry, "result": result})
         return result
+
+    def confirmed(self, entry):
+        if entry.get("retained"):
+            return None
+        return read(self.root / "confirmed" / (digest(canonical(entry["target"])) + ".json"))
 
     def current(self, entry):
         """The stub's page is its membership, and for a landing page the label
