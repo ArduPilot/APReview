@@ -60,11 +60,15 @@ def runs(data, since):
         for job_path in glob.glob(os.path.join(directory, "attempts", "*", "job.json")):
             job = load(job_path, {})
             attempt = os.path.dirname(job_path)
+            # launch.json is written before the guardian starts; a status
+            # with a pid is the guardian having actually run
+            status = load(os.path.join(attempt, "status.json"), {})
+            if not status.get("pid"):
+                continue
             try:
                 launched = os.path.getmtime(os.path.join(attempt, "launch.json"))
             except OSError:
                 continue
-            status = load(os.path.join(attempt, "status.json"), {})
             first = launched if first is None else min(first, launched)
             kind = job.get("kind", "?")
             passes[kind] += 1
