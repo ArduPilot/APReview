@@ -86,7 +86,11 @@ Agents leave build trees, logs and venvs at the top of `REVIEW_DATA`.
 and inference adds the attempt directory and already puts `BUILDLOGS` there.
 First audit the effective grants and what tools need (caches, venvs); then
 narrow writes to the attempt directory with its own `scratch/` and `TMPDIR`.
-Setting `TMPDIR` alone is not isolation. *(rev 2)*
+Setting `TMPDIR` alone is not isolation. *(rev 2)* Done so far: passes get
+`REVIEW_SCRATCH` and `TMPDIR` inside the attempt and shared caches under the
+runtime's `cache/`, and the prompts say to use them. The grants themselves
+stay wide until two things move: the build permit locks `REVIEW_DATA/locks`,
+and git worktrees write administrative files inside their reference clone.
 
 ## 2. Followup: bounded, change-driven discovery (tiers 4 then 2)
 
