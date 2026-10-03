@@ -167,6 +167,31 @@ def legacy_facts(raw):
     return facts
 
 
+def comment_receipts(store, bundle):
+    """The comment and note receipts a page shows for a bundle."""
+    if not bundle or bundle.get("legacy"):
+        return []
+    return [read(store.root / "receipts" / (intent["id"] + ".json"), {})
+            for intent in bundle["intents"] if intent["kind"] in ("comment", "note")]
+
+
+def row_view(row, bundle, claim, receipts, recorded):
+    """Everything a page shows that depends on one membership row: whether it
+    is listed, the generation, CI state and the day it was seen, the progress
+    note (decided by the claim when there is one), comment links or held
+    commands, and the handoff's corrections for a legacy review. Two equal
+    views render the same section."""
+    if not row or row.get("removed"):
+        return None
+    ci = row.get("ci") or {}
+    progress = row.get("progress")
+    if claim:
+        progress = "accepted" if bundle and bundle["generation"] >= claim["generation"] else claim["status"]
+    return [row.get("generation"), ci.get("state"), (ci.get("at") or "")[:10], progress,
+            [[r.get("url"), r.get("manual_command")] for r in receipts],
+            (recorded or {}).get(bundle["pr"]) if bundle and bundle.get("legacy") else None]
+
+
 def facts(bundle, recorded=None):
     if bundle.get("legacy"):
         out = legacy_facts(bundle["results"]["reconciliation"]["section_md"])
@@ -362,6 +387,9 @@ class Renderer:
     def body(self, target, retained=None):
         rows = read(self.store.root / "membership" / (digest(target) + ".json"), {})
         bundles, annotations, pending = [], {}, []
+        # what each row put on this page, read once and used for both
+        self.views, shown_receipts = {}, {}
+        recorded = read(self.store.root / "legacy-facts.json", {})
         if retained:
             bundles = [retained]
         else:
@@ -381,6 +409,8 @@ class Renderer:
                         if bundle and bundle["generation"] >= claim["generation"]
                         else claim["status"]
                     )
+                shown_receipts[pr] = comment_receipts(self.store, bundle)
+                self.views[pr] = row_view(row, bundle, claim, shown_receipts[pr], recorded)
                 annotation = ""
                 ci = row.get("ci")
                 if ci and bundle:
@@ -422,7 +452,6 @@ class Renderer:
                          ", %d awaiting review" % len(pending) if pending else ""))
         contents = []
         verdicts = []
-        recorded = read(self.store.root / "legacy-facts.json", {})
         for b in bundles:
             i = b["inputs"]
             f = facts(b, recorded)
@@ -456,15 +485,8 @@ class Renderer:
                     + "</code>, now <code>" + escape(snapshot["head"][:10])
                     + "</code>. The new head is not covered.</p>\n"
                 )
-            receipts = (
-                []
-                if retained or b.get("legacy")
-                else [
-                    read(self.store.root / "receipts" / (intent["id"] + ".json"), {})
-                    for intent in b["intents"]
-                    if intent["kind"] in ("comment", "note")
-                ]
-            )
+            receipts = [] if retained or b.get("legacy") else shown_receipts.get(
+                b["pr"], comment_receipts(self.store, b))
             for r in receipts:
                 if r.get("url"):
                     annotation += '<p class="annot">Comment: <a href="' + escape(r["url"]) + '">posted</a></p>\n'

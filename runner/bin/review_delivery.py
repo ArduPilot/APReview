@@ -216,6 +216,8 @@ class Publication:
             url=self.url(target),
             consumed=consumed,
             epoch=epoch,
+            # what each row put on the page this upload served
+            views=None if landing or entry.get("retained") else self.renderer.views,
         )
         if not entry.get("retained"):
             # the page as last verified served: a later publish whose fresh

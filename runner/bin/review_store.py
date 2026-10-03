@@ -438,10 +438,6 @@ class Store:
                 current = self.current(pr)
                 if not row["removed"] and current:
                     row["generation"] = max(row.get("generation", 0), current["generation"])
-            # what the page was last asked to show: the newest record wins,
-            # whatever the observation's ticket
-            if "shown" in patch and patch["shown"]["at"] > (row.get("shown") or {}).get("at", -1):
-                row["shown"] = patch["shown"]
             if "generation" in patch and not row["removed"]:
                 generation = patch["generation"]
                 accepted = {b["generation"] for b in self.chain(pr)}
@@ -453,6 +449,21 @@ class Store:
         if write:
             atomic(path, rows, self.crash, "membership")
         return rows
+
+    def record_published(self, lock, page, result, destination):
+        """Store, on each row, what the page served by this verified upload
+        shows for it and where: a controller suppresses an observation only
+        when the page would show exactly that. Caller holds the page."""
+        views = result.get("views")
+        if views is None or lock is None or lock.closed or lock.region != region(page):
+            return
+        path = self.root / "membership" / (digest(canonical(page)) + ".json")
+        rows = read(path)
+        if not rows:
+            return
+        for pr, row in rows.items():
+            row["published"] = {"view": views.get(pr), "destination": destination}
+        atomic(path, rows, self.crash, "membership")
 
     def write_membership(self, lock, page, rows):
         """Write rows worked out under this same page lock (a dry merge)."""
@@ -572,7 +583,7 @@ class Store:
 
     SETTLED = ("published", "posted", "not_applicable", "synced", "held", "superseded")
 
-    def _coalesce(self, entry, result, adapter, deadline=None):
+    def _coalesce(self, entry, result, adapter, deadline=None, lock=None):
         """One publish of a page satisfies every other owed publish of it that
         was ready before the page was rendered again here, when that render
         is byte for byte what was uploaded: the upload then shows everything
@@ -601,7 +612,12 @@ class Store:
         for other in batch:
             if deadline and time.monotonic() >= deadline:
                 return
-            self.settle_from(other, result)
+            self.settle_from(other, result, lock, self.destination(adapter, other))
+
+    @staticmethod
+    def destination(adapter, entry):
+        where = getattr(adapter, "destination_of", None)
+        return where(entry) if where else None
 
     @staticmethod
     def same_destination(adapter, entry, other):
@@ -610,13 +626,14 @@ class Store:
         where = getattr(adapter, "destination_of", None)
         return where is None or where(entry) == where(other)
 
-    def settle_from(self, entry, result):
+    def settle_from(self, entry, result, lock=None, destination=None):
         """Receipt entry from another upload of its page, with its own state:
         superseded when its PR has left the page, as delivery decides it."""
         rows = read(self.root / "membership" / (digest(canonical(entry["target"])) + ".json"), {})
         removed = (isinstance(entry["generation"], int) and not entry.get("retained")
                    and rows.get(entry["pr"], {}).get("removed"))
         self.receipt(entry, **dict(result, state="superseded" if removed else "published"))
+        self.record_published(lock, entry["target"], result, destination)
 
     def settled(self, entry):
         for dep in entry.get("dependencies", []):
@@ -744,7 +761,9 @@ class Store:
                             # destination, proven by rendering now
                             done = getattr(adapter, "confirmed", lambda e: None)(entry) if whole else None
                             if done and self.contained(entry, done, adapter):
-                                self.settle_from(entry, done)
+                                self.settle_from(entry, done,
+                                                 lock if gate == "page" else side_locks.get(region(entry["target"])),
+                                                 self.destination(adapter, entry))
                                 review_metrics.count("local", "publish settled by a render")
                                 continue
                             delivered = True
@@ -754,8 +773,12 @@ class Store:
                             result = adapter.deliver(entry, deadline)
                             self.crash("remote_effect")
                     self.receipt(entry, **result)
+                    if entry["kind"] == "publish" and not entry.get("retained"):
+                        page_lock = lock if gate == "page" else side_locks.get(region(entry["target"]))
+                        self.record_published(page_lock, entry["target"], result,
+                                              self.destination(adapter, entry))
                     if entry["kind"] == "publish" and entry.get("gate") == "page" and delivered:
-                        self._coalesce(entry, result, adapter, deadline)
+                        self._coalesce(entry, result, adapter, deadline, lock)
                 except (OSError, TimeoutError) as error:
                     entry["failures"] += 1
                     entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
@@ -785,6 +808,14 @@ class StubAdapter:
                   "payload_digest": entry["payload_digest"], "target_id": entry["id"]}
         if entry["kind"] == "publish":
             result["page_digest"] = self.current(entry)["page_digest"]
+            if not entry.get("retained") and not entry.get("landing"):
+                from review_render import Renderer
+                renderer = Renderer(Store(self.root.parent))
+                try:
+                    renderer.body(canonical(entry["target"]))
+                    result["views"] = renderer.views
+                except (OSError, KeyError, ValueError, IndexError):
+                    pass
             if not entry.get("retained"):
                 atomic(self.root / "confirmed" / (digest(canonical(entry["target"])) + ".json"), result)
         atomic(self.root / (entry["id"] + ".json"), {"entry": entry, "result": result})
@@ -799,10 +830,10 @@ class StubAdapter:
         """The stub's page is its membership, and for a landing page the label
         publishes it can see, as the real renderer reads them."""
         path = self.root.parent / "membership" / (digest(canonical(entry["target"])) + ".json")
-        try:
-            page = path.read_bytes().hex()
-        except OSError:
-            page = "empty"
+        rows = read(path)
+        # a page renders its rows, not the views delivery records on them
+        page = json.dumps({pr: {k: v for k, v in row.items() if k != "published"}
+                           for pr, row in rows.items()}, sort_keys=True) if rows is not None else "empty"
         if entry.get("landing"):
             page += " ".join(sorted(p.name for p in (self.root.parent / "receipts").glob("*.json")))
         return dict(page_digest=digest(page))
