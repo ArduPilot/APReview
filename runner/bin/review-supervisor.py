@@ -250,103 +250,64 @@ class Supervisor:
             # never rebuilt, since recovery fans out what is stored.
             return
         if intents:
-            # Each row records what its page was last asked to show. A pure
-            # re-observation (discovery, reuse) that would show exactly that
+            # A pure re-observation (discovery, reuse) whose page, as last
+            # verified uploaded, already shows exactly what it would show now
             # is merged directly, its ticket still fencing older queued
             # observations, and journals nothing. Anything else journals a
-            # projection and publish, carrying what the page will now show;
-            # so a claim or comment that changes the page after its publish
-            # differs at the next observation, which publishes it.
+            # projection and publish as before.
             kept = []
             for projection, publish in zip(intents[::2], intents[1::2]):
-                shown = self.examine(projection["target"], pr, projection["patches"][pr], quiet)
-                if shown is True:
-                    continue
-                # always recorded, as known or unknown, so no older record can
-                # survive to match a state the page no longer shows
-                projection["patches"][pr]["shown"] = shown
-                kept += [projection, publish]
+                if not self.examine(projection["target"], pr, projection["patches"][pr], quiet):
+                    kept += [projection, publish]
             intents = kept
         if intents:
             intents.extend(self.landing_intents(pr, operation, intents, gate="page"))
             self.store.journal(self.run_id, self.phase_name(phase), pr, intents)
 
-    def legacy_facts(self, pr):
-        """The handoff's title, author and verdict corrections for a legacy
-        review, which the renderer applies; cached while the file is."""
-        path = self.store.root / "legacy-facts.json"
-        try:
-            stamp = path.stat().st_mtime_ns
-        except OSError:
-            return None
-        if getattr(self, "_facts", (None,))[0] != stamp:
-            self._facts = (stamp, read(path, {}))
-        return self._facts[1].get(pr)
-
     def destination(self, target):
-        """Where a page is published under this run's frozen configuration."""
+        """Where a page is published under this run's frozen configuration,
+        in the form delivery records (Publication.destination)."""
+        from urllib.parse import quote
         endpoint, path = canonical(target)[5:].split("/", 1)
         configured = self.config["configuration"].get("endpoints", {}).get(endpoint, {})
-        return [configured.get("publish") or os.environ.get("REVIEW_PUBLISH"), configured.get("url"), path]
+        return [configured.get("publish") or os.environ.get("REVIEW_PUBLISH"),
+                (configured.get("url") or "").rstrip("/") + "/" + quote(path, safe="/")]
 
-    def visible(self, row, pr):
-        """What a page shows from a membership row, as review_render does:
-        listed or not, the generation, CI state and the day it was seen, the
-        progress note (decided by the claim when there is one), and the
-        comment link or held command from that generation's receipts."""
-        if not row or row.get("removed", False):
-            return None
-        ci = row.get("ci") or {}
-        generation = row.get("generation")
-        claim = self.store.claim(pr)
-        if claim:
-            progress = ("accepted" if generation is not None and generation >= claim["generation"]
-                        else claim["status"])
-        else:
-            progress = row.get("progress")
-        comments, facts = [], None
-        if generation is not None:
-            from review_render import bundle_at
-            bundle = bundle_at(self.store, pr, generation) or {}
-            if bundle.get("legacy"):
-                facts = self.legacy_facts(pr)
-            else:
-                for intent in bundle.get("intents", []):
-                    if intent["kind"] in ("comment", "note"):
-                        r = read(self.store.root / "receipts" / (intent["id"] + ".json"), {})
-                        comments.append([r.get("url"), r.get("manual_command")])
-        return [generation, ci.get("state"), (ci.get("at") or "")[:10], progress, comments, facts]
+    def view(self, row, pr):
+        """What a page would show for this row now, by the renderer's own model."""
+        from review_render import bundle_at, comment_receipts, row_view
+        bundle = bundle_at(self.store, pr, row["generation"]) if row and row.get("generation") is not None else None
+        return row_view(row, bundle, self.store.claim(pr), comment_receipts(self.store, bundle),
+                        read(self.store.root / "legacy-facts.json", {}) if bundle and bundle.get("legacy") else None)
 
     def examine(self, target, pr, patch, quiet):
-        """True when a quiet observation was merged directly, the page being
-        known to have been asked to show exactly this, at this destination.
-        Otherwise the record its journalled projection carries: what the
-        page will show, or unknown when the page is busy or the merge
-        refused. A missing or unknown record never matches. The rows
-        compared are exactly the rows written."""
-        unknown = {"unknown": True, "at": time.time_ns()}
+        """True when a quiet observation was merged directly: the page's last
+        verified upload already shows exactly what it would show now, at this
+        destination. Recorded by delivery from the render it uploaded, never
+        from intent, so a delayed or failed publish cannot make it match.
+        The rows compared are exactly the rows written."""
+        if not quiet:
+            return False
         try:
             lock = try_lock(self.store.locks, target)
         except RuntimeError:
-            return unknown
+            return False
         if lock is None:
-            return unknown
+            return False
         try:
             with lock:
                 rows = self.store._merge_membership(lock, target, {pr: patch}, write=False)
-                path = self.store.root / "membership" / (digest(canonical(target)) + ".json")
-                last = read(path, {}).get(pr, {}).get("shown") or {}
-                now = {"view": self.visible(rows.get(pr), pr), "destination": self.destination(target),
-                       "at": time.time_ns()}
-                if (quiet and not last.get("unknown") and "view" in last
-                        and [last["view"], last.get("destination")] == [now["view"], now["destination"]]):
+                published = rows.get(pr, {}).get("published")
+                # (the stub adapter has no destinations; delivery always records one)
+                if (published and published.get("destination") in (None, self.destination(target))
+                        and published.get("view") == self.view(rows.get(pr), pr)):
                     self.store.write_membership(lock, target, rows)
                     review_metrics.count("local", "projection merged unchanged")
                     return True
                 review_metrics.count("local", "projection journalled")
-                return now
+                return False
         except (ValueError, OSError):
-            return unknown
+            return False
 
     def save(self, force=False):
         now = time.monotonic()

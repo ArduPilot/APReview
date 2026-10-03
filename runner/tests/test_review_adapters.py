@@ -846,6 +846,13 @@ class LocalPublication(unittest.TestCase):
         entry = dict(id="pub", pr=PR, generation="op", kind="publish", target=target, gate="page")
         with try_lock(self.store.locks, target):
             receipt = self.publisher.deliver(entry, time.monotonic() + 10)
+            # the upload reports what it rendered for each row, by the same
+            # model a controller compares observations with
+            from review_render import bundle_at, comment_receipts, row_view
+            row = read(self.store.root / "membership" / (digest(target) + ".json"))[PR]
+            bundle = bundle_at(self.store, PR, 1)
+            self.assertEqual(receipt["views"][PR], row_view(row, bundle, self.store.claim(PR),
+                                                            comment_receipts(self.store, bundle), {}))
             self.assertTrue(Store.current_matches(self.publisher, entry, receipt))
             # another publication of the page since: the upload is no longer
             # what is served, whatever the render says

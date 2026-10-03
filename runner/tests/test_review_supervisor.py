@@ -473,10 +473,12 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.run_id = str(self.root / ("run%d" % n))
         before = len(list((supervisor.store.root / "operations").glob("*.json")))
         supervisor._project(dict(c, observation=n, **changes), "discovery", quiet=True)
-        supervisor.store.drain(StubAdapter(supervisor.store.root))
+        adapter = StubAdapter(supervisor.store.root)
+        adapter.destination_of = lambda e: supervisor.destination(e["target"])
+        supervisor.store.drain(adapter)
         return len(list((supervisor.store.root / "operations").glob("*.json"))) - before
 
-    def test_a_row_without_a_record_of_what_it_showed_always_publishes(self):
+    def test_a_row_without_a_verified_view_always_publishes(self):
         supervisor = self.quiet_supervisor()
         page = "page:stub/end/a.html"
         # a row from before records existed, then a per-page removal
@@ -484,7 +486,7 @@ class ReviewSupervisor(unittest.TestCase):
         c = dict(candidate(), pr=PR, destinations=[page], membership_removed={page: True})
         self.assertEqual(self.observe(supervisor, c, 2), 1)
 
-    def test_a_busy_page_leaves_an_unknown_record_that_never_matches(self):
+    def test_a_busy_page_journals_and_a_return_to_the_old_state_publishes(self):
         supervisor = self.quiet_supervisor()
         page = "page:stub/end/a.html"
         ok, bad = {"state": "success", "at": "2026-10-04T01:00"}, {"state": "failure", "at": "2026-10-04T02:00"}
@@ -505,6 +507,25 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.config["configuration"]["endpoints"]["stub"]["url"] = "http://b"
         self.assertEqual(self.observe(supervisor, c, 3), 1)
 
+    def test_a_delayed_projection_cannot_make_a_stale_view_match(self):
+        # Codex's sequence: publish passing; journal failing and leave it
+        # queued; observe passing (matches, merged); drain the failing
+        # projection; observe failing again. The page must end up failing.
+        supervisor = self.quiet_supervisor()
+        page = "page:stub/end/a.html"
+        ok, bad = {"state": "success", "at": "2026-10-04T01:00"}, {"state": "failure", "at": "2026-10-04T02:00"}
+        c = dict(candidate(), pr=PR, destinations=[page])
+        self.observe(supervisor, c, 1, ci=ok)
+        supervisor.run_id = str(self.root / "late")
+        supervisor._project(dict(c, observation=2, ci=bad), "discovery", quiet=True)   # queued
+        supervisor.run_id = str(self.root / "run3")
+        supervisor._project(dict(c, observation=3, ci=ok), "discovery", quiet=True)    # matches
+        supervisor.store.drain(StubAdapter(supervisor.store.root))                      # delayed one lands
+        self.observe(supervisor, c, 4, ci=bad)
+        rows = supervisor.store.merge_membership(page, {})
+        self.assertEqual(rows[PR]["ci"]["state"], "failure")
+        self.assertEqual(rows[PR]["published"]["view"][1], "failure")
+
     def test_a_partly_suppressed_discovery_resumes_and_feeds_acceptance(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.store = Store(self.root / "data")
@@ -514,9 +535,11 @@ class ReviewSupervisor(unittest.TestCase):
         a, b = "page:stub/end/a.html", "page:stub/end/b.html"
         ci = {"state": "success", "at": "2026-10-04T01:00"}
         supervisor.store.merge_membership(a, {PR: {"ticket": 1, "removed": False, "ci": ci,
-                                                   "progress": "discovery",
-                                                   "shown": {"view": [None, "success", "2026-10-04", "discovery", [], None],
-                                                             "destination": supervisor.destination(a), "at": 1}}})
+                                                   "progress": "discovery"}})
+        rows = supervisor.store.merge_membership(a, {})
+        rows[PR]["published"] = {"view": supervisor.view(rows[PR], PR), "destination": supervisor.destination(a)}
+        with try_lock(supervisor.store.locks, a) as lock:
+            supervisor.store.write_membership(lock, a, rows)
         c = dict(candidate(), pr=PR, destinations=[a, b], ci=ci, observation=2)
         supervisor._project(c, "discovery", quiet=True)     # a unchanged, b new
         [op] = (supervisor.store.root / "operations").glob("*.json")
