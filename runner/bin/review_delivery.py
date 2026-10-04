@@ -134,10 +134,17 @@ class Publication:
             indexed_revisions = dict(revisions)
             scan = not complete
             for receipt in (self.store.receipts() if scan else ()):
+                # only page receipts have page keys: a board receipt targets a
+                # project id, which canonical() rejects and must not end the scan
+                where = receipt.get("target", "")
+                try:
+                    where = canonical(where) if where.startswith("page:") else ""
+                except ValueError:
+                    where = ""
                 match = re.fullmatch(
                     r"page:(" + re.escape(endpoint_name) + r")/DevCallReviews/" + date
                     + r"/([^/]+)/devcall_pr_reviews.html",
-                    canonical(receipt["target"]),
+                    where,
                 )
                 if match and receipt["state"] in ("published", "superseded"):
                     # every label publish this render saw; the page then shows

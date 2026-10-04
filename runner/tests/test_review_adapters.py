@@ -1048,6 +1048,10 @@ class LocalPublication(unittest.TestCase):
         old = "page:test/DevCallReviews/2026_10_06/DevCallTopic/devcall_pr_reviews.html"
         self.store.receipt(dict(id="old", pr=PR, generation=1, kind="publish", target=old),
                            "published", revision=1, anchors=["pr-x"])
+        # receipts whose targets are not pages (a board's project id) are in
+        # the same scan and must not end it
+        self.store.receipt(dict(id="b1", pr=PR, generation=1, kind="board", target="PVT_kwDOARFvZ84BktQT"),
+                           "synced")
         new = "page:test/DevCallReviews/2026_10_06/AIReview/devcall_pr_reviews.html"
         self.store.merge_membership(new, {PR: dict(ticket=1, removed=False, generation=1)})
         with try_lock(self.store.locks, new):
