@@ -1683,11 +1683,13 @@ class GitHubHttp(unittest.TestCase):
         test = self
 
         class Response:
-            def __init__(self, status, body=b"", headers=None):
-                self.status, self.body, self.headers = status, body, headers or {}
+            def __init__(self, status, body=b"", headers=None, delay=0):
+                self.status, self.body, self.headers, self.delay = status, body, headers or {}, delay
 
-            def read(self):
-                return self.body
+            def read(self, size=None):
+                time.sleep(self.delay)
+                chunk, self.body = self.body, b""
+                return chunk
 
             def getheader(self, name):
                 return self.headers.get(name.lower())
@@ -1732,6 +1734,29 @@ class GitHubHttp(unittest.TestCase):
         self.script = [(502, b"", {}), (200, b'{"n": 3}', {})]
         with patch("review_github.time.sleep"):
             self.assertEqual(self.gh.request("repos/o/r/pulls/3"), {"n": 3})
+
+    def test_redirects_are_followed_on_api_github_com_only(self):
+        self.script = [(301, b"", {"location": "https://api.github.com/repositories/9/pulls/1"}),
+                       (200, b'{"n": 1}', {})]
+        self.assertEqual(self.gh.request("repos/o/old/pulls/1"), {"n": 1})
+        self.assertEqual(self.sent[1][0], "/repositories/9/pulls/1")
+        self.script = [(302, b"", {"location": "https://elsewhere.example/x"})]
+        with self.assertRaises(OSError):
+            self.gh.request("repos/o/r/pulls/2")
+
+    def test_a_slow_answer_cannot_run_past_the_deadline(self):
+        self.script = [(200, b'{"n": 1}', {}, 0.5)] * 3
+        start = time.monotonic()
+        with self.assertRaises((TimeoutError, OSError)):
+            self.gh.request("repos/o/r/pulls/1", deadline=start + 0.3)
+        self.assertLess(time.monotonic() - start, 1.0)
+
+    def test_only_the_read_account_uses_it(self):
+        with patch("review_github.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, '{"login": "bot"}', "")
+            self.gh.request("user", account="comment")
+        self.assertEqual(self.sent, [])
+        self.assertEqual(run.call_count, 1)
 
     def test_writes_and_graphql_never_use_it(self):
         from review_github import GitHub
