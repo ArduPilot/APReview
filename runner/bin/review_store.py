@@ -227,7 +227,7 @@ class Store:
         try:
             times.append(receipt.stat().st_mtime)
         except OSError:
-            pass
+            pass                        # a compacted receipt is old: the generation's time stands
         return max(times)
 
     def mark_pending(self, pr, reason):
@@ -250,8 +250,7 @@ class Store:
         claim, current = self.claim(pr), self.current(pr)
         if claim and (not current or current["generation"] < claim["generation"]):
             return True
-        receipt = read(self.root / "receipts" / (delivery_id(pr, current["generation"], "comment", pr) + ".json"), {}) \
-            if current else {}
+        receipt = self.receipt_of(delivery_id(pr, current["generation"], "comment", pr), {}) if current else {}
         return receipt.get("state") == "held"
 
     def claim(self, pr):
@@ -391,14 +390,83 @@ class Store:
         self.rebuild(lock, pr)
         return pointer
 
-    def receipt_index(self):
-        """Receipts are immutable; parse only newly observed files."""
-        if not hasattr(self, "_receipts"):
-            self._receipts = {}
+    # Receipts: one file each when written; old ones are moved into a SQLite
+    # ledger by the collector. Every reader goes through these methods, which
+    # look at the file first and then the ledger, so a receipt is always
+    # found wherever it lives, and nothing infers absence from a missing file.
+
+    def ledger(self):
+        import sqlite3
+        if getattr(self, "_ledger", None) is None:
+            db = sqlite3.connect(str(self.root / "receipts.db"), timeout=60, check_same_thread=False)
+            db.execute("PRAGMA journal_mode=WAL")
+            db.execute("PRAGMA synchronous=FULL")
+            db.execute("CREATE TABLE IF NOT EXISTS receipt (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            self._ledger = db
+        return self._ledger
+
+    def receipt_of(self, ident, default=None):
+        record = read(self.root / "receipts" / (ident + ".json"))
+        if record is not None:
+            return record
+        if not (self.root / "receipts.db").exists():
+            return default
+        row = self.ledger().execute("SELECT body FROM receipt WHERE id = ?", (ident,)).fetchone()
+        return json.loads(row[0]) if row else default
+
+    def has_receipt(self, ident):
+        return (self.root / "receipts" / (ident + ".json")).exists() or self.receipt_of(ident) is not None
+
+    def receipts(self):
+        """Every receipt, files and ledger; for the rare full scan."""
+        seen = set()
         for path in (self.root / "receipts").glob("*.json"):
-            if path.stem not in self._receipts:
-                self._receipts[path.stem] = read(path)
-        return self._receipts
+            record = read(path)
+            if record:
+                seen.add(path.stem)
+                yield record
+        if (self.root / "receipts.db").exists():
+            for ident, body in self.ledger().execute("SELECT id, body FROM receipt"):
+                if ident not in seen:
+                    yield json.loads(body)
+
+    def compact_receipts(self, older_than, limit=10000, deadline=None):
+        """Move receipt files last changed before older_than into the ledger:
+        each batch is committed, durably, before its files are removed, so
+        a receipt is in at least one place at every moment. Returns how many
+        moved."""
+        moved, batch = 0, []
+        db = self.ledger()
+        for entry in os.scandir(self.root / "receipts"):
+            if moved + len(batch) >= limit or (deadline and time.monotonic() >= deadline):
+                break
+            try:
+                if not entry.name.endswith(".json") or entry.stat().st_mtime >= older_than:
+                    continue
+                with open(entry.path) as f:
+                    body = f.read()
+                json.loads(body)
+            except (OSError, ValueError):
+                continue
+            batch.append((entry.name[:-5], body, entry.path))
+            if len(batch) >= 500:
+                moved += self._commit_receipts(db, batch)
+                batch = []
+        if batch:
+            moved += self._commit_receipts(db, batch)
+        return moved
+
+    @staticmethod
+    def _commit_receipts(db, batch):
+        with db:
+            db.executemany("INSERT OR IGNORE INTO receipt (id, body) VALUES (?, ?)",
+                           [(ident, body) for ident, body, _ in batch])
+        for _, _, path in batch:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+        return len(batch)
 
     def receipt(self, entry, state, **details):
         record = {"id": entry["id"], "pr": entry["pr"], "generation": entry["generation"],
@@ -417,7 +485,7 @@ class Store:
     def materialize(self, pr, generation, intent, current):
         ident = intent["id"]
         path = self.root / "outbox" / (ident + ".json")
-        if (self.root / "receipts" / (ident + ".json")).exists():
+        if self.has_receipt(ident):
             unlink(path)
             return
         # created never changes: the age of an obligation, unlike the file's
@@ -565,7 +633,7 @@ class Store:
                 operation = read(path)
                 if not operation:
                     continue
-                if all((self.root / "receipts" / (i["id"] + ".json")).exists() for i in operation["intents"]):
+                if all(self.has_receipt(i["id"]) for i in operation["intents"]):
                     # finished: its receipts are the record; keep the walk short
                     unlink(path)
                     continue
@@ -582,8 +650,12 @@ class Store:
             pr = "pr:%s#%s" % (repo, path.parent.name)
             # A PR whose claim and current pointer have not changed since it
             # was last recovered has nothing new to recover.
+            # A checkpoint lapses after RECOVERY_REVISIT, so every PR is rebuilt
+            # from its generation chain that often whatever else happened
+            # (an outbox entry lost, a timestamp that did not move).
             key = self.recovery_key(path, pr)
-            if key is not None and recovered.get(str(path)) == key:
+            mark = recovered.get(str(path)) or [None, 0]
+            if key is not None and mark[0] == key and time.time() - mark[1] < self.RECOVERY_REVISIT:
                 continue
             lock = try_lock(self.locks, pr)
             if lock is None:
@@ -591,10 +663,12 @@ class Store:
             with lock:
                 if self.clean_owner(lock, deadline):
                     self.recover_pr(lock, pr)
-                    recovered[str(path)] = self.recovery_key(path, pr)
+                    recovered[str(path)] = [self.recovery_key(path, pr), time.time()]
         self.last_recovered = done
         atomic(self.root / "recovered.json", recovered)
         return pending
+
+    RECOVERY_REVISIT = 6 * 3600
 
     def recovery_key(self, claim_path, pr):
         """What would make a PR need recovery again: its claim, its current
@@ -639,7 +713,7 @@ class Store:
         def ok(dep):
             if dep not in settled:
                 settled[dep] = False            # a cycle is not ready
-                receipt = read(self.root / "receipts" / (dep + ".json"))
+                receipt = self.receipt_of(dep)
                 if receipt:
                     settled[dep] = receipt["state"] in self.SETTLED
                 elif dep in queued:
@@ -668,7 +742,7 @@ class Store:
                     or other.get("gate") != "page" or canonical(other["target"]) != target
                     or other.get("retained") or not self.same_destination(adapter, entry, other)):
                 continue
-            if (self.root / "receipts" / (other["id"] + ".json")).exists():
+            if self.has_receipt(other["id"]):
                 unlink(path)
                 continue
             if self.settled(other):
@@ -707,7 +781,7 @@ class Store:
 
     def settled(self, entry):
         for dep in entry.get("dependencies", []):
-            receipt = read(self.root / "receipts" / (dep + ".json"))
+            receipt = self.receipt_of(dep)
             if not receipt or receipt["state"] not in self.SETTLED:
                 return False
         return True
@@ -782,12 +856,12 @@ class Store:
                     self.rebuild(lock, selected["pr"])
                 path = self.root / "outbox" / (selected["id"] + ".json")
                 entry = read(path)
-                if not entry or (self.root / "receipts" / (entry["id"] + ".json")).exists():
+                if not entry or self.has_receipt(entry["id"]):
                     unlink(path)
                     continue
                 if entry["failures"] >= 5 or entry["next_attempt"] > time.time():
                     continue
-                dependencies = [read(self.root / "receipts" / (dep + ".json")) for dep in entry.get("dependencies", [])]
+                dependencies = [self.receipt_of(dep) for dep in entry.get("dependencies", [])]
                 if any(not dep or dep["state"] not in self.SETTLED for dep in dependencies):
                     continue
                 if entry["kind"] in ("comment", "note"):

@@ -6,7 +6,7 @@ import os
 import subprocess
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from review_fixtures import BIN, PR, candidate, complete_claim, python, stop, workspace
 from review_lock import region, try_lock
@@ -528,6 +528,36 @@ class ReviewStore(unittest.TestCase):
         os.utime(claim, (later, later))
         self.store.recover()
         self.assertEqual(len(calls), 2)
+
+    def test_every_pr_is_rebuilt_at_least_every_revisit_period(self):
+        self.accept()
+        self.lock.close()
+        calls = []
+        real = self.store.recover_pr
+        self.store.recover_pr = lambda lock, pr: calls.append(pr) or real(lock, pr)
+        self.store.recover()
+        with patch.object(Store, "RECOVERY_REVISIT", 0):
+            self.store.recover()
+        self.assertEqual(len(calls), 2)
+
+    def test_compacted_receipts_are_found_wherever_they_live(self):
+        self.accept()
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root))
+        files = sorted(p.stem for p in (self.root / "receipts").glob("*.json"))
+        self.assertTrue(files)
+        before = {i: self.store.receipt_of(i) for i in files}
+        moved = self.store.compact_receipts(time.time() + 60)
+        self.assertEqual(moved, len(files))
+        self.assertEqual(list((self.root / "receipts").glob("*.json")), [])
+        for ident, record in before.items():
+            self.assertEqual(self.store.receipt_of(ident), record)
+            self.assertTrue(Store(self.root).has_receipt(ident))
+        self.assertEqual(sorted(r["id"] for r in self.store.receipts()), files)
+        # nothing owed comes back: recovery sees the receipts in the ledger
+        self.store.recover()
+        self.assertEqual(list((self.root / "outbox").glob("*.json")), [])
+        self.assertFalse(self.store.has_receipt("never-written"))
 
     def test_a_bundle_is_verified_once_per_process(self):
         self.accept()
