@@ -416,6 +416,8 @@ class Supervisor:
         for c in candidates:
             if now - store.get(c["pr"], (-1e9, None))[0] < self.PREFETCH_AGE:
                 continue
+            if self.settled_at_discovery(c):
+                continue                # admission settles it from discovery's read
             # A PR another pass holds will not be claimed this pass; fetching
             # it every minute while it waits spent the hourly GitHub budget.
             try:
@@ -440,6 +442,15 @@ class Supervisor:
             for candidate, result in zip(todo, pool.map(one, todo)):
                 if result is not None:
                     store[candidate["pr"]] = (time.monotonic(), result)
+
+    DISCOVERY_FRESH = 3600
+
+    def settled_at_discovery(self, candidate):
+        """Discovery found it unchanged or gone within the hour: admission
+        settles it from that read instead of asking GitHub again. A PR going
+        to review is always read again just before its first pass."""
+        return (candidate.get("classification") in ("REUSE", "DROPPED")
+                and time.time() - candidate.get("discovered_at", 0) < self.DISCOVERY_FRESH)
 
     def prefetched_refresh(self, pr):
         taken = getattr(self, "prefetched", {}).pop(pr, None)
@@ -476,7 +487,7 @@ class Supervisor:
             self.finish(pr, "deferred", "stored node id changed")
             return
         try:
-            fresh = self.prefetched_refresh(pr)
+            fresh = dict(candidate) if self.settled_at_discovery(candidate) else self.prefetched_refresh(pr)
             if fresh is None:
                 fresh = self.discovery.refresh(candidate) if self.discovery else refresh(candidate)
         except RateLimited as error:

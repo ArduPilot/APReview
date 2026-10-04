@@ -595,6 +595,16 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.bounded_drain()
         supervisor.store.drain.assert_called_once()
 
+    def test_a_pr_discovery_just_settled_is_not_read_again_at_admission(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        fresh = dict(classification="REUSE", discovered_at=time.time())
+        self.assertTrue(supervisor.settled_at_discovery(fresh))
+        self.assertTrue(supervisor.settled_at_discovery(dict(fresh, classification="DROPPED")))
+        # a PR going to review is always read again before its first pass
+        self.assertFalse(supervisor.settled_at_discovery(dict(fresh, classification="REVIEW")))
+        # and an old discovery read is not trusted
+        self.assertFalse(supervisor.settled_at_discovery(dict(fresh, discovered_at=time.time() - 7200)))
+
     def test_the_loops_own_drain_is_short_while_prs_wait(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root
