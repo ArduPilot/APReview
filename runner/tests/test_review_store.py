@@ -708,6 +708,10 @@ class ReviewStore(unittest.TestCase):
         self.assertFalse(self.store.has_receipt(comment["id"]))
         kinds = [read(p)["kind"] for p in (self.root / "receipts").glob("*.json")]
         self.assertIn("publish", kinds)                       # everything else still went
+        atomic(outbox / "older.json", dict(id="older", kind="comment", generation=1,     # no pr
+                                           state="uncertain", next_attempt=time.time() + 3600, failures=0))
+        self.store.drain(StubAdapter(self.root))
+        self.assertFalse(self.store.has_receipt(comment["id"]))
 
     def test_a_damaged_recovery_cache_is_rebuilt_not_fatal(self):
         self.accept()

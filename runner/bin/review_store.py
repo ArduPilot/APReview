@@ -1074,7 +1074,8 @@ class Store:
                         x = read(p)
                     except (OSError, ValueError):
                         return
-                    if not isinstance(x, dict):
+                    if not (isinstance(x, dict) and isinstance(x.get("pr"), str)
+                            and isinstance(x.get("kind"), str) and isinstance(x.get("state"), str)):
                         return
                     if (x.get("pr") == entry["pr"] and x.get("kind") in ("comment", "note")
                             and x.get("state") in ("sending", "uncertain")):
