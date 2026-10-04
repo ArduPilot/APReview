@@ -142,6 +142,9 @@ class Publication:
                 raw = self.renderer.render(target, retained)
         return raw, consumed
 
+    VERIFY_EVERY = 10
+    VERIFY_AGE = 6 * 3600
+
     def destination(self, target):
         """Where a page goes and is served from, under this configuration."""
         endpoint, path = self.endpoint(target)
@@ -194,9 +197,20 @@ class Publication:
             )
         if result.returncode:
             raise OSError("rsync failed: " + result.stderr.decode(errors="replace")[:500])
-        served = self.fetch(target, deadline, expected["sections"])
-        if served["page_digest"] != expected["page_digest"]:
-            raise OSError("served page differs from rendered page")
+        # The fetch-back is sampled: every VERIFY_EVERY uploads of a page, or
+        # when its last check is VERIFY_AGE old. A comment's own check still
+        # fetches every section it links to before posting (verify_comment),
+        # so what a comment points at is always seen served.
+        checked = read(directory / "verified.json", {})
+        if checked.get("uploads", 0) + 1 >= self.VERIFY_EVERY or time.time() - checked.get("at", 0) > self.VERIFY_AGE:
+            served = self.fetch(target, deadline, expected["sections"])
+            if served["page_digest"] != expected["page_digest"]:
+                raise OSError("served page differs from rendered page")
+            atomic(directory / "verified.json", dict(at=time.time(), uploads=0))
+        else:
+            served = {k: expected[k] for k in ("page_digest", "sections")}
+            atomic(directory / "verified.json", dict(checked, uploads=checked.get("uploads", 0) + 1))
+            review_metrics.count("local", "upload not fetched back")
         revision = read(directory / "revision.json", 0) + 1
         atomic(directory / "revision.json", revision)
         if landing:

@@ -612,12 +612,23 @@ import urllib.request
 labels = []
 for lab in ('DevCallTopic', 'DevCallEU', 'AIReview'):
     url = PUBLIC_URL + '/DevCallReviews/%s/devcall_pr_reviews.html' % lab
+    body = None
     try:
-        with urllib.request.urlopen(url, timeout=20) as fh:
-            body = fh.read().decode('utf-8', 'replace')
+        # the page as its last confirmed upload left it, from the store;
+        # fetched from the site only when there is no such copy
+        from review_render import served_copy
+        from review_store import Store
+        local = served_copy(Store(DATA), 'page:review/DevCallReviews/%s/devcall_pr_reviews.html' % lab)
+        body = local.decode('utf-8', 'replace') if local is not None else None
     except Exception:
-        labels.append((lab, None, None, None, None, None, None))
-        continue
+        body = None
+    if body is None:
+        try:
+            with urllib.request.urlopen(url, timeout=20) as fh:
+                body = fh.read().decode('utf-8', 'replace')
+        except Exception:
+            labels.append((lab, None, None, None, None, None, None))
+            continue
     m = re.search(r'reviewprs-manifest v1[^>]*generated="([^"]*)"', body)
     gen = m.group(1) if m else None
     m = re.search(r'followup="([^"]*)"', body)

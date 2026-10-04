@@ -573,7 +573,7 @@ not merely the existence of a pointer:
 | new `current` before old entries reconstructed | traverse predecessors too and apply supersession below to each old intent |
 | promotion before membership/run-state updates | replay idempotent projection intents; accepted bundles override a run's stale belief that inference is unfinished |
 | membership head before promotion | forbidden: projection may reference only an accepted bundle; pending/deferred rows retain the previous head |
-| remote side effect before local receipt | publication verifies served bytes, comments reconcile delivery id, board reads target state; never infer failure from a missing receipt |
+| remote side effect before local receipt | publication verifies served bytes (sampled since step 5 of the scalability plan: every tenth upload of a page or after six hours; a comment's own check still fetches every section it links to), comments reconcile delivery id, board reads target state; never infer failure from a missing receipt |
 
 Discovery/progress/REUSE/DROPPED updates also need recovery without a new
 review. Journal each as an immutable operation bundle with its membership

@@ -197,6 +197,15 @@ class Discovery:
         if not hasattr(self, "_pages"):
             self._pages = {}
         for label, url in urls.items():
+            if url not in self._pages and self.store and endpoint.get("url") \
+                    and url.startswith(endpoint["url"].rstrip("/") + "/"):
+                # our own page, as its last confirmed upload left it: no fetch
+                from review_render import served_copy
+                local = served_copy(self.store, "page:%s/%s" % (
+                    self.config.get("endpoint", "review"), url[len(endpoint["url"].rstrip("/")) + 1:]))
+                if local is not None:
+                    review_metrics.count("local", "manifest from the store")
+                    self._pages[url] = self.parse_manifest(local.decode())
             if url not in self._pages:
                 try:
                     with review_metrics.timed("site", "manifest fetch"), urlopen(url, timeout=20) as response:

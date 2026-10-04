@@ -994,6 +994,25 @@ class LocalPublication(unittest.TestCase):
         renderer.landing("2026_10_04", {"A": dict(path="A/devcall_pr_reviews.html", anchors=["pr-1"], target=None)})
         self.assertEqual(read(routes), {"pr-1": "A/devcall_pr_reviews.html"})
 
+    def test_the_fetch_back_is_sampled_and_the_local_copy_is_the_served_one(self):
+        from review_render import served_copy
+        target = "page:test/report.html"
+        self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
+        entry = dict(id="pub", pr=PR, generation="op", kind="publish", target=target, gate="page")
+        fetched = []
+        real = self.publisher.fetch
+        self.publisher.fetch = lambda *a, **k: fetched.append(a[0]) or real(*a, **k)
+        with try_lock(self.store.locks, target):
+            self.publisher.deliver(entry, time.monotonic() + 10)      # first: checked
+            self.publisher.deliver(entry, time.monotonic() + 10)      # soon after: not
+        self.assertEqual(fetched, [target])
+        served = served_copy(self.store, target)
+        self.assertEqual(served, (self.served / "report.html").read_bytes())
+        # a local source that no longer matches the confirmed upload is not used
+        source = self.store.root / "pages" / digest(target) / "report.html"
+        source.write_bytes(source.read_bytes() + b"<!-- later attempt -->")
+        self.assertIsNone(served_copy(self.store, target))
+
     def test_publication_uses_frozen_rsync_auth_options(self):
         from review_delivery import run_external
         option = "--password-file=/outside/credentials with spaces"

@@ -7,6 +7,7 @@ import json
 import re
 from urllib.parse import unquote
 
+from review_lock import canonical
 from review_store import atomic, digest, read
 
 META = re.compile(rb'<meta name="apreview-digest" content="([0-9a-f]{64})">\n')
@@ -572,3 +573,21 @@ class Renderer:
         if commit:
             atomic(path, routes)
         return seal(body)
+
+
+def served_copy(store, target):
+    """The bytes of a page as its last confirmed upload left it, read from the
+    store, or None: the local source must match the confirmed digest, so a
+    later failed or unfinished upload never passes for what is served."""
+    directory = store.root / "pages" / digest(canonical(target))
+    confirmed = read(directory / "confirmed.json")
+    if not confirmed:
+        return None
+    try:
+        raw = (directory / canonical(target).rsplit("/", 1)[1]).read_bytes()
+    except OSError:
+        return None
+    try:
+        return raw if verify(raw)["page_digest"] == confirmed.get("page_digest") else None
+    except (OSError, ValueError, KeyError):
+        return None
