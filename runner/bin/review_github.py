@@ -30,32 +30,69 @@ class RateLimited(OSError):
 
 
 class _Pinned(http.client.HTTPSConnection):
-    """HTTPS to api.github.com at an address already resolved, so connecting
-    involves no name lookup; the certificate is checked against the name."""
+    """HTTPS to api.github.com at addresses already resolved, so connecting
+    involves no name lookup; each is tried in turn within the request's
+    deadline, and the certificate is checked against the name."""
 
-    def __init__(self, address, timeout, context):
-        super().__init__("api.github.com", 443, timeout=timeout, context=context)
-        self.address = address
+    def __init__(self, addresses, end, context):
+        super().__init__("api.github.com", 443, timeout=max(0.01, end - time.monotonic()), context=context)
+        self.addresses, self.end = addresses, end
 
     def connect(self):
-        sock = socket.create_connection((self.address, 443), self.timeout)
-        self.sock = self._context.wrap_socket(sock, server_hostname="api.github.com")
+        last = None
+        for address in self.addresses:
+            remaining = self.end - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                sock = socket.create_connection((address, 443), remaining)
+            except OSError as error:
+                last = error
+                continue
+            try:
+                sock.settimeout(max(0.01, self.end - time.monotonic()))
+                self.sock = self._context.wrap_socket(sock, server_hostname="api.github.com")
+                return
+            except OSError as error:
+                sock.close()
+                last = error
+        raise TimeoutError("GitHub connect took past its deadline") if last is None else last
 
 
-def resolve(host, remaining):
-    """A name lookup bounded by the deadline: getaddrinfo itself is not."""
+_lookups = threading.BoundedSemaphore(4)
+_resolved = {}
+
+
+def resolve(host, end):
+    """api.github.com's addresses, a lookup bounded by the deadline (no
+    socket timeout bounds getaddrinfo), with at most four lookups ever
+    outstanding so stuck ones cannot pile up threads, and each answer kept
+    for five minutes."""
+    hit = _resolved.get(host)
+    if hit and time.monotonic() - hit[0] < 300:
+        return hit[1]
+    if not _lookups.acquire(timeout=max(0, end - time.monotonic())):
+        raise TimeoutError("GitHub name lookups all busy")
     found = {}
 
     def look():
         try:
-            found["address"] = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)[0][4][0]
-        except OSError as error:
+            found["addresses"] = list(dict.fromkeys(
+                info[4][0] for info in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)))
+        except Exception as error:      # any failure is a failed lookup, not a crash
             found["error"] = error
-    worker = threading.Thread(target=look, daemon=True)
-    worker.start()
-    worker.join(max(0, remaining))
-    if "address" in found:
-        return found["address"]
+        finally:
+            _lookups.release()
+    try:
+        worker = threading.Thread(target=look, daemon=True)
+        worker.start()
+    except RuntimeError as error:
+        _lookups.release()
+        raise Retry("GitHub name lookup: %s" % error) from error
+    worker.join(max(0, end - time.monotonic()))
+    if found.get("addresses"):
+        _resolved[host] = (time.monotonic(), found["addresses"])
+        return found["addresses"]
     if "error" in found:
         raise Retry("GitHub name lookup: %s" % found["error"])
     raise TimeoutError("GitHub name lookup took past its deadline")
@@ -157,8 +194,8 @@ class GitHub:
             atomic(path, dict(etag=etag, body=result))
         return result
 
-    def open_connection(self, remaining):
-        return _Pinned(resolve("api.github.com", remaining), remaining, ssl.create_default_context())
+    def open_connection(self, end):
+        return _Pinned(resolve("api.github.com", end), end, ssl.create_default_context())
 
     def exchange(self, target, headers, end):
         """Send one GET on this thread's connection and read the whole answer
@@ -168,7 +205,9 @@ class GitHub:
             raise TimeoutError("GitHub deadline")
         connection = getattr(self._local, "connection", None)
         if connection is None:
-            connection = self._local.connection = self.open_connection(remaining)
+            connection = self._local.connection = self.open_connection(end)
+        # a kept connection that reconnects does so within this deadline
+        connection.end = end
         # A socket timeout bounds each wait, not the whole: an answer that
         # trickles in can keep a read going. At the deadline the watchdog
         # shuts the socket, which ends any blocking connect or read at once.
@@ -211,6 +250,9 @@ class GitHub:
                 chunks.append(chunk)
             if time.monotonic() >= end:
                 raise TimeoutError("GitHub answer took past its deadline")
+            if response.length:
+                # fewer bytes than the length promised: never return or cache it
+                raise Retry("GitHub answer cut short by %d bytes" % response.length)
             return response, b"".join(chunks)
         except (OSError, http.client.HTTPException, ValueError) as error:
             connection.close()

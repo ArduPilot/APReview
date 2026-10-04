@@ -1684,6 +1684,8 @@ class GitHubHttp(unittest.TestCase):
         test = self
 
         class Response:
+            length = None
+
             def __init__(self, status, body=b"", headers=None, delay=0):
                 self.status, self.body, self.headers, self.delay = status, body, headers or {}, delay
 
@@ -1712,7 +1714,7 @@ class GitHubHttp(unittest.TestCase):
             def close(self):
                 pass
 
-        patcher = patch.object(GitHub, "open_connection", lambda self, remaining: Connection(timeout=remaining))
+        patcher = patch.object(GitHub, "open_connection", lambda self, end: Connection(timeout=end - time.monotonic()))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -1801,7 +1803,7 @@ class GitHubTrickle(unittest.TestCase):
         gh._tokens["read"] = "t"
         real = http.client.HTTPConnection
         with patch.object(GitHub, "open_connection",
-                          lambda self, remaining: real("127.0.0.1", port, timeout=remaining)):
+                          lambda self, end: real("127.0.0.1", port, timeout=end - time.monotonic())):
             start = time.monotonic()
             with self.assertRaises((TimeoutError, OSError)):
                 gh.request("repos/o/r/pulls/1", deadline=start + 0.3)
@@ -1815,8 +1817,31 @@ class GitHubResolve(unittest.TestCase):
         with patch("review_github.socket.getaddrinfo", side_effect=lambda *a, **k: time.sleep(5)):
             start = time.monotonic()
             with self.assertRaises(TimeoutError):
-                resolve("api.github.com", 0.2)
+                resolve("stuck.example", time.monotonic() + 0.2)
         self.assertLess(time.monotonic() - start, 0.6)
+
+
+class GitHubConnect(unittest.TestCase):
+    def test_every_address_is_tried_within_the_deadline(self):
+        from review_github import _Pinned
+        tried = []
+        def connect(addr, timeout):
+            tried.append(addr[0])
+            raise OSError("unreachable")
+        conn = _Pinned(["2001:db8::1", "192.0.2.1"], time.monotonic() + 1, None)
+        with patch("review_github.socket.create_connection", side_effect=connect):
+            with self.assertRaises(OSError):
+                conn.connect()
+        self.assertEqual(tried, ["2001:db8::1", "192.0.2.1"])
+
+    def test_stuck_lookups_cannot_pile_up(self):
+        import review_github
+        with patch("review_github.socket.getaddrinfo", side_effect=lambda *a, **k: time.sleep(2)):
+            for n in range(6):
+                with self.assertRaises(TimeoutError):
+                    review_github.resolve("stuck%d.example" % n, time.monotonic() + 0.05)
+        alive = [t for t in threading.enumerate() if t.daemon and t.is_alive()]
+        self.assertLessEqual(len(alive), 4 + 2)
 
 
 class GitHubDeadline(unittest.TestCase):
