@@ -129,7 +129,9 @@ class Publication:
                 if page and page.get("state") in ("published", "superseded"):
                     indexed[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
                                                 anchors=page.get("anchors", []), target=page["target"])
+                    revisions[record.stem] = page.get("revision", 0)
             pages.update(indexed)
+            indexed_revisions = dict(revisions)
             scan = not complete
             for receipt in (self.store.receipts() if scan else ()):
                 match = re.fullmatch(
@@ -153,15 +155,20 @@ class Publication:
                         target=receipt["target"],
                     )
             if scan:
-                # an indexed entry is the label's latest upload: it wins
-                pages.update(indexed)
+                # The scan took, per label, whichever of index entry and receipt
+                # has the higher revision. Missing labels are backfilled, never
+                # replacing an entry; the index is marked complete only when no
+                # receipt is newer than its entry, which happens only if a crash
+                # cut off an index write, and the label's next upload repairs.
                 mkdir(index)
                 for label, page in pages.items():
-                    if canonical(page["target"]).startswith("page:%s/" % endpoint_name):
+                    if label not in indexed:
                         create_once(index / (label + ".json"), dict(
                             target=canonical(page["target"]), state="published",
                             revision=revisions.get(label, 0), anchors=page["anchors"]))
-                atomic(index / ".complete", True)
+                if all(revisions.get(label, 0) <= indexed_revisions.get(label, revisions.get(label, 0))
+                       for label in pages):
+                    atomic(index / ".complete", True)
             with review_metrics.timed("local", "render landing"):
                 raw = self.renderer.landing(date, pages, commit=commit)
         else:

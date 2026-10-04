@@ -1060,6 +1060,22 @@ class LocalPublication(unittest.TestCase):
             self.assertIn("DevCallTopic", body)
             self.assertIn("AIReview", body)
 
+    def test_a_newer_receipt_beats_a_stale_index_entry_and_holds_the_mark_back(self):
+        label = "page:test/DevCallReviews/2026_10_07/DevCallEU/devcall_pr_reviews.html"
+        index = self.store.root / "landing" / "test" / "2026_10_07"
+        atomic(index / "DevCallEU.json", dict(target=label, state="published", revision=1, anchors=["pr-old"]))
+        self.store.receipt(dict(id="r2", pr=PR, generation=1, kind="publish", target=label),
+                           "published", revision=2, anchors=["pr-new"])
+        landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
+                       target="page:test/DevCallReviews/2026_10_07/devcall_pr_reviews.html")
+        body = self.publisher.render(landing)[0].decode()
+        self.assertIn("pr-new", body)
+        self.assertNotIn("pr-old", body)
+        self.assertFalse((index / ".complete").exists())     # a stale entry keeps the scan on
+        atomic(index / "DevCallEU.json", dict(target=label, state="published", revision=2, anchors=["pr-new"]))
+        self.publisher.render(landing)
+        self.assertTrue((index / ".complete").exists())
+
     def test_a_landing_page_includes_a_label_outside_the_standard_three(self):
         target = "page:test/DevCallReviews/2026_10_05/CustomLabel/devcall_pr_reviews.html"
         self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
