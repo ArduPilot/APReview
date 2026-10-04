@@ -383,9 +383,22 @@ class DiscoveryContract(unittest.TestCase):
             self.assertEqual(self.discover.predict("pr:owner/repo#2", heads), "DROPPED")
             self.assertIsNone(self.discover.predict("pr:owner/repo#3", heads))
         with patch.object(self.discover, "told_locally", return_value="d" * 40):
-            self.assertEqual(self.discover.predict(PR, heads), "REVIEW")
+            self.assertEqual(self.discover.predict(PR, heads), "FETCH")
+        draft = dict(heads[PR], draft=True, labels=[])
+        self.assertEqual(self.discover.predict(PR, {PR: draft}), "DROPPED")
         with patch.object(self.discover, "told_locally", return_value=None):
             self.assertIsNone(self.discover.predict(PR, heads))
+
+    def test_the_shadow_can_never_fail_discovery(self):
+        self.gh.graphql.side_effect = OSError("GraphQL errors")
+        self.discover.shadow([PR], [dict(pr=PR, classification="REVIEW")])
+        self.gh.graphql.side_effect = None
+        self.gh.graphql.return_value = {"rateLimit": None, "repository": {"p1": {"number": 1}}}
+        self.discover.shadow([PR], [dict(pr=PR, classification="REVIEW")])
+        self.gh.graphql.return_value = None
+        self.discover.shadow([PR], [dict(pr=PR, classification="REVIEW")])
+        with patch.object(self.discover, "predict", side_effect=ValueError("bad history")):
+            self.discover.shadow([PR], [dict(pr=PR, classification="REVIEW")])
 
     def test_a_failed_followup_discovery_never_moves_the_window(self):
         self.discover.swept = Mock(return_value={"owner/repo": {}})

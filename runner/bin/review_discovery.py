@@ -367,7 +367,7 @@ class Discovery:
 
     BATCH = 50
 
-    def batch_heads(self, prs):
+    def batch_heads(self, prs, deadline=None):
         """Head, state, draft flag and labels of many PRs in one GraphQL query
         per repository and fifty PRs, instead of several REST reads apiece.
         A PR whose answer is missing or incomplete is left out."""
@@ -379,19 +379,31 @@ class Discovery:
         for repo, numbers in by_repo.items():
             owner, name = repo.split("/")
             for i in range(0, len(numbers), self.BATCH):
+                if deadline and time.monotonic() >= deadline:
+                    return out
                 part = numbers[i:i + self.BATCH]
                 fields = " ".join(
                     "p%d: pullRequest(number: %d) { number state isDraft headRefOid baseRefName "
                     "labels(first: 50) { nodes { name } pageInfo { hasNextPage } } }" % (n, n) for n in part)
                 query = 'query { rateLimit { cost } repository(owner: "%s", name: "%s") { %s } }' % (owner, name, fields)
-                data = self.gh.graphql(query, account="read")
-                review_metrics.count("github-points", "graphql", n=(data.get("rateLimit") or {}).get("cost", 0))
-                for node in ((data.get("repository") or {}).values()):
-                    if not node or node["labels"]["pageInfo"]["hasNextPage"]:
+                try:
+                    data = self.gh.graphql(query, account="read")
+                    review_metrics.count("github-points", "graphql",
+                                         n=int((data.get("rateLimit") or {}).get("cost", 0)))
+                    nodes = list((data.get("repository") or {}).values())
+                except Exception as error:     # a failed batch costs only its PRs
+                    review_metrics.count("local", "shadow batch failed")
+                    print("discovery: shadow batch failed: %s" % str(error)[:200], file=sys.stderr)
+                    continue
+                for node in nodes:
+                    try:
+                        if not node or node["labels"]["pageInfo"]["hasNextPage"]:
+                            continue
+                        out[canonical("pr:%s#%d" % (repo, node["number"]))] = dict(
+                            head=str(node["headRefOid"]), state=str(node["state"]), draft=bool(node["isDraft"]),
+                            base=node["baseRefName"], labels=[str(x["name"]) for x in node["labels"]["nodes"]])
+                    except (KeyError, TypeError, ValueError):
                         continue
-                    out[canonical("pr:%s#%d" % (repo, node["number"]))] = dict(
-                        head=node["headRefOid"], state=node["state"], draft=node["isDraft"],
-                        base=node["baseRefName"], labels=[x["name"] for x in node["labels"]["nodes"]])
         return out
 
     def predict(self, pr, heads):
@@ -400,12 +412,13 @@ class Discovery:
         h = heads.get(pr)
         if not h:
             return None
-        if h["state"] != "OPEN":
+        if h["state"] != "OPEN" or (h["draft"] and "AIReview" not in h["labels"]):
             return "DROPPED"
         told = self.told_locally(pr)
         if not told:
             return None
-        return "REUSE" if same_head(h["head"], told) else "REVIEW"
+        # a moved head needs the full read, whatever it then decides
+        return "REUSE" if same_head(h["head"], told) else "FETCH"
 
     def told_locally(self, pr):
         """The head our last posted comment named, from local receipts: that
@@ -414,7 +427,7 @@ class Discovery:
         if not self.store:
             return None
         from review_store import delivery_id
-        for bundle in sorted(self.store.chain(pr), key=lambda b: -b["generation"]):
+        for bundle in self.store.chain(pr):            # newest first
             if bundle.get("legacy"):
                 return None
             for intent in bundle["intents"]:
@@ -424,26 +437,47 @@ class Discovery:
                         return bundle["inputs"].get("head")
         return None
 
+    SHADOW_SECONDS = 120
+
+    @staticmethod
+    def stage(candidate):
+        """Discovery's decision at the same stage as the prediction: settled
+        from the head alone, or needing the full read (a review, a deferral,
+        or reuse found only by comparing diffs)."""
+        if candidate["classification"] == "REUSE" and candidate.get("reason") == "head already told":
+            return "REUSE"
+        if candidate["classification"] == "DROPPED":
+            return "DROPPED"
+        return "FETCH"
+
     def shadow(self, wanted, out):
         """Run the batched read beside the per-PR reads and count where its
-        prediction agrees, so it can replace them once it is shown right."""
+        prediction agrees, so it can replace them once it is shown right.
+        Nothing here may fail or slow discovery: every error is counted and
+        the whole is bounded in time."""
+        started = time.monotonic()
         try:
-            heads = self.batch_heads(wanted)
-        except (OSError, KeyError, TypeError, ValueError) as error:
+            heads = self.batch_heads(wanted, started + self.SHADOW_SECONDS)
+        except Exception as error:
             review_metrics.count("local", "shadow failed")
-            print("discovery: shadow batch failed: %s" % str(error)[:200], file=sys.stderr)
+            print("discovery: shadow failed: %s" % str(error)[:200], file=sys.stderr)
             return
         for c in out:
-            predicted = self.predict(c["pr"], heads)
-            actual = c["classification"]
+            try:
+                predicted = self.predict(c["pr"], heads)
+                actual = self.stage(c)
+            except Exception:
+                review_metrics.count("local", "shadow error")
+                continue
             if predicted is None:
-                review_metrics.count("local", "shadow unknown")
+                review_metrics.count("local", "shadow unknown" if c["pr"] in heads else "shadow unread")
             elif predicted == actual:
                 review_metrics.count("local", "shadow agree")
             else:
                 review_metrics.count("local", "shadow disagree %s->%s" % (predicted, actual))
                 print("discovery: shadow predicted %s for %s, reads said %s (%s)"
                       % (predicted, c["pr"], actual, c.get("reason")), file=sys.stderr)
+        review_metrics.count("local", "shadow", seconds=time.monotonic() - started)
 
     def discover(self, mode):
         ticket = self.store.ticket() if self.store else 0
