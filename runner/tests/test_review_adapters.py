@@ -1712,7 +1712,7 @@ class GitHubHttp(unittest.TestCase):
             def close(self):
                 pass
 
-        patcher = patch("review_github.http.client.HTTPSConnection", Connection)
+        patcher = patch.object(GitHub, "open_connection", lambda self, remaining: Connection(timeout=remaining))
         patcher.start()
         self.addCleanup(patcher.stop)
 
@@ -1800,13 +1800,23 @@ class GitHubTrickle(unittest.TestCase):
         gh = GitHub(http_cache=workspace(self) / "c")
         gh._tokens["read"] = "t"
         real = http.client.HTTPConnection
-        with patch("review_github.http.client.HTTPSConnection",
-                   lambda host, timeout=None, context=None: real("127.0.0.1", port, timeout=timeout)):
+        with patch.object(GitHub, "open_connection",
+                          lambda self, remaining: real("127.0.0.1", port, timeout=remaining)):
             start = time.monotonic()
             with self.assertRaises((TimeoutError, OSError)):
                 gh.request("repos/o/r/pulls/1", deadline=start + 0.3)
         self.assertLess(time.monotonic() - start, 0.9)
         server.close()
+
+
+class GitHubResolve(unittest.TestCase):
+    def test_a_stuck_name_lookup_stops_at_the_deadline(self):
+        from review_github import resolve
+        with patch("review_github.socket.getaddrinfo", side_effect=lambda *a, **k: time.sleep(5)):
+            start = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                resolve("api.github.com", 0.2)
+        self.assertLess(time.monotonic() - start, 0.6)
 
 
 class GitHubDeadline(unittest.TestCase):

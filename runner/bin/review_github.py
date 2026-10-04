@@ -29,6 +29,38 @@ class RateLimited(OSError):
         self.reset = reset
 
 
+class _Pinned(http.client.HTTPSConnection):
+    """HTTPS to api.github.com at an address already resolved, so connecting
+    involves no name lookup; the certificate is checked against the name."""
+
+    def __init__(self, address, timeout, context):
+        super().__init__("api.github.com", 443, timeout=timeout, context=context)
+        self.address = address
+
+    def connect(self):
+        sock = socket.create_connection((self.address, 443), self.timeout)
+        self.sock = self._context.wrap_socket(sock, server_hostname="api.github.com")
+
+
+def resolve(host, remaining):
+    """A name lookup bounded by the deadline: getaddrinfo itself is not."""
+    found = {}
+
+    def look():
+        try:
+            found["address"] = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)[0][4][0]
+        except OSError as error:
+            found["error"] = error
+    worker = threading.Thread(target=look, daemon=True)
+    worker.start()
+    worker.join(max(0, remaining))
+    if "address" in found:
+        return found["address"]
+    if "error" in found:
+        raise Retry("GitHub name lookup: %s" % found["error"])
+    raise TimeoutError("GitHub name lookup took past its deadline")
+
+
 class Retry(OSError):
     """A read that failed for a reason other than the request itself."""
 
@@ -125,6 +157,9 @@ class GitHub:
             atomic(path, dict(etag=etag, body=result))
         return result
 
+    def open_connection(self, remaining):
+        return _Pinned(resolve("api.github.com", remaining), remaining, ssl.create_default_context())
+
     def exchange(self, target, headers, end):
         """Send one GET on this thread's connection and read the whole answer
         before end, or fail as retryable."""
@@ -133,8 +168,7 @@ class GitHub:
             raise TimeoutError("GitHub deadline")
         connection = getattr(self._local, "connection", None)
         if connection is None:
-            connection = self._local.connection = http.client.HTTPSConnection(
-                "api.github.com", timeout=remaining, context=ssl.create_default_context())
+            connection = self._local.connection = self.open_connection(remaining)
         # A socket timeout bounds each wait, not the whole: an answer that
         # trickles in can keep a read going. At the deadline the watchdog
         # shuts the socket, which ends any blocking connect or read at once.
