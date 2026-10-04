@@ -9,6 +9,7 @@ import json
 import re
 import os
 from pathlib import Path
+import socket
 import ssl
 import subprocess
 import threading
@@ -134,6 +135,20 @@ class GitHub:
         if connection is None:
             connection = self._local.connection = http.client.HTTPSConnection(
                 "api.github.com", timeout=remaining, context=ssl.create_default_context())
+        # A socket timeout bounds each wait, not the whole: an answer that
+        # trickles in can keep a read going. At the deadline the watchdog
+        # shuts the socket, which ends any blocking connect or read at once.
+        def expire():
+            sock = connection.sock
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+        watchdog = threading.Timer(remaining, expire)
+        watchdog.daemon = True
+        watchdog.start()
         try:
             connection.timeout = remaining
             if connection.sock is not None:
@@ -144,17 +159,21 @@ class GitHub:
             while True:
                 if time.monotonic() >= end:
                     raise TimeoutError("GitHub answer took past its deadline")
-                chunk = response.read(65536)
+                chunk = response.read1(65536)
                 if not chunk:
                     break
                 chunks.append(chunk)
+            if time.monotonic() >= end:
+                raise TimeoutError("GitHub answer took past its deadline")
             return response, b"".join(chunks)
-        except (OSError, http.client.HTTPException) as error:
+        except (OSError, http.client.HTTPException, ValueError) as error:
             connection.close()
             self._local.connection = None
-            if isinstance(error, TimeoutError) and time.monotonic() >= end:
-                raise
+            if time.monotonic() >= end:
+                raise TimeoutError("GitHub answer took past its deadline") from error
             raise Retry("GitHub connection: %s" % error) from error
+        finally:
+            watchdog.cancel()
 
     def request(
         self, endpoint, *, account="read", method="GET", payload=None, deadline=None, text=False

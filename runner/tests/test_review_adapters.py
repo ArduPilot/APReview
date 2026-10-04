@@ -2,6 +2,7 @@
 """Slice-two contracts: fixture reads, git history, served bytes and durable sends."""
 
 import base64
+import http.client
 import copy
 import importlib.util
 import os
@@ -1686,10 +1687,12 @@ class GitHubHttp(unittest.TestCase):
             def __init__(self, status, body=b"", headers=None, delay=0):
                 self.status, self.body, self.headers, self.delay = status, body, headers or {}, delay
 
-            def read(self, size=None):
+            def read1(self, size=None):
                 time.sleep(self.delay)
                 chunk, self.body = self.body, b""
                 return chunk
+
+            read = read1
 
             def getheader(self, name):
                 return self.headers.get(name.lower())
@@ -1767,6 +1770,41 @@ class GitHubHttp(unittest.TestCase):
             gh.request("repos/o/r/issues/1/comments", method="POST", payload={"body": "x"})
         self.assertEqual(self.sent, [])
         self.assertEqual(run.call_count, 2)
+
+
+class GitHubTrickle(unittest.TestCase):
+    def test_a_trickling_answer_from_a_real_socket_stops_at_the_deadline(self):
+        import socket as sk
+        import ssl
+        import threading as th
+        from review_github import GitHub
+        server = sk.socket()
+        server.bind(("127.0.0.1", 0))
+        server.listen(1)
+        port = server.getsockname()[1]
+
+        def trickle():
+            conn, _ = server.accept()
+            conn.recv(65536)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+            try:
+                for _ in range(200):
+                    conn.sendall(b"x" * 10)
+                    time.sleep(0.05)
+            except OSError:
+                pass
+            conn.close()
+        th.Thread(target=trickle, daemon=True).start()
+        gh = GitHub(http_cache=workspace(self) / "c")
+        gh._tokens["read"] = "t"
+        real = http.client.HTTPConnection
+        with patch("review_github.http.client.HTTPSConnection",
+                   lambda host, timeout=None, context=None: real("127.0.0.1", port, timeout=timeout)):
+            start = time.monotonic()
+            with self.assertRaises((TimeoutError, OSError)):
+                gh.request("repos/o/r/pulls/1", deadline=start + 0.3)
+        self.assertLess(time.monotonic() - start, 0.9)
+        server.close()
 
 
 class GitHubDeadline(unittest.TestCase):
