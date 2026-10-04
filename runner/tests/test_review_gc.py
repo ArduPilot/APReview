@@ -186,6 +186,17 @@ class GC(unittest.TestCase):
         self.gc("--apply")
         self.assertTrue((attempt / "cold-evidence").exists())   # neither expired nor trimmed
 
+    def test_old_receipts_move_into_the_ledger(self):
+        sys.path.insert(0, str(BIN))
+        from review_store import Store
+        write(self.data / "receipts" / "old1.json", {"id": "old1", "state": "posted"}, age=time.time() - 30 * 86400)
+        write(self.data / "receipts" / "new1.json", {"id": "new1", "state": "posted"}, age=time.time())
+        self.gc("--apply")
+        self.assertFalse((self.data / "receipts" / "old1.json").exists())
+        self.assertTrue((self.data / "receipts" / "new1.json").exists())
+        self.assertEqual(Store(self.data).receipt_of("old1"), {"id": "old1", "state": "posted"})
+        self.assertTrue((self.data / "receipts.db").exists())
+
     def test_legacy_directories_need_their_own_flag(self):
         self.gc("--apply", "--legacy")
         self.assertFalse((self.data / "fu_20260928_2037_EbmO").exists())

@@ -35,7 +35,8 @@ OWNED = {
     "owners", "metrics", "gc", "references", "mirror", "locks", "observation.json",
     "drain-recovery.json", "recovery.json", "runs.html", "tmp", "scratch",
     "held", "handoff", "legacy-facts.json", "quota.json", "stub-deliveries",
-    "drain.lock", "drain-last.json", "http-cache",
+    "drain.lock", "drain-last.json", "http-cache", "receipts.db", "receipts.db-wal", "receipts.db-shm",
+    "recovered.json", "followup-coverage.json",
 }
 # Caches agents made inside the store before passes were given shared ones
 # under $REVIEW_ROOT/cache are litter like the rest once they go quiet.
@@ -50,6 +51,8 @@ SCRATCH_DAYS = 7
 OLD_RUN_DAYS = 30
 GONE_RUN_DAYS = 90
 VENV_DAYS = 14
+# a week past the followup window, which reads posting times from receipt files
+RECEIPT_DAYS = 21
 HTTP_CACHE_DAYS = 14
 
 
@@ -414,6 +417,20 @@ class GC:
                 except OSError:
                     pass
 
+    def receipts(self):
+        """Move old receipt files into the store's ledger: a quarter of a
+        million small files become rows, each found by the same lookup."""
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from review_store import Store
+        cutoff = self.now - RECEIPT_DAYS * 86400
+        if not self.apply:
+            n = sum(1 for e in os.scandir(self.data / "receipts")
+                    if e.name.endswith(".json") and e.stat().st_mtime < cutoff)
+            self.removed["receipts to ledger"] = [n, n, 0]
+            return
+        moved = Store(self.data).compact_receipts(cutoff, limit=100000, deadline=self.deadline)
+        self.removed["receipts to ledger"] = [moved, moved, 0]
+
     def stats(self):
         areas = {}
         for entry in self.data.iterdir():
@@ -474,6 +491,7 @@ def main():
             gc.scratch(processes)
             gc.venvs(os.path.realpath(a.cache), processes)
             gc.http_cache(processes)
+            gc.receipts()
     finally:
         for fd in gc.root_fds.values():
             os.close(fd)
