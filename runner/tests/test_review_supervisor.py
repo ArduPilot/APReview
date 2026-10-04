@@ -618,6 +618,18 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.finish(PR, "reused")
         supervisor.store.clear_pending.assert_called_once_with(PR)
 
+    def test_save_reads_only_the_receipts_a_generation_names(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = Store(self.root / "data")
+        generation = supervisor.store.pr_dir(PR) / "generations" / "1"
+        atomic(generation / "bundle.json", {"intents": [{"id": "c1", "kind": "comment", "target": PR},
+                                                        {"id": "a1", "kind": "annotation", "target": "x"}]})
+        self.assertEqual(supervisor.generation_receipts(PR, 1), [])
+        atomic(supervisor.store.root / "receipts" / "c1.json", {"kind": "comment", "state": "posted"})
+        atomic(supervisor.store.root / "receipts" / "other.json", {"kind": "comment", "state": "posted"})
+        self.assertEqual(supervisor.generation_receipts(PR, 1), [{"kind": "comment", "state": "posted"}])
+        self.assertEqual(supervisor.generation_receipts(PR, None), [])
+
     def test_the_loops_own_drain_is_short_while_prs_wait(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root

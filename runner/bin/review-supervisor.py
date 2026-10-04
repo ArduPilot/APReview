@@ -314,6 +314,26 @@ class Supervisor:
         except (ValueError, OSError):
             return False
 
+    def generation_receipts(self, pr, generation):
+        """The receipts of one generation's publishes, comment and board sync,
+        read by their ids from its bundle; a receipt never changes once
+        written, so one found is not read again."""
+        if not isinstance(generation, int):
+            return []
+        cache = self.__dict__.setdefault("_generation_receipts", {})
+        key = (pr, generation)
+        if key not in cache:
+            bundle = read(self.store.pr_dir(pr) / "generations" / str(generation) / "bundle.json", {})
+            cache[key] = dict(ids=[i["id"] for i in bundle.get("intents", [])
+                                   if i["kind"] in ("publish", "comment", "board")], found={})
+        entry = cache[key]
+        for ident in entry["ids"]:
+            if ident not in entry["found"]:
+                receipt = read(self.store.root / "receipts" / (ident + ".json"))
+                if receipt:
+                    entry["found"][ident] = receipt
+        return list(entry["found"].values())
+
     def save(self, force=False):
         now = time.monotonic()
         if force or now - getattr(self, "last_metrics", now) > 60:
@@ -321,12 +341,11 @@ class Supervisor:
             self.last_metrics = now
         if not force and now - self.last_save < 3:
             return
-        receipts = self.store.receipt_index()
-        indexed = {}
-        for receipt in receipts.values():
-            indexed.setdefault((receipt["pr"], receipt["generation"]), []).append(receipt)
+        # Only the receipts each PR's generation names: indexing every
+        # receipt in the store cost a controller two minutes at start, and
+        # grew with every delivery ever made.
         for pr, state in self.states.items():
-            for receipt in indexed.get((pr, state.get("generation")), []):
+            for receipt in self.generation_receipts(pr, state.get("generation")):
                 if receipt["kind"] == "publish":
                     state["publish"][receipt["target"]] = receipt["state"]
                 elif receipt["kind"] in ("comment", "board"):
