@@ -365,6 +365,86 @@ class Discovery:
             return label
         return "@" + self.gh.request("users/" + quote(value, safe=""))["login"]
 
+    BATCH = 50
+
+    def batch_heads(self, prs):
+        """Head, state, draft flag and labels of many PRs in one GraphQL query
+        per repository and fifty PRs, instead of several REST reads apiece.
+        A PR whose answer is missing or incomplete is left out."""
+        by_repo = {}
+        for pr in prs:
+            repo, number = pr[3:].split("#")
+            by_repo.setdefault(repo, []).append(int(number))
+        out = {}
+        for repo, numbers in by_repo.items():
+            owner, name = repo.split("/")
+            for i in range(0, len(numbers), self.BATCH):
+                part = numbers[i:i + self.BATCH]
+                fields = " ".join(
+                    "p%d: pullRequest(number: %d) { number state isDraft headRefOid baseRefName "
+                    "labels(first: 50) { nodes { name } pageInfo { hasNextPage } } }" % (n, n) for n in part)
+                query = 'query { rateLimit { cost } repository(owner: "%s", name: "%s") { %s } }' % (owner, name, fields)
+                data = self.gh.graphql(query, account="read")
+                review_metrics.count("github-points", "graphql", n=(data.get("rateLimit") or {}).get("cost", 0))
+                for node in ((data.get("repository") or {}).values()):
+                    if not node or node["labels"]["pageInfo"]["hasNextPage"]:
+                        continue
+                    out[canonical("pr:%s#%d" % (repo, node["number"]))] = dict(
+                        head=node["headRefOid"], state=node["state"], draft=node["isDraft"],
+                        base=node["baseRefName"], labels=[x["name"] for x in node["labels"]["nodes"]])
+        return out
+
+    def predict(self, pr, heads):
+        """What the batched read alone says about a followup PR: gone, the
+        head we last reviewed, or moved. None when it cannot say."""
+        h = heads.get(pr)
+        if not h:
+            return None
+        if h["state"] != "OPEN":
+            return "DROPPED"
+        told = self.told_locally(pr)
+        if not told:
+            return None
+        return "REUSE" if same_head(h["head"], told) else "REVIEW"
+
+    def told_locally(self, pr):
+        """The head our last posted comment named, from local receipts: that
+        of the newest generation whose comment was posted. A legacy review's
+        comment, or one held or not yet sent, says nothing."""
+        if not self.store:
+            return None
+        from review_store import delivery_id
+        for bundle in sorted(self.store.chain(pr), key=lambda b: -b["generation"]):
+            if bundle.get("legacy"):
+                return None
+            for intent in bundle["intents"]:
+                if intent["kind"] == "comment":
+                    receipt = read_json(self.store.root / "receipts" / (intent["id"] + ".json"), {})
+                    if receipt.get("state") == "posted":
+                        return bundle["inputs"].get("head")
+        return None
+
+    def shadow(self, wanted, out):
+        """Run the batched read beside the per-PR reads and count where its
+        prediction agrees, so it can replace them once it is shown right."""
+        try:
+            heads = self.batch_heads(wanted)
+        except (OSError, KeyError, TypeError, ValueError) as error:
+            review_metrics.count("local", "shadow failed")
+            print("discovery: shadow batch failed: %s" % str(error)[:200], file=sys.stderr)
+            return
+        for c in out:
+            predicted = self.predict(c["pr"], heads)
+            actual = c["classification"]
+            if predicted is None:
+                review_metrics.count("local", "shadow unknown")
+            elif predicted == actual:
+                review_metrics.count("local", "shadow agree")
+            else:
+                review_metrics.count("local", "shadow disagree %s->%s" % (predicted, actual))
+                print("discovery: shadow predicted %s for %s, reads said %s (%s)"
+                      % (predicted, c["pr"], actual, c.get("reason")), file=sys.stderr)
+
     def discover(self, mode):
         ticket = self.store.ticket() if self.store else 0
         mode = self.resolve(mode)
@@ -437,6 +517,8 @@ class Discovery:
             out = [c for c in pool.map(one, wanted) if c is not None]
         for candidate in out:
             candidate["observation"] = ticket
+        if mode == "followup" and self.config.get("shadow_batch", True):
+            self.shadow(wanted, out)
         if mode == "followup" and self.store:
             # the controller records coverage once these candidates are
             # durable in its run; recording it here could lose a review to a

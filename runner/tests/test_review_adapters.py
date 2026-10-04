@@ -368,6 +368,25 @@ class DiscoveryContract(unittest.TestCase):
         self.assertEqual({c["pr"] for c in rows}, {PR})
         self.assertEqual(asked, [PR])           # no GitHub reads for the old one
 
+    def test_the_batched_head_read_parses_and_predicts(self):
+        def node(n, head, state="OPEN", more=False):
+            return {"number": n, "state": state, "isDraft": False, "headRefOid": head, "baseRefName": "main",
+                    "labels": {"nodes": [{"name": "AIReview"}], "pageInfo": {"hasNextPage": more}}}
+        self.gh.graphql.return_value = {"rateLimit": {"cost": 1}, "repository": {
+            "p1": node(1, "a" * 40), "p2": node(2, "b" * 40, "MERGED"), "p3": node(3, "c" * 40, more=True)}}
+        heads = self.discover.batch_heads([PR, "pr:owner/repo#2", "pr:owner/repo#3"])
+        self.assertEqual(sorted(heads), [PR, "pr:owner/repo#2"])    # incomplete labels left out
+        self.assertEqual(heads[PR]["labels"], ["AIReview"])
+        self.assertEqual(self.gh.graphql.call_count, 1)             # one query for the repository
+        with patch.object(self.discover, "told_locally", return_value="a" * 40):
+            self.assertEqual(self.discover.predict(PR, heads), "REUSE")
+            self.assertEqual(self.discover.predict("pr:owner/repo#2", heads), "DROPPED")
+            self.assertIsNone(self.discover.predict("pr:owner/repo#3", heads))
+        with patch.object(self.discover, "told_locally", return_value="d" * 40):
+            self.assertEqual(self.discover.predict(PR, heads), "REVIEW")
+        with patch.object(self.discover, "told_locally", return_value=None):
+            self.assertIsNone(self.discover.predict(PR, heads))
+
     def test_a_failed_followup_discovery_never_moves_the_window(self):
         self.discover.swept = Mock(return_value={"owner/repo": {}})
         self.discover.board_rows = Mock(return_value={PR: {}})
