@@ -780,6 +780,9 @@ class Store:
         # an entry that is unreadable or malformed is reported and left as it
         # is, never allowed to stop the selection of every other entry
         entries = []
+        # pages whose membership merge failed unexpectedly: their other
+        # publishes would go out without that PR, so they wait with it
+        self.held_pages = set()
         for p in (self.root / "outbox").glob("*.json"):
             try:
                 x = read(p)
@@ -788,6 +791,8 @@ class Store:
                 continue
             if x is None:
                 continue
+            if isinstance(x, dict) and x.get("kind") == "projection" and x.get("quarantined"):
+                self.held_pages.add(self.page_of(x))
             gate = x.get("gate", "pr") if isinstance(x, dict) else None
             if not (isinstance(x, dict) and x.get("id") == p.stem and isinstance(x.get("kind"), str)
                     and isinstance(x.get("next_attempt", 0), (int, float))
@@ -966,17 +971,27 @@ class Store:
 
     def drain(self, adapter, limit=100, seconds=60, snapshot=None):
         deadline = time.monotonic() + seconds
-        snapshot = self.delivery_snapshot(limit) if snapshot is None else snapshot[:limit]
+        if snapshot is None:
+            snapshot = self.delivery_snapshot(limit)
+        else:
+            self.delivery_snapshot(0)           # for the held pages
+            snapshot = snapshot[:limit]
+        held = set(self.held_pages)
         budget = deadline
         for selected in snapshot:
             if time.monotonic() >= budget:
                 break
+            if (selected.get("gate") == "page" and selected.get("kind") != "projection"
+                    and self.page_of(selected) in held):
+                continue
             # One entry's trouble is that entry's: a malformed record or an
             # unexpected error is recorded on it, and the drain carries on.
             try:
                 self._drain_one(adapter, selected, budget)
             except Exception as error:
                 self.quarantine(selected, error)
+                if selected.get("kind") == "projection":
+                    held.add(self.page_of(selected))
         owed = []
         for p in sorted((self.root / "outbox").glob("*.json")):
             try:
@@ -986,6 +1001,13 @@ class Store:
             if isinstance(x, dict):
                 owed.append(x)
         return owed
+
+    @staticmethod
+    def page_of(entry):
+        try:
+            return canonical(entry["target"])
+        except Exception:
+            return None
 
     def quarantine(self, selected, error):
         """Record an unexpected failure on the one entry it struck, keeping

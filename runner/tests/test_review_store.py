@@ -732,6 +732,25 @@ class ReviewStore(unittest.TestCase):
         (self.root / "drain-recovery.json").write_text("{broken")
         self.store.recover_slice()
 
+    def test_a_failed_projection_holds_every_publish_of_its_page(self):
+        self.lock.close()
+        outbox = self.root / "outbox"
+        atomic(outbox / "projb.json", dict(id="projb", pr=PR, generation="op", kind="projection",
+                                           target="page:end/a", gate="page", patches={PR: {"ticket": 2}},
+                                           state="owed", failures=0, next_attempt=0))
+        atomic(outbox / "puba.json", dict(id="puba", pr="pr:owner/repo#2", generation="op", kind="publish",
+                                          target="page:end/a", gate="page", state="owed", failures=0,
+                                          next_attempt=0))
+        atomic(outbox / "pubc.json", dict(id="pubc", pr="pr:owner/repo#2", generation="op", kind="publish",
+                                          target="page:end/c", gate="page", state="owed", failures=0,
+                                          next_attempt=0))
+        for _ in range(2):                                     # this pass and the next
+            for p in outbox.glob("*.json"):
+                e = read(p); e["next_attempt"] = 0; atomic(p, e)
+            self.store.drain(StubAdapter(self.root))
+            self.assertFalse(self.store.has_receipt("puba"))   # same page: waits with the failed merge
+        self.assertTrue(self.store.has_receipt("pubc"))        # another page goes
+
     def test_a_missing_dependency_is_never_treated_as_met(self):
         self.lock.close()
         atomic(self.root / "outbox" / "proj.json", dict(id="proj", pr=PR, generation="op", kind="projection",
