@@ -632,6 +632,26 @@ class ReviewStore(unittest.TestCase):
         (self.root / "drain-recovery.json").write_text("{broken")
         self.store.recover_slice()
 
+    def test_a_projection_waiting_on_a_projection_that_never_existed_goes_ahead(self):
+        self.lock.close()
+        outbox = self.root / "outbox"
+        atomic(outbox / "proj.json", dict(id="proj", pr=PR, generation="op", kind="projection",
+                                          target="page:end/a", gate="page", dependencies=["never-journalled"],
+                                          patches={PR: {"ticket": 3, "removed": False}}, state="owed",
+                                          failures=0, next_attempt=0))
+        atomic(outbox / "pub.json", dict(id="pub", pr=PR, generation="op", kind="publish",
+                                         target="page:end/a", gate="page", dependencies=["never-journalled"],
+                                         state="owed", failures=0, next_attempt=0))
+        self.store.drain(StubAdapter(self.root))
+        self.assertTrue(self.store.has_receipt("proj"))       # the merge went ahead
+        self.assertFalse(self.store.has_receipt("pub"))       # a publish never treats absence as met
+        # while an operation that could produce it exists, it keeps waiting
+        atomic(outbox / "proj2.json", dict(read(outbox / "pub.json"), id="proj2", kind="projection",
+                                           dependencies=["journalled"], patches={PR: {"ticket": 4, "removed": False}}))
+        atomic(self.root / "operations" / "op.json", {"id": "op", "pr": PR, "intents": [{"id": "journalled"}]})
+        self.store.drain(StubAdapter(self.root))
+        self.assertFalse(self.store.has_receipt("proj2"))
+
     def test_tombstones_and_accepted_generation_are_independent(self):
         self.accept()
         page = "page:end/latest"
