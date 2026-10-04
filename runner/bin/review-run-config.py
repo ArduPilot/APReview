@@ -82,6 +82,8 @@ def freeze(args):
         controller_delivers=env.get("REVIEW_CONTROLLER_DELIVERS", "0") == "1",
         # followup considers only PRs reviewed or posted on within this many days
         followup_days=float(env.get("REVIEW_FOLLOWUP_DAYS", "14")),
+        # REST reads over a kept-alive connection with conditional requests
+        github_http=env.get("REVIEW_GITHUB_HTTP", "1") == "1",
         path=path,
     )
     if args.dry_run:

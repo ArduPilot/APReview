@@ -944,6 +944,7 @@ class Supervisor:
             cfg.get("github_mode", "live"),
             cfg.get("github_accounts"),
             writes=cfg.get("github_writes", False),
+            http_cache=(self.store.root / "http-cache") if cfg.get("github_http") else None,
         )
         self.adapter = (
             StubAdapter(self.store.root)
