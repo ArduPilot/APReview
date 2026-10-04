@@ -1089,14 +1089,30 @@ class LocalPublication(unittest.TestCase):
         (self.store.root / "landing" / "2026_10_08.json").write_text("[]")
         self.store.receipt(dict(id="weird", pr=PR, generation=1, kind="publish", target=None), "published")
         broken = "page:test/DevCallReviews/2026_10_08/Broken/devcall_pr_reviews.html"
-        self.store.receipt(dict(id="label", pr=PR, generation="op", kind="publish", target=broken,
-                                anchors=[], revision=3), "published")
+        self.store.receipt(dict(id="label", pr=PR, generation="op", kind="publish", target=broken),
+                           "published", anchors=[], revision=3)
         landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
                        target="page:test/DevCallReviews/2026_10_08/devcall_pr_reviews.html")
         self.publisher.render(landing)
         # the damaged record was rebuilt from its receipt, not dropped from the page
         self.assertEqual(read(index / "Broken.json")["target"], broken)
         self.assertFalse((index / "Odd.json").exists())
+
+    def test_a_rebuild_cut_short_rescans_and_a_damaged_label_receipt_holds_the_page(self):
+        index = self.store.root / "landing" / "test" / "2026_10_09"
+        index.mkdir(parents=True)
+        (index / "Broken.json").write_text("{not json")
+        atomic(index / ".complete", True)
+        broken = "page:test/DevCallReviews/2026_10_09/Broken/devcall_pr_reviews.html"
+        self.store.receipt(dict(id="label9", pr=PR, generation="op", kind="publish", target=broken),
+                           "published", anchors=[17], revision=3)
+        landing = dict(id="land9", pr=PR, generation="op", kind="publish", gate="page", landing=True,
+                       target="page:test/DevCallReviews/2026_10_09/devcall_pr_reviews.html")
+        with self.assertRaises(ValueError):
+            self.publisher.render(landing)
+        self.assertFalse((index / ".complete").exists())       # the next render rescans
+        with self.assertRaises(ValueError):
+            self.publisher.render(landing)
 
     def test_a_landing_page_includes_a_label_outside_the_standard_three(self):
         target = "page:test/DevCallReviews/2026_10_05/CustomLabel/devcall_pr_reviews.html"
