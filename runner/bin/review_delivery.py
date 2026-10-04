@@ -125,8 +125,13 @@ class Publication:
             complete = (index / ".complete").exists()
             indexed = {}
             for record in sorted(index.glob("*.json")) if index.is_dir() else ():
-                page = read(record)
-                if page and page.get("state") in ("published", "superseded"):
+                try:
+                    page = read(record)
+                except (OSError, ValueError):
+                    page = None
+                if (isinstance(page, dict) and page.get("state") in ("published", "superseded")
+                        and isinstance(page.get("target"), str) and isinstance(page.get("anchors", []), list)
+                        and isinstance(page.get("revision", 0), int)):
                     indexed[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
                                                 anchors=page.get("anchors", []), target=page["target"])
                     revisions[record.stem] = page.get("revision", 0)
@@ -135,7 +140,12 @@ class Publication:
             scan = not complete
             for receipt in (self.store.receipts() if scan else ()):
                 # only page receipts have page keys: a board receipt targets a
-                # project id, which canonical() rejects and must not end the scan
+                # project id, which canonical() rejects and must not end the scan;
+                # a receipt not shaped like a page publish is skipped
+                if not (isinstance(receipt, dict) and isinstance(receipt.get("target"), str)
+                        and isinstance(receipt.get("revision", 0), int)
+                        and isinstance(receipt.get("anchors", []), list)):
+                    continue
                 where = receipt.get("target", "")
                 try:
                     where = canonical(where) if where.startswith("page:") else ""
@@ -146,13 +156,13 @@ class Publication:
                     + r"/([^/]+)/devcall_pr_reviews.html",
                     where,
                 )
-                if match and receipt["state"] in ("published", "superseded"):
+                if match and receipt.get("state") in ("published", "superseded"):
                     # every label publish this render saw; the page then shows
                     # that label at this revision or a later one
-                    consumed.append(receipt["id"])
+                    consumed.append(receipt.get("id"))
                 if (
                     match
-                    and receipt["state"] in ("published", "superseded")
+                    and receipt.get("state") in ("published", "superseded")
                     and receipt.get("revision", 0) >= revisions.get(match[2], -1)
                 ):
                     revisions[match[2]] = receipt.get("revision", 0)

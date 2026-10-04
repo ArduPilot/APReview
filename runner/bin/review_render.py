@@ -507,7 +507,12 @@ class Renderer:
         commit false the routes are left in self.pending for the caller to
         save once the page is really published; a probe render saves nothing."""
         path = self.store.root / "landing" / (date + ".json")
-        previous = read(path, {})
+        try:
+            previous = read(path, {})
+        except (OSError, ValueError):
+            previous = {}
+        if not isinstance(previous, dict):
+            previous = {}               # a damaged route history is rebuilt, not fatal
         served = {a: [] for p in pages.values() for a in p["anchors"]}
         for label, page in pages.items():
             for a in page["anchors"]:
@@ -581,8 +586,12 @@ def served_copy(store, target, destination=None):
     upload may have been attempted since (the epoch), and when a destination
     is given the upload must have gone there."""
     directory = store.root / "pages" / digest(canonical(target))
-    confirmed = read(directory / "confirmed.json")
-    if not confirmed or confirmed.get("epoch") != read(directory / "epoch.json", 0):
+    try:
+        confirmed = read(directory / "confirmed.json")
+        epoch = read(directory / "epoch.json", 0)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(confirmed, dict) or confirmed.get("epoch") != epoch:
         return None
     if destination is not None and confirmed.get("destination") != destination:
         return None

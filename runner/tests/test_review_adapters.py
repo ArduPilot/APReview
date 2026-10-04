@@ -1080,6 +1080,18 @@ class LocalPublication(unittest.TestCase):
         self.publisher.render(landing)
         self.assertTrue((index / ".complete").exists())
 
+    def test_a_damaged_landing_index_or_route_file_is_not_fatal(self):
+        index = self.store.root / "landing" / "test" / "2026_10_08"
+        index.mkdir(parents=True)
+        (index / "Broken.json").write_text("{not json")
+        atomic(index / "Odd.json", ["a list"])
+        atomic(index / ".complete", True)
+        (self.store.root / "landing" / "2026_10_08.json").write_text("[]")
+        self.store.receipt(dict(id="weird", pr=PR, generation=1, kind="publish", target=None), "published")
+        landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
+                       target="page:test/DevCallReviews/2026_10_08/devcall_pr_reviews.html")
+        self.publisher.render(landing)
+
     def test_a_landing_page_includes_a_label_outside_the_standard_three(self):
         target = "page:test/DevCallReviews/2026_10_05/CustomLabel/devcall_pr_reviews.html"
         self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
