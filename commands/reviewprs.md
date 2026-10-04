@@ -1118,11 +1118,11 @@ that their manifests stay truthful and a later LABEL run does not redo the same 
      cannot mark a pre-switch comment deprecated unless the posting account has write access to that
      repo; where it cannot, post the new comment and say so rather than failing the PR.
 
-   - **Mark every comment as AI-generated.** Begin the body with a marker line, e.g.: `**Automated review note — AI-generated (Claude), validated against the live diff.** Please sanity-check before acting.`
+   - **Mark every comment as AI-generated.** Begin the body with a marker line, e.g.: `**Automated review note — AI-generated (Claude+Codex), validated against the live diff.** Please sanity-check before acting.`
    - **State the verdict on line 2**, directly under the AI-generated marker line, as a line of its own:
 
      ```
-     **Automated review note — AI-generated (Claude), validated against the live diff.** Please sanity-check before acting.
+     **Automated review note — AI-generated (Claude+Codex), validated against the live diff.** Please sanity-check before acting.
      **Verdict: REQUEST CHANGES**
      ```
 

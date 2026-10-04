@@ -600,7 +600,7 @@ they disagreed ten times, the report being the stale one.
 AI-generated marker line:
 
 ```
-**Automated review note — AI-generated (Claude), validated against the live diff.** Please sanity-check before acting.
+**Automated review note — AI-generated (Claude+Codex), validated against the live diff.** Please sanity-check before acting.
 **Verdict: REQUEST CHANGES**
 ```
 
