@@ -370,14 +370,16 @@ class Supervisor:
             self.saved_state = digest(self.states)
         if changed or force or now - self.last_summary >= 30:
             self.last_summary = now
-            debts = []
+            debts, damaged = [], []
             for p in (self.store.root / "outbox").glob("*.json"):
                 try:
                     x = read(p)
                 except (OSError, ValueError):
-                    continue
+                    x = None
                 if isinstance(x, dict) and isinstance(x.get("id"), str) and isinstance(x.get("pr"), str):
                     debts.append(x)
+                elif p.exists():
+                    damaged.append(p.stem)
             atomic(
                 self.directory / "summary.json",
                 {
@@ -389,6 +391,7 @@ class Supervisor:
                     "prs": self.states,
                     "phases": self.config.get("phases", {}),
                     "delivery_deferred": [x["id"] for x in debts if x["pr"] in self.states],
+                    "delivery_damaged": damaged,
                     "attempts": [
                         str(p.parent) for p in (self.directory / "attempts").glob("*/job.json")
                     ],
