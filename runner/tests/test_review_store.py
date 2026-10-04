@@ -622,6 +622,26 @@ class ReviewStore(unittest.TestCase):
         self.assertIn("a bug in one delivery", comment[0]["error"])
         self.assertTrue((outbox / "garbage.json").exists())    # an unreadable entry is left alone
 
+    def test_malformed_dependencies_or_keys_never_block_selection(self):
+        self.accept()
+        self.lock.close()
+        outbox = self.root / "outbox"
+        for n, bad in enumerate([{"dependencies": [{}]}, {"dependencies": [17]}, {"pr": None}, {"pr": []}]):
+            atomic(outbox / ("bad%d.json" % n), dict({"id": "bad%d" % n, "kind": "publish", "pr": PR,
+                                                      "target": "page:end/a", "next_attempt": 0, "failures": 0},
+                                                     **bad))
+        selected = self.store.delivery_snapshot(limit=1000)
+        self.assertFalse([x for x in selected if x["id"].startswith("bad")])
+        self.store.drain(StubAdapter(self.root))
+        kinds = [read(p)["kind"] for p in (self.root / "receipts").glob("*.json")]
+        self.assertIn("publish", kinds)
+
+    def test_a_damaged_recovery_cursor_entry_is_skipped(self):
+        self.accept()
+        self.lock.close()
+        atomic(self.root / "drain-recovery.json", [None, 17, str(self.store.pr_dir(PR) / "claim.json")])
+        self.store.recover_slice()
+
     def test_a_damaged_recovery_cache_is_rebuilt_not_fatal(self):
         self.accept()
         self.lock.close()

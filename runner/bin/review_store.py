@@ -690,12 +690,13 @@ class Store:
         if not isinstance(recovered, dict):
             recovered = {}
         while pending and done < limit and time.monotonic() < deadline:
-            path = Path(pending.pop(0))
+            item = pending.pop(0)
             done += 1
             try:
+                path = Path(item)
                 self._recover_one(path, deadline, pending, recovered)
             except Exception as error:      # one record's trouble is its own
-                print("recovery: %s failed: %s" % (path.name, str(error)[:200]), file=sys.stderr)
+                print("recovery: %s failed: %s" % (str(item)[:120], str(error)[:200]), file=sys.stderr)
                 review_metrics.count("local", "recovery record failed")
         self.last_recovered = done
         atomic(self.root / "recovered.json", recovered)
@@ -786,10 +787,15 @@ class Store:
                 continue
             if x is None:
                 continue
+            gate = x.get("gate", "pr") if isinstance(x, dict) else None
             if not (isinstance(x, dict) and isinstance(x.get("id"), str) and isinstance(x.get("kind"), str)
                     and isinstance(x.get("next_attempt", 0), (int, float))
                     and isinstance(x.get("failures", 0), int)
-                    and isinstance(x.get("dependencies", []), list)):
+                    and isinstance(x.get("dependencies", []), list)
+                    and all(isinstance(d, str) for d in x.get("dependencies", []))
+                    # the key its lock is taken on must exist, or it could
+                    # never even be quarantined and would block every pass
+                    and isinstance(x.get("target" if gate == "page" else "pr"), str)):
                 print("drain: malformed outbox entry %s" % p.name, file=sys.stderr)
                 review_metrics.count("local", "malformed outbox entry")
                 continue
@@ -818,8 +824,11 @@ class Store:
             return settled[dep]
 
         def ready(x):
-            return (x.get("next_attempt", 0) <= now and x.get("failures", 0) < 5
-                    and all(ok(d) or self.unsatisfiable(x, d) for d in x.get("dependencies", [])))
+            try:
+                return (x.get("next_attempt", 0) <= now and x.get("failures", 0) < 5
+                        and all(ok(d) or self.unsatisfiable(x, d) for d in x.get("dependencies", [])))
+            except Exception:
+                return False
 
         return [x for x in snapshot if ready(x)][:limit]
 
@@ -1055,6 +1064,9 @@ class Store:
             except TimeoutError:
                 credentials.close()
                 return
+            except Exception:
+                credentials.close()     # a lease must never outlive this entry
+                raise
             try:
                 if entry["kind"] == "projection":
                     self._merge_membership(side_locks[region(entry["target"])], entry["target"], entry["patches"])
