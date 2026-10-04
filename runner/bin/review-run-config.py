@@ -80,6 +80,8 @@ def freeze(args):
         # delivery belongs to the standalone drainer (review-outbox.sh each
         # minute); the controller only enqueues
         controller_delivers=env.get("REVIEW_CONTROLLER_DELIVERS", "0") == "1",
+        # followup considers only PRs reviewed or posted on within this many days
+        followup_days=float(env.get("REVIEW_FOLLOWUP_DAYS", "14")),
         path=path,
     )
     if args.dry_run:

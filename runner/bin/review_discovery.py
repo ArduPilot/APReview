@@ -387,6 +387,15 @@ class Discovery:
                 return []
             if mode in LABELS or mode == "rsync":
                 keys |= set(manifests.get(mode, {}))
+        if mode == "followup" and self.store:
+            # Only PRs we worked on recently: everything older would cost its
+            # GitHub reads every followup, for ever. Decided locally; a PR
+            # outside the window comes back when it is labelled or asked for.
+            days = float(self.config.get("followup_days", 14))
+            cutoff = time.time() - days * 86400
+            recent = {pr for pr in keys if (self.store.last_worked(pr) or 0) >= cutoff}
+            review_metrics.count("local", "followup outside window", n=len(keys) - len(recent))
+            keys = recent
         routing = validate(self.config.get("routing", DEFAULT))
         wanted = []
         for pr in sorted(keys):
@@ -417,6 +426,7 @@ class Discovery:
             out = [c for c in pool.map(one, wanted) if c is not None]
         for candidate in out:
             candidate["observation"] = ticket
+            candidate["discovered_at"] = time.time()
         if mode == "followup" and not any(c["classification"] == "REVIEW" for c in out):
             for c in out:
                 c["destinations"] = []

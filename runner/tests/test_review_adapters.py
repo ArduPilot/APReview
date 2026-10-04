@@ -349,9 +349,23 @@ class DiscoveryContract(unittest.TestCase):
             self.discover,
             "candidate",
             side_effect=lambda pr, *a: dict(pr=pr, created_at="2020", classification="REVIEW"),
-        ):
+        ), patch.object(self.discover.store, "last_worked", return_value=time.time()):
             rows = self.discover.discover("followup")
         self.assertEqual({c["pr"] for c in rows}, {PR, "pr:owner/repo#2"})
+
+    def test_followup_skips_prs_not_worked_on_within_the_window(self):
+        self.discover.swept = Mock(return_value={"owner/repo": {}})
+        self.discover.board_rows = Mock(return_value={"pr:owner/repo#2": {}})
+        self.discover.manifests = Mock(return_value={"AIReview": {PR: {}}})
+        worked = {PR: time.time() - 3 * 86400, "pr:owner/repo#2": time.time() - 20 * 86400}
+        asked = []
+        with patch.object(self.discover, "candidate",
+                          side_effect=lambda pr, *a: asked.append(pr) or dict(pr=pr, created_at="2020",
+                                                                              classification="REVIEW")), \
+                patch.object(self.discover.store, "last_worked", side_effect=worked.get):
+            rows = self.discover.discover("followup")
+        self.assertEqual({c["pr"] for c in rows}, {PR})
+        self.assertEqual(asked, [PR])           # no GitHub reads for the old one
 
     def test_search_restricts_organisations_and_repositories(self):
         self.gh.pages.return_value = [
