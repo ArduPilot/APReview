@@ -323,13 +323,15 @@ class Supervisor:
         cache = self.__dict__.setdefault("_generation_receipts", {})
         key = (pr, generation)
         if key not in cache:
-            bundle = read(self.store.pr_dir(pr) / "generations" / str(generation) / "bundle.json", {})
+            bundle = read(self.store.pr_dir(pr) / "generations" / str(generation) / "bundle.json")
+            if bundle is None:
+                return []           # claimed, not yet accepted: look again next save
             cache[key] = dict(ids=[i["id"] for i in bundle.get("intents", [])
                                    if i["kind"] in ("publish", "comment", "board")], found={})
         entry = cache[key]
         for ident in entry["ids"]:
             if ident not in entry["found"]:
-                receipt = read(self.store.root / "receipts" / (ident + ".json"))
+                receipt = self.store.receipt_of(ident)
                 if receipt:
                     entry["found"][ident] = receipt
         return list(entry["found"].values())
@@ -917,9 +919,9 @@ class Supervisor:
                     "kind": "projection",
                     "target": target,
                     "patches": {pr: {"generation": generation}},
-                    "dependencies": [dependency] if dependency in discovered or any(
-                        (self.store.root / d / (dependency + ".json")).exists()
-                        for d in ("receipts", "outbox")) else [],
+                    "dependencies": [dependency] if dependency in discovered
+                    or self.store.has_receipt(dependency)
+                    or (self.store.root / "outbox" / (dependency + ".json")).exists() else [],
                 }
             )
             for intent in intents:

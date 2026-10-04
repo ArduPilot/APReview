@@ -624,6 +624,11 @@ class ReviewSupervisor(unittest.TestCase):
         generation = supervisor.store.pr_dir(PR) / "generations" / "1"
         atomic(generation / "bundle.json", {"intents": [{"id": "c1", "kind": "comment", "target": PR},
                                                         {"id": "a1", "kind": "annotation", "target": "x"}]})
+        self.assertEqual(supervisor.generation_receipts(PR, 2), [])      # claimed, no bundle yet
+        atomic(supervisor.store.pr_dir(PR) / "generations" / "2" / "bundle.json",
+               {"intents": [{"id": "c2", "kind": "comment", "target": PR}]})
+        atomic(supervisor.store.root / "receipts" / "c2.json", {"kind": "comment", "state": "held"})
+        self.assertEqual(supervisor.generation_receipts(PR, 2), [{"kind": "comment", "state": "held"}])
         self.assertEqual(supervisor.generation_receipts(PR, 1), [])
         atomic(supervisor.store.root / "receipts" / "c1.json", {"kind": "comment", "state": "posted"})
         atomic(supervisor.store.root / "receipts" / "other.json", {"kind": "comment", "state": "posted"})
