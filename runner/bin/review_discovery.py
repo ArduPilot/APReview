@@ -391,9 +391,11 @@ class Discovery:
             # Only PRs we worked on recently: everything older would cost its
             # GitHub reads every followup, for ever. Decided locally; a PR
             # outside the window comes back when it is labelled or asked for.
+            # A followup interval of overlap, so a push just before a PR
+            # leaves the window is still seen.
             days = float(self.config.get("followup_days", 14))
-            cutoff = time.time() - days * 86400
-            recent = {pr for pr in keys if (self.store.last_worked(pr) or 0) >= cutoff}
+            cutoff = time.time() - days * 86400 - 6 * 3600
+            recent = {pr for pr in keys if self.store.in_followup_window(pr, cutoff)}
             review_metrics.count("local", "followup outside window", n=len(keys) - len(recent))
             keys = recent
         routing = validate(self.config.get("routing", DEFAULT))
@@ -426,13 +428,19 @@ class Discovery:
             out = [c for c in pool.map(one, wanted) if c is not None]
         for candidate in out:
             candidate["observation"] = ticket
-            candidate["discovered_at"] = time.time()
         if mode == "followup" and not any(c["classification"] == "REVIEW" for c in out):
             for c in out:
                 c["destinations"] = []
         return sorted(out, key=lambda c: (c["created_at"], c["pr"]))
 
     def candidate(self, pr, mode, manifests=None):
+        read_at = time.time()
+        result = self._candidate(pr, mode, manifests)
+        # when this PR was read, for admission to judge the read's age
+        result["discovered_at"] = read_at
+        return result
+
+    def _candidate(self, pr, mode, manifests=None):
         manifests = self.manifests(mode) if manifests is None else manifests
         repo, number = pr[3:].split("#")
         number = int(number)

@@ -349,7 +349,7 @@ class DiscoveryContract(unittest.TestCase):
             self.discover,
             "candidate",
             side_effect=lambda pr, *a: dict(pr=pr, created_at="2020", classification="REVIEW"),
-        ), patch.object(self.discover.store, "last_worked", return_value=time.time()):
+        ), patch.object(self.discover.store, "in_followup_window", return_value=True):
             rows = self.discover.discover("followup")
         self.assertEqual({c["pr"] for c in rows}, {PR, "pr:owner/repo#2"})
 
@@ -358,11 +358,12 @@ class DiscoveryContract(unittest.TestCase):
         self.discover.board_rows = Mock(return_value={"pr:owner/repo#2": {}})
         self.discover.manifests = Mock(return_value={"AIReview": {PR: {}}})
         worked = {PR: time.time() - 3 * 86400, "pr:owner/repo#2": time.time() - 20 * 86400}
+        window = lambda pr, cutoff: worked[pr] >= cutoff
         asked = []
         with patch.object(self.discover, "candidate",
                           side_effect=lambda pr, *a: asked.append(pr) or dict(pr=pr, created_at="2020",
                                                                               classification="REVIEW")), \
-                patch.object(self.discover.store, "last_worked", side_effect=worked.get):
+                patch.object(self.discover.store, "in_followup_window", side_effect=window):
             rows = self.discover.discover("followup")
         self.assertEqual({c["pr"] for c in rows}, {PR})
         self.assertEqual(asked, [PR])           # no GitHub reads for the old one
