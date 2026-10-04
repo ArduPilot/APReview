@@ -493,10 +493,14 @@ class Supervisor:
         bundle = read(generation / "bundle.json", {})
         if bundle.get("legacy"):
             return False
-        # Only a PR whose review comment was posted: it stays on the board
-        # while open, and followup can always pick it up again from the head
-        # that comment names. Without one, nothing guarantees a later run.
+        # Only a PR whose review comment was posted and whose board row was
+        # synced: the board keeps an open PR's row, and followup can always
+        # pick it up again from the head that comment names. Without both,
+        # nothing guarantees a later run.
         if self.store.receipt_of(delivery_id(pr, current["generation"], "comment", pr), {}).get("state") != "posted":
+            return False
+        board = self.config["configuration"].get("project_id", "stub-board")
+        if self.store.receipt_of(delivery_id(pr, current["generation"], "board", board), {}).get("state") != "synced":
             return False
         try:
             age = time.time() - generation.stat().st_mtime

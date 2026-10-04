@@ -649,7 +649,10 @@ class ReviewSupervisor(unittest.TestCase):
         from review_store import delivery_id
         atomic(supervisor.store.root / "receipts" / (delivery_id(PR, 1, "comment", PR) + ".json"),
                {"state": "posted"})
-        self.assertTrue(supervisor.too_soon(PR, c))                    # reviewed and posted just now
+        self.assertFalse(supervisor.too_soon(PR, c))                   # posted, board row not synced
+        atomic(supervisor.store.root / "receipts" / (delivery_id(PR, 1, "board", "stub-board") + ".json"),
+               {"state": "synced"})
+        self.assertTrue(supervisor.too_soon(PR, c))                    # reviewed, posted and on the board
         self.assertFalse(supervisor.too_soon(PR, dict(c, mode="pr")))  # asked for by name
         self.assertFalse(supervisor.too_soon(PR, dict(c, mode="@someone")))  # an author review
         self.assertTrue(supervisor.too_soon(PR, dict(c, mode="AIReview")))   # a label sweep
