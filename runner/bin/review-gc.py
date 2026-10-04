@@ -35,7 +35,7 @@ OWNED = {
     "owners", "metrics", "gc", "references", "mirror", "locks", "observation.json",
     "drain-recovery.json", "recovery.json", "runs.html", "tmp", "scratch",
     "held", "handoff", "legacy-facts.json", "quota.json", "stub-deliveries",
-    "drain.lock", "drain-last.json",
+    "drain.lock", "drain-last.json", "http-cache",
 }
 # Caches agents made inside the store before passes were given shared ones
 # under $REVIEW_ROOT/cache are litter like the rest once they go quiet.
@@ -50,6 +50,7 @@ SCRATCH_DAYS = 7
 OLD_RUN_DAYS = 30
 GONE_RUN_DAYS = 90
 VENV_DAYS = 14
+HTTP_CACHE_DAYS = 14
 
 
 def load(path, default=None):
@@ -394,6 +395,25 @@ class GC:
             else:
                 self.remove("venvs", entry)
 
+    def http_cache(self, processes):
+        """Conditional-request cache entries not used for HTTP_CACHE_DAYS: a
+        lost entry only costs one full answer from GitHub."""
+        cache = self.data / "http-cache"
+        if cache.is_symlink():
+            return
+        cutoff = self.now - HTTP_CACHE_DAYS * 86400
+        for shard in sorted(cache.glob("*")):
+            if shard.is_symlink() or not shard.is_dir():
+                continue
+            for entry in shard.glob("*.json"):
+                if self.spent():
+                    return
+                try:
+                    if entry.stat().st_mtime < cutoff:
+                        self.remove("http cache", entry)
+                except OSError:
+                    pass
+
     def stats(self):
         areas = {}
         for entry in self.data.iterdir():
@@ -453,6 +473,7 @@ def main():
             gc.litter(processes)
             gc.scratch(processes)
             gc.venvs(os.path.realpath(a.cache), processes)
+            gc.http_cache(processes)
     finally:
         for fd in gc.root_fds.values():
             os.close(fd)
