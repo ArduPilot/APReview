@@ -579,6 +579,22 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual(deps[a], [])
         self.assertEqual(len(deps[b]), 1)
 
+    def test_a_controller_that_does_not_deliver_still_recovers(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.directory = self.root
+        supervisor.store = Mock()
+        supervisor.store.recover.return_value = None
+        supervisor.store.last_recovered = 0
+        supervisor.adapter = None
+        supervisor.states = {}
+        supervisor.config = {"configuration": {"controller_delivers": False}}
+        supervisor.bounded_drain()
+        supervisor.store.recover.assert_called_once()
+        supervisor.store.drain.assert_not_called()
+        supervisor.config = {"configuration": {}}       # older frozen runs still deliver
+        supervisor.bounded_drain()
+        supervisor.store.drain.assert_called_once()
+
     def test_the_loops_own_drain_is_short_while_prs_wait(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root

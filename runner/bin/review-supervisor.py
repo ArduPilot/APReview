@@ -1043,6 +1043,10 @@ class Supervisor:
     def _bounded_drain(self, start, budget, seconds, startup, cursor):
         pending = self.store.recover(cursor, limit=min(50, budget), seconds=seconds)
         atomic(self.directory / "recovery.json", pending or None)
+        if not getattr(self, "config", {}).get("configuration", {}).get("controller_delivers", True):
+            # the drainer delivers; a controller only enqueues, so scheduling
+            # never waits on GitHub or the publishing site
+            return
         self.store.drain(
             self.adapter,
             limit=budget - self.store.last_recovered,
