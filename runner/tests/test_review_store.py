@@ -643,6 +643,28 @@ class ReviewStore(unittest.TestCase):
         kinds = [read(p)["kind"] for p in (self.root / "receipts").glob("*.json")]
         self.assertIn("publish", kinds)
 
+    def test_a_projection_that_needs_the_missing_one_to_add_its_pr_keeps_waiting(self):
+        self.lock.close()
+        atomic(self.root / "outbox" / "proj.json", dict(id="proj", pr=PR, generation="op", kind="projection",
+                                                        target="page:end/a", gate="page",
+                                                        dependencies=["never-journalled"],
+                                                        patches={PR: {"generation": 2}},
+                                                        state="owed", failures=0, next_attempt=0))
+        self.store.drain(StubAdapter(self.root))
+        self.assertFalse(self.store.has_receipt("proj"))       # no row to update: the page would lose the PR
+
+    def test_unexpected_failures_never_exhaust_an_entry(self):
+        self.accept()
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        adapter.deliver = Mock(side_effect=AttributeError("bug"))
+        outbox = self.root / "outbox"
+        for _ in range(8):
+            for p in outbox.glob("*.json"):
+                e = read(p); e["next_attempt"] = 0; atomic(p, e)
+            self.store.drain(adapter)
+        self.assertTrue(all(read(p)["failures"] == 4 for p in outbox.glob("*.json")))
+
     def test_a_due_dependency_is_never_crowded_out_by_its_dependents(self):
         self.lock.close()
         outbox = self.root / "outbox"
@@ -710,6 +732,10 @@ class ReviewStore(unittest.TestCase):
         self.assertIn("publish", kinds)                       # everything else still went
         atomic(outbox / "older.json", dict(id="older", kind="comment", generation=1,     # no pr
                                            state="uncertain", next_attempt=time.time() + 3600, failures=0))
+        self.store.drain(StubAdapter(self.root))
+        self.assertFalse(self.store.has_receipt(comment["id"]))
+        atomic(outbox / "older.json", dict(id="older", pr=PR, kind="comment",           # owed, no generation
+                                           state="owed", next_attempt=time.time() + 3600, failures=0))
         self.store.drain(StubAdapter(self.root))
         self.assertFalse(self.store.has_receipt(comment["id"]))
 

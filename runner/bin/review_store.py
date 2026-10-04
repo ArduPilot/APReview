@@ -862,10 +862,27 @@ class Store:
         outbox entry and no journalled operation that could produce one.
         Generations accepted before 860dc32 wait on discovery projections
         that were never journalled. A projection is a ticket-ordered
-        membership merge, so it may go ahead; nothing else ever treats a
-        missing dependency as met."""
+        membership merge, so it may go ahead, but only when every PR it
+        patches already has a live row on the page or the patch carries a
+        whole row: otherwise the missing projection is what would have added
+        the PR, and the page would go out without it. Nothing else ever
+        treats a missing dependency as met."""
         if entry.get("kind") != "projection":
             return False
+        patches = entry.get("patches")
+        if not isinstance(patches, dict) or not isinstance(entry.get("target"), str):
+            return False
+        try:
+            rows = read(self.root / "membership" / (digest(canonical(entry["target"])) + ".json"), {})
+        except (OSError, ValueError):
+            return False
+        if not isinstance(rows, dict):
+            return False
+        for pr, patch in patches.items():
+            row = rows.get(pr)
+            whole = isinstance(patch, dict) and "ticket" in patch and "removed" in patch
+            if not whole and not (isinstance(row, dict) and row.get("removed") is False):
+                return False
         if self.has_receipt(dep) or (self.root / "outbox" / (dep + ".json")).exists():
             return False
         for path in (self.root / "operations").glob("*.json"):
@@ -1031,7 +1048,9 @@ class Store:
                 entry = read(path)
                 if not isinstance(entry, dict):
                     return
-                entry["failures"] = int(entry.get("failures", 0)) + 1
+                # capped below the give-up count: an unexpected failure keeps
+                # being retried, and works again once the cause is fixed
+                entry["failures"] = min(4, int(entry.get("failures", 0)) + 1)
                 entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
                 entry["error"] = "unexpected: %s" % str(error)[:200]
                 atomic(path, entry)
@@ -1077,11 +1096,10 @@ class Store:
                     if not (isinstance(x, dict) and isinstance(x.get("pr"), str)
                             and isinstance(x.get("kind"), str) and isinstance(x.get("state"), str)):
                         return
-                    if (x.get("pr") == entry["pr"] and x.get("kind") in ("comment", "note")
-                            and x.get("state") in ("sending", "uncertain")):
+                    if x.get("pr") == entry["pr"] and x.get("kind") in ("comment", "note"):
                         if not (isinstance(x.get("generation"), int) and isinstance(entry["generation"], int)):
                             return
-                        if x["generation"] < entry["generation"]:
+                        if x["generation"] < entry["generation"] and x["state"] in ("sending", "uncertain"):
                             return
             credentials = ExitStack()
             try:
