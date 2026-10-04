@@ -1066,19 +1066,22 @@ class Store:
             if any(not dep or dep["state"] not in self.SETTLED for dep in dependencies):
                 return
             if entry["kind"] in ("comment", "note"):
-                # an earlier comment still in flight goes first; another
-                # entry's damage is not this comment's to suffer
+                # an earlier comment still in flight goes first; an entry that
+                # might be one but cannot be read or ordered holds this comment
+                # (only this one: the drain carries on)
                 for p in (self.root / "outbox").glob("*.json"):
                     try:
                         x = read(p)
-                        if (isinstance(x, dict) and x.get("pr") == entry["pr"]
-                                and x.get("kind") in ("comment", "note")
-                                and isinstance(x.get("generation"), int) and isinstance(entry["generation"], int)
-                                and x["generation"] < entry["generation"]
-                                and x.get("state") in ("sending", "uncertain")):
-                            return
                     except (OSError, ValueError):
-                        continue
+                        return
+                    if not isinstance(x, dict):
+                        return
+                    if (x.get("pr") == entry["pr"] and x.get("kind") in ("comment", "note")
+                            and x.get("state") in ("sending", "uncertain")):
+                        if not (isinstance(x.get("generation"), int) and isinstance(entry["generation"], int)):
+                            return
+                        if x["generation"] < entry["generation"]:
+                            return
             credentials = ExitStack()
             try:
                 if hasattr(adapter, "credentials"):

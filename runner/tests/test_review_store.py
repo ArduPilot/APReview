@@ -616,11 +616,18 @@ class ReviewStore(unittest.TestCase):
         self.store.drain(adapter)
         receipts = [read(p)["kind"] for p in (self.root / "receipts").glob("*.json")]
         self.assertIn("publish", receipts)                    # the others went
-        comment = [read(p) for p in outbox.glob("*.json")
-                   if p.name not in ("garbage.json", "shapeless.json", "nokind.json") and read(p)["kind"] == "comment"]
+        self.assertTrue((outbox / "garbage.json").exists())    # an unreadable entry is left alone
+        def comment():
+            return [read(p) for p in outbox.glob("*.json")
+                    if p.name not in ("garbage.json", "shapeless.json", "nokind.json")
+                    and read(p)["kind"] == "comment"][0]
+        self.assertEqual(comment()["failures"], 0)             # held: the damage might be an earlier comment
+        for name in ("garbage.json", "shapeless.json", "nokind.json"):
+            (outbox / name).unlink()
+        self.store.drain(adapter)
+        comment = [comment()]
         self.assertEqual(comment[0]["failures"], 1)            # recorded on the one that failed
         self.assertIn("a bug in one delivery", comment[0]["error"])
-        self.assertTrue((outbox / "garbage.json").exists())    # an unreadable entry is left alone
 
     def test_malformed_dependencies_or_keys_never_block_selection(self):
         self.accept()
@@ -689,6 +696,18 @@ class ReviewStore(unittest.TestCase):
         self.lock.close()
         atomic(self.root / "drain-recovery.json", [None, 17, str(self.store.pr_dir(PR) / "claim.json")])
         self.store.recover_slice()
+
+    def test_a_comment_waits_when_an_earlier_one_cannot_be_ordered(self):
+        self.accept()
+        self.lock.close()
+        outbox = self.root / "outbox"
+        comment = [read(p) for p in outbox.glob("*.json") if read(p)["kind"] == "comment"][0]
+        atomic(outbox / "older.json", dict(id="older", pr=PR, kind="comment", generation="1",
+                                           state="uncertain", next_attempt=time.time() + 3600, failures=0))
+        self.store.drain(StubAdapter(self.root))
+        self.assertFalse(self.store.has_receipt(comment["id"]))
+        kinds = [read(p)["kind"] for p in (self.root / "receipts").glob("*.json")]
+        self.assertIn("publish", kinds)                       # everything else still went
 
     def test_a_damaged_recovery_cache_is_rebuilt_not_fatal(self):
         self.accept()
