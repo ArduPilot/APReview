@@ -384,6 +384,27 @@ class ReviewSupervisor(unittest.TestCase):
             supervisor.admit(dict(candidate(), pr=PR))
         self.assertNotEqual(supervisor.states[PR]["review"], "deferred")
 
+    def test_an_unfinished_run_behind_many_completed_ones_is_recovered(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = self.store
+        supervisor.directory = self.root / "runs" / "zzz-mine"
+        supervisor.children = []
+        runs = []
+        for n in range(150):
+            d = self.root / "runs" / ("done-%03d" % n)
+            d.mkdir(parents=True)
+            atomic(d / "summary.json", {"state": "complete"})
+            runs.append(str(d))
+        unfinished = self.root / "runs" / "unfinished"
+        unfinished.mkdir()
+        runs.append(str(unfinished))
+        supervisor.startup_runs, supervisor.startup_budget = runs, 100
+        supervisor.startup_deadline = time.monotonic() + 60
+        with patch.object(SUPERVISOR.subprocess, "Popen") as popen:
+            supervisor.recover_controllers()
+        self.assertEqual(popen.call_count, 1)
+        self.assertEqual(supervisor.startup_budget, 99)     # completed runs cost nothing
+
     def test_invalid_routing_still_ends_the_run(self):
         supervisor = self._bare_supervisor(time.time() + 3600)
         supervisor.config["configuration"]["routing_root"] = str(self.root / "routing")

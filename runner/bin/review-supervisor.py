@@ -1248,11 +1248,13 @@ class Supervisor:
     def recover_controllers(self):
         deadline = self.startup_deadline
         pending = list(self.startup_runs)
-        for _ in range(min(100, len(pending))):
+        examined = 0
+        # completed runs are cheap to pass over and must not use up the
+        # budget, or an unfinished run behind a hundred of them is never seen
+        while pending and examined < 100:
             if time.monotonic() >= deadline:
                 break
             directory = Path(pending.pop(0))
-            self.startup_budget -= 1
             if directory == self.directory:
                 continue
             try:
@@ -1261,6 +1263,8 @@ class Supervisor:
                 summary = {}            # damaged: let its own recovery decide
             if isinstance(summary, dict) and summary.get("state") == "complete":
                 continue
+            examined += 1
+            self.startup_budget -= 1
             lock = try_lock(self.store.locks, "run:" + str(directory))
             if lock is None:
                 continue
