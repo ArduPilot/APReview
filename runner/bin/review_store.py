@@ -851,7 +851,8 @@ class Store:
         chosen = [x for x in snapshot if ready(x)]
         def waits(x):
             try:
-                return any(d not in receipted for d in x.get("dependencies", []))
+                return any(d not in receipted and not self.unsatisfiable(x, d)
+                           for d in x.get("dependencies", []))
             except Exception:
                 return True
         chosen.sort(key=waits)

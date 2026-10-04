@@ -649,6 +649,19 @@ class ReviewStore(unittest.TestCase):
                                                     state="owed", failures=0, next_attempt=0))
         self.assertIn("proj", [x["id"] for x in self.store.delivery_snapshot(limit=100)])
 
+    def test_a_projection_bypassing_a_missing_dependency_is_not_crowded_out(self):
+        self.lock.close()
+        outbox = self.root / "outbox"
+        atomic(outbox / "proj.json", dict(id="proj", pr=PR, generation="op", kind="projection",
+                                          target="page:end/a", gate="page", dependencies=["never-journalled"],
+                                          patches={PR: {"ticket": 1, "removed": False}},
+                                          state="owed", failures=1, next_attempt=time.time() - 1))
+        for n in range(100):
+            atomic(outbox / ("pub%d.json" % n), dict(id="pub%03d" % n, pr=PR, generation="op%d" % n, kind="publish",
+                                                    target="page:end/a", gate="page", dependencies=["proj"],
+                                                    state="owed", failures=0, next_attempt=0))
+        self.assertIn("proj", [x["id"] for x in self.store.delivery_snapshot(limit=100)])
+
     def test_an_invalid_lock_key_never_enters_selection(self):
         self.lock.close()
         atomic(self.root / "outbox" / "bad.json", dict(id="bad", pr="", kind="comment", target="x",
