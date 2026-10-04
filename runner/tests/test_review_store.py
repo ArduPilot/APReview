@@ -562,6 +562,18 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(list((self.root / "outbox").glob("*.json")), [])
         self.assertFalse(self.store.has_receipt("never-written"))
 
+    def test_a_ledger_from_before_write_times_is_migrated(self):
+        import sqlite3
+        db = sqlite3.connect(str(self.root / "receipts.db"))
+        db.execute("CREATE TABLE receipt (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+        db.execute("INSERT INTO receipt (id, body) VALUES ('old', '{\"id\": \"old\"}')")
+        db.commit()
+        db.close()
+        store = Store(self.root)
+        self.assertEqual(store.receipt_of("old"), {"id": "old"})
+        self.assertIsNone(store.receipt_time("old"))
+        self.assertEqual(store.compact_receipts(time.time() + 60), 0)
+
     def test_a_posting_time_survives_compaction(self):
         self.accept()
         self.lock.close()

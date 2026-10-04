@@ -422,6 +422,9 @@ class Store:
             db.execute("PRAGMA synchronous=FULL")
             db.execute("CREATE TABLE IF NOT EXISTS receipt (id TEXT PRIMARY KEY, body TEXT NOT NULL, "
                        "written REAL NOT NULL DEFAULT 0)")
+            # a ledger from before write times were kept gains the column
+            if "written" not in [row[1] for row in db.execute("PRAGMA table_info(receipt)")]:
+                db.execute("ALTER TABLE receipt ADD COLUMN written REAL NOT NULL DEFAULT 0")
             self._ledger = db
         return self._ledger
 
@@ -464,7 +467,12 @@ class Store:
                 seen.add(path.stem)
                 yield record
         if (self.root / "receipts.db").exists():
-            for ident, body in self.ledger().execute("SELECT id, body FROM receipt"):
+            import sqlite3
+            try:
+                rows = self.ledger().execute("SELECT id, body FROM receipt").fetchall()
+            except sqlite3.Error as error:
+                raise OSError("receipt ledger: %s" % error) from error
+            for ident, body in rows:
                 if ident not in seen:
                     yield json.loads(body)
 
@@ -473,8 +481,12 @@ class Store:
         each batch is committed, durably, before its files are removed, so
         a receipt is in at least one place at every moment. Returns how many
         moved."""
+        import sqlite3
         moved, batch = 0, []
-        db = self.ledger()
+        try:
+            db = self.ledger()
+        except sqlite3.Error as error:
+            raise OSError("receipt ledger: %s" % error) from error
         for entry in os.scandir(self.root / "receipts"):
             if moved + len(batch) >= limit or (deadline and time.monotonic() >= deadline):
                 break
@@ -497,9 +509,13 @@ class Store:
 
     @staticmethod
     def _commit_receipts(db, batch):
-        with db:
-            db.executemany("INSERT OR IGNORE INTO receipt (id, body, written) VALUES (?, ?, ?)",
-                           [(ident, body, written) for ident, body, _, written in batch])
+        import sqlite3
+        try:
+            with db:
+                db.executemany("INSERT OR IGNORE INTO receipt (id, body, written) VALUES (?, ?, ?)",
+                               [(ident, body, written) for ident, body, _, written in batch])
+        except sqlite3.Error as error:
+            raise OSError("receipt ledger: %s" % error) from error
         for _, _, path, _ in batch:
             try:
                 os.unlink(path)
