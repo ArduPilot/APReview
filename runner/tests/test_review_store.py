@@ -13,7 +13,8 @@ from review_lock import region, try_lock
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, read
 
 
-class Crash(Exception):
+class Crash(BaseException):
+    """A process dying at that point: nothing in the code under test may catch it."""
     pass
 
 
@@ -597,6 +598,39 @@ class ReviewStore(unittest.TestCase):
         self.store.bundle(PR)                          # this process verified it already
         with self.assertRaises(ValueError):
             Store(self.root).bundle(PR)                # a new one checks again
+
+    def test_one_bad_entry_never_stops_the_others(self):
+        self.accept()
+        self.lock.close()
+        outbox = self.root / "outbox"
+        (outbox / "garbage.json").write_text("{not json")
+        atomic(outbox / "shapeless.json", ["not", "an", "entry"])
+        atomic(outbox / "nokind.json", {"id": "nokind", "next_attempt": 0})
+        adapter = StubAdapter(self.root)
+        real = adapter.deliver
+        def deliver(entry, deadline):
+            if entry["kind"] == "comment":
+                raise AttributeError("a bug in one delivery")
+            return real(entry, deadline)
+        adapter.deliver = deliver
+        self.store.drain(adapter)
+        receipts = [read(p)["kind"] for p in (self.root / "receipts").glob("*.json")]
+        self.assertIn("publish", receipts)                    # the others went
+        comment = [read(p) for p in outbox.glob("*.json")
+                   if p.name not in ("garbage.json", "shapeless.json", "nokind.json") and read(p)["kind"] == "comment"]
+        self.assertEqual(comment[0]["failures"], 1)            # recorded on the one that failed
+        self.assertIn("a bug in one delivery", comment[0]["error"])
+        self.assertTrue((outbox / "garbage.json").exists())    # an unreadable entry is left alone
+
+    def test_a_damaged_recovery_cache_is_rebuilt_not_fatal(self):
+        self.accept()
+        self.lock.close()
+        (self.root / "recovered.json").write_text("[1, 2")
+        self.store.recover()
+        atomic(self.root / "recovered.json", {"anything": "short"})
+        self.store.recover()
+        (self.root / "drain-recovery.json").write_text("{broken")
+        self.store.recover_slice()
 
     def test_tombstones_and_accepted_generation_are_independent(self):
         self.accept()

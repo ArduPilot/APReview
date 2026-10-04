@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sys
 import time
 
 import review_metrics
@@ -631,6 +632,8 @@ class Store:
         if not rows:
             return
         for pr, row in rows.items():
+            if not isinstance(row, dict):
+                continue
             # the epoch names the upload; any later one, of any kind and even
             # one that died, moves it and makes this record stale
             row["published"] = {"view": views.get(pr), "destination": destination,
@@ -680,48 +683,62 @@ class Store:
         deadline = time.monotonic() + seconds
         pending = list(self.snapshot() if snapshot is None else snapshot)
         done = 0
-        recovered = read(self.root / "recovered.json", {})
+        try:
+            recovered = read(self.root / "recovered.json", {})
+        except (OSError, ValueError):
+            recovered = {}              # an optimisation only: lose it, recover everything
+        if not isinstance(recovered, dict):
+            recovered = {}
         while pending and done < limit and time.monotonic() < deadline:
             path = Path(pending.pop(0))
             done += 1
-            if path.parent == self.root / "operations":
-                operation = read(path)
-                if not operation:
-                    continue
-                if all(self.has_receipt(i["id"]) for i in operation["intents"]):
-                    # finished: its receipts are the record; keep the walk short
-                    unlink(path)
-                    continue
-                for intent in operation["intents"]:
-                    if time.monotonic() >= deadline:
-                        pending.insert(0, str(path))
-                        break
-                    lock = try_lock(self.locks, intent["target"])
-                    if lock:
-                        with lock:
-                            self.materialize(operation["pr"], operation["id"], intent, operation["id"])
-                continue
-            repo = path.parent.parent.parent.name + "/" + path.parent.parent.name
-            pr = "pr:%s#%s" % (repo, path.parent.name)
-            # A PR whose claim and current pointer have not changed since it
-            # was last recovered has nothing new to recover.
-            # A checkpoint lapses after RECOVERY_REVISIT, so every PR is rebuilt
-            # from its generation chain that often whatever else happened
-            # (an outbox entry lost, a timestamp that did not move).
-            key = self.recovery_key(path, pr)
-            mark = recovered.get(str(path)) or [None, 0]
-            if key is not None and mark[0] == key and time.time() - mark[1] < self.RECOVERY_REVISIT:
-                continue
-            lock = try_lock(self.locks, pr)
-            if lock is None:
-                continue
-            with lock:
-                if self.clean_owner(lock, deadline):
-                    self.recover_pr(lock, pr)
-                    recovered[str(path)] = [self.recovery_key(path, pr), time.time()]
+            try:
+                self._recover_one(path, deadline, pending, recovered)
+            except Exception as error:      # one record's trouble is its own
+                print("recovery: %s failed: %s" % (path.name, str(error)[:200]), file=sys.stderr)
+                review_metrics.count("local", "recovery record failed")
         self.last_recovered = done
         atomic(self.root / "recovered.json", recovered)
         return pending
+
+    def _recover_one(self, path, deadline, pending, recovered):
+        if path.parent == self.root / "operations":
+            operation = read(path)
+            if not operation:
+                return
+            if all(self.has_receipt(i["id"]) for i in operation["intents"]):
+                # finished: its receipts are the record; keep the walk short
+                unlink(path)
+                return
+            for intent in operation["intents"]:
+                if time.monotonic() >= deadline:
+                    pending.insert(0, str(path))
+                    break
+                lock = try_lock(self.locks, intent["target"])
+                if lock:
+                    with lock:
+                        self.materialize(operation["pr"], operation["id"], intent, operation["id"])
+            return
+        repo = path.parent.parent.parent.name + "/" + path.parent.parent.name
+        pr = "pr:%s#%s" % (repo, path.parent.name)
+        # A PR whose claim and current pointer have not changed since it
+        # was last recovered has nothing new to recover.
+        # A checkpoint lapses after RECOVERY_REVISIT, so every PR is rebuilt
+        # from its generation chain that often whatever else happened
+        # (an outbox entry lost, a timestamp that did not move).
+        key = self.recovery_key(path, pr)
+        mark = recovered.get(str(path))
+        if (key is not None and isinstance(mark, list) and len(mark) == 2 and mark[0] == key
+                and isinstance(mark[1], (int, float)) and time.time() - mark[1] < self.RECOVERY_REVISIT):
+            return
+        lock = try_lock(self.locks, pr)
+        if lock is None:
+            return
+        with lock:
+            if self.clean_owner(lock, deadline):
+                self.recover_pr(lock, pr)
+                recovered[str(path)] = [self.recovery_key(path, pr), time.time()]
+
 
     RECOVERY_REVISIT = 6 * 3600
 
@@ -744,7 +761,11 @@ class Store:
         never fanned out, and PRs left mid-promotion. The cursor persists so
         successive calls walk the whole store."""
         path = self.root / "drain-recovery.json"
-        pending = self.recover(read(path), limit=limit, seconds=seconds)
+        try:
+            cursor = read(path)
+        except (OSError, ValueError):
+            cursor = None
+        pending = self.recover(cursor if isinstance(cursor, list) else None, limit=limit, seconds=seconds)
         atomic(path, pending or None)
         return pending
 
@@ -753,9 +774,27 @@ class Store:
     KIND_ORDER = {"projection": 0, "publish": 1, "comment": 2, "note": 2, "annotation": 3, "deprecate": 3, "board": 4}
 
     def delivery_snapshot(self, limit=100):
-        # another drain may receipt and remove an entry between glob and read
-        snapshot = sorted((x for x in (read(p) for p in (self.root / "outbox").glob("*.json")) if x),
-                          key=lambda x: (x["next_attempt"], self.KIND_ORDER.get(x["kind"], 5), x["id"]))
+        # another drain may receipt and remove an entry between glob and read;
+        # an entry that is unreadable or malformed is reported and left as it
+        # is, never allowed to stop the selection of every other entry
+        entries = []
+        for p in (self.root / "outbox").glob("*.json"):
+            try:
+                x = read(p)
+            except (OSError, ValueError) as error:
+                print("drain: unreadable outbox entry %s: %s" % (p.name, error), file=sys.stderr)
+                continue
+            if x is None:
+                continue
+            if not (isinstance(x, dict) and isinstance(x.get("id"), str) and isinstance(x.get("kind"), str)
+                    and isinstance(x.get("next_attempt", 0), (int, float))
+                    and isinstance(x.get("failures", 0), int)
+                    and isinstance(x.get("dependencies", []), list)):
+                print("drain: malformed outbox entry %s" % p.name, file=sys.stderr)
+                review_metrics.count("local", "malformed outbox entry")
+                continue
+            entries.append(x)
+        snapshot = sorted(entries, key=lambda x: (x.get("next_attempt", 0), self.KIND_ORDER.get(x["kind"], 5), x["id"]))
         # Only entries whose dependencies have settled: a blocked entry keeps
         # its place at the head, and a hundred of them filled every pass while
         # ready entries behind them waited.
@@ -767,16 +806,20 @@ class Store:
 
         def ok(dep):
             if dep not in settled:
-                settled[dep] = False            # a cycle is not ready
-                receipt = self.receipt_of(dep)
-                if receipt:
-                    settled[dep] = receipt["state"] in self.SETTLED
+                settled[dep] = False            # a cycle, or a receipt it cannot read, is not ready
+                try:
+                    receipt = self.receipt_of(dep)
+                except (OSError, ValueError):
+                    return False
+                if isinstance(receipt, dict):
+                    settled[dep] = receipt.get("state") in self.SETTLED
                 elif dep in queued:
                     settled[dep] = ready(queued[dep])
             return settled[dep]
 
         def ready(x):
-            return x["next_attempt"] <= now and x["failures"] < 5 and all(map(ok, x.get("dependencies", [])))
+            return (x.get("next_attempt", 0) <= now and x.get("failures", 0) < 5
+                    and all(map(ok, x.get("dependencies", []))))
 
         return [x for x in snapshot if ready(x)][:limit]
 
@@ -792,16 +835,19 @@ class Store:
         target = canonical(entry["target"])
         batch = []
         for path in (self.root / "outbox").glob("*.json"):
-            other = read(path)
-            if (not other or other["id"] == entry["id"] or other["kind"] != "publish"
-                    or other.get("gate") != "page" or canonical(other["target"]) != target
-                    or other.get("retained") or not self.same_destination(adapter, entry, other)):
-                continue
-            if self.has_receipt(other["id"]):
-                unlink(path)
-                continue
-            if self.settled(other):
-                batch.append(other)
+            try:
+                other = read(path)
+                if (not isinstance(other, dict) or other.get("id") == entry["id"] or other.get("kind") != "publish"
+                        or other.get("gate") != "page" or canonical(other["target"]) != target
+                        or other.get("retained") or not self.same_destination(adapter, entry, other)):
+                    continue
+                if self.has_receipt(other["id"]):
+                    unlink(path)
+                    continue
+                if self.settled(other):
+                    batch.append(other)
+            except Exception:
+                continue                # another entry's trouble is not this one's
         # the batch is frozen before the render, so it can only have seen
         # their dependencies; anything settling later waits its own turn
         if deadline and time.monotonic() >= deadline:
@@ -894,104 +940,162 @@ class Store:
         for selected in snapshot:
             if time.monotonic() >= budget:
                 break
-            # The budget decides only whether to start an entry; one started
-            # gets a full minute. Handing it what was left of a short budget
-            # failed publishes and comments on a deadline until they gave up.
-            deadline = max(budget, time.monotonic() + self.ENTRY_SECONDS)
-            delivered = False
-            gate = selected.get("gate", "pr")
-            key = selected["target"] if gate == "page" else selected["pr"]
-            lock = try_lock(self.locks, key)
-            if lock is None:
+            # One entry's trouble is that entry's: a malformed record or an
+            # unexpected error is recorded on it, and the drain carries on.
+            try:
+                self._drain_one(adapter, selected, budget)
+            except Exception as error:
+                self.quarantine(selected, error)
+        owed = []
+        for p in sorted((self.root / "outbox").glob("*.json")):
+            try:
+                x = read(p)
+            except (OSError, ValueError):
                 continue
-            with lock:
-                if gate == "pr":
-                    if not self.clean_owner(lock, deadline):
-                        continue
-                    self.rebuild(lock, selected["pr"])
-                path = self.root / "outbox" / (selected["id"] + ".json")
+            if isinstance(x, dict):
+                owed.append(x)
+        return owed
+
+    def quarantine(self, selected, error):
+        """Record an unexpected failure on the one entry it struck, keeping
+        its state (an uncertain comment stays uncertain), and back it off; an
+        entry that cannot even be read is reported and left as it is."""
+        import traceback
+        ident = selected.get("id") if isinstance(selected, dict) else None
+        print("drain: entry %s failed: %s" % (ident, "".join(
+            traceback.format_exception_only(type(error), error)).strip()[:300]), file=sys.stderr)
+        review_metrics.count("local", "drain entry failed")
+        if not ident:
+            return
+        path = self.root / "outbox" / (str(ident) + ".json")
+        try:
+            gate = selected.get("gate", "pr")
+            lock = try_lock(self.locks, selected["target"] if gate == "page" else selected["pr"])
+        except Exception:
+            lock = None
+        if lock is None:
+            return
+        with lock:
+            try:
                 entry = read(path)
-                if not entry or self.has_receipt(entry["id"]):
-                    unlink(path)
-                    continue
-                if entry["failures"] >= 5 or entry["next_attempt"] > time.time():
-                    continue
-                dependencies = [self.receipt_of(dep) for dep in entry.get("dependencies", [])]
-                if any(not dep or dep["state"] not in self.SETTLED for dep in dependencies):
-                    continue
-                if entry["kind"] in ("comment", "note"):
-                    older = [x for x in (read(p) for p in (self.root / "outbox").glob("*.json")) if x]
-                    if any(x["pr"] == entry["pr"] and x["kind"] in ("comment", "note") and x["generation"] < entry["generation"] and x["state"] in ("sending", "uncertain") for x in older):
+                if not isinstance(entry, dict):
+                    return
+                entry["failures"] = int(entry.get("failures", 0)) + 1
+                entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
+                entry["error"] = "unexpected: %s" % str(error)[:200]
+                atomic(path, entry)
+            except Exception:
+                pass
+
+    def _drain_one(self, adapter, selected, budget):
+        # The budget decides only whether to start an entry; one started
+        # gets a full minute. Handing it what was left of a short budget
+        # failed publishes and comments on a deadline until they gave up.
+        deadline = max(budget, time.monotonic() + self.ENTRY_SECONDS)
+        delivered = False
+        gate = selected.get("gate", "pr")
+        key = selected["target"] if gate == "page" else selected["pr"]
+        lock = try_lock(self.locks, key)
+        if lock is None:
+            return
+        with lock:
+            if gate == "pr":
+                if not self.clean_owner(lock, deadline):
+                    return
+                self.rebuild(lock, selected["pr"])
+            path = self.root / "outbox" / (selected["id"] + ".json")
+            entry = read(path)
+            if not entry or self.has_receipt(entry["id"]):
+                unlink(path)
+                return
+            if entry["failures"] >= 5 or entry["next_attempt"] > time.time():
+                return
+            dependencies = [self.receipt_of(dep) for dep in entry.get("dependencies", [])]
+            if any(not dep or dep["state"] not in self.SETTLED for dep in dependencies):
+                return
+            if entry["kind"] in ("comment", "note"):
+                # an earlier comment still in flight goes first; another
+                # entry's damage is not this comment's to suffer
+                for p in (self.root / "outbox").glob("*.json"):
+                    try:
+                        x = read(p)
+                        if (isinstance(x, dict) and x.get("pr") == entry["pr"]
+                                and x.get("kind") in ("comment", "note")
+                                and isinstance(x.get("generation"), int) and isinstance(entry["generation"], int)
+                                and x["generation"] < entry["generation"]
+                                and x.get("state") in ("sending", "uncertain")):
+                            return
+                    except (OSError, ValueError):
                         continue
-                credentials = ExitStack()
-                try:
-                    if hasattr(adapter, "credentials"):
-                        credentials = adapter.credentials(entry, deadline)
-                    side_stack, side_locks = self.side_locks(entry, dependencies, lock)
-                except TimeoutError:
-                    credentials.close()
-                    continue
-                try:
-                    if entry["kind"] == "projection":
-                        self._merge_membership(side_locks[region(entry["target"])], entry["target"], entry["patches"])
-                        result = {"state": "published"}
+            credentials = ExitStack()
+            try:
+                if hasattr(adapter, "credentials"):
+                    credentials = adapter.credentials(entry, deadline)
+                side_stack, side_locks = self.side_locks(entry, dependencies, lock)
+            except TimeoutError:
+                credentials.close()
+                return
+            try:
+                if entry["kind"] == "projection":
+                    self._merge_membership(side_locks[region(entry["target"])], entry["target"], entry["patches"])
+                    result = {"state": "published"}
+                else:
+                    if entry["state"] in ("sending", "uncertain"):
+                        current = self.current(entry["pr"])
+                        entry["superseded"] = bool(current and isinstance(entry["generation"], int) and current["generation"] > entry["generation"])
+                        result = adapter.reconcile(entry, deadline)
+                        if result is None:
+                            return
                     else:
-                        if entry["state"] in ("sending", "uncertain"):
-                            current = self.current(entry["pr"])
-                            entry["superseded"] = bool(current and isinstance(entry["generation"], int) and current["generation"] > entry["generation"])
-                            result = adapter.reconcile(entry, deadline)
-                            if result is None:
-                                continue
-                        else:
-                            current = self.current(entry["pr"])
-                            if current and entry["kind"] in ("publish", "board", "annotation"):
-                                entry["effective_generation"] = entry["generation"] if entry.get("retained") else current["generation"]
-                            prepared = adapter.prepare(entry, deadline) if hasattr(adapter, "prepare") else None
-                            if prepared is not None:
-                                self.receipt(entry, **prepared)
-                                continue
-                            # A page renders its whole membership, so a render
-                            # begun after this entry's projection settled already
-                            # carries it; each re-render took seconds and an all
-                            # run owes dozens of the same page.
-                            whole = entry["kind"] == "publish" and not entry.get("retained")
-                            target = canonical(entry["target"]) if whole else None
-                            # the page's last verified upload to this entry's
-                            # destination, proven by rendering now
-                            done = getattr(adapter, "confirmed", lambda e: None)(entry) if whole else None
-                            if done and self.contained(entry, done, adapter):
-                                self.settle_from(entry, done,
-                                                 lock if gate == "page" else side_locks.get(region(entry["target"])),
-                                                 self.destination(adapter, entry))
-                                review_metrics.count("local", "publish settled by a render")
-                                continue
-                            delivered = True
-                            entry["state"] = "sending"
-                            entry["payload_digest"] = digest(entry.get("payload", {}))
-                            atomic(path, entry)
-                            result = adapter.deliver(entry, deadline)
-                            self.crash("remote_effect")
-                    if entry["kind"] == "publish" and not entry.get("retained"):
-                        # before the receipt: a crash between leaves the entry
-                        # owed, never a receipted upload with an older record
-                        page_lock = lock if gate == "page" else side_locks.get(region(entry["target"]))
-                        self.record_published(page_lock, entry["target"], result,
-                                              self.destination(adapter, entry))
-                    self.receipt(entry, **result)
-                    if entry["kind"] == "publish" and entry.get("gate") == "page" and delivered:
-                        self._coalesce(entry, result, adapter, deadline, lock)
-                except (OSError, TimeoutError) as error:
-                    entry["failures"] += 1
-                    entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
-                    entry["error"] = str(error)
-                    # A lost response must go through reconciliation.
-                    if entry["state"] == "sending":
-                        entry["state"] = "uncertain"
-                    atomic(path, entry)
-                finally:
-                    side_stack.close()
-                    credentials.close()
-        return [x for x in (read(p) for p in sorted((self.root / "outbox").glob("*.json"))) if x]
+                        current = self.current(entry["pr"])
+                        if current and entry["kind"] in ("publish", "board", "annotation"):
+                            entry["effective_generation"] = entry["generation"] if entry.get("retained") else current["generation"]
+                        prepared = adapter.prepare(entry, deadline) if hasattr(adapter, "prepare") else None
+                        if prepared is not None:
+                            self.receipt(entry, **prepared)
+                            return
+                        # A page renders its whole membership, so a render
+                        # begun after this entry's projection settled already
+                        # carries it; each re-render took seconds and an all
+                        # run owes dozens of the same page.
+                        whole = entry["kind"] == "publish" and not entry.get("retained")
+                        target = canonical(entry["target"]) if whole else None
+                        # the page's last verified upload to this entry's
+                        # destination, proven by rendering now
+                        done = getattr(adapter, "confirmed", lambda e: None)(entry) if whole else None
+                        if done and self.contained(entry, done, adapter):
+                            self.settle_from(entry, done,
+                                             lock if gate == "page" else side_locks.get(region(entry["target"])),
+                                             self.destination(adapter, entry))
+                            review_metrics.count("local", "publish settled by a render")
+                            return
+                        delivered = True
+                        entry["state"] = "sending"
+                        entry["payload_digest"] = digest(entry.get("payload", {}))
+                        atomic(path, entry)
+                        result = adapter.deliver(entry, deadline)
+                        self.crash("remote_effect")
+                if entry["kind"] == "publish" and not entry.get("retained"):
+                    # before the receipt: a crash between leaves the entry
+                    # owed, never a receipted upload with an older record
+                    page_lock = lock if gate == "page" else side_locks.get(region(entry["target"]))
+                    self.record_published(page_lock, entry["target"], result,
+                                          self.destination(adapter, entry))
+                self.receipt(entry, **result)
+                if entry["kind"] == "publish" and entry.get("gate") == "page" and delivered:
+                    self._coalesce(entry, result, adapter, deadline, lock)
+            except (OSError, TimeoutError) as error:
+                entry["failures"] += 1
+                entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
+                entry["error"] = str(error)
+                # A lost response must go through reconciliation.
+                if entry["state"] == "sending":
+                    entry["state"] = "uncertain"
+                atomic(path, entry)
+            finally:
+                side_stack.close()
+                credentials.close()
+
 
 
 class StubAdapter:
