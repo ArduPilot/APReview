@@ -172,7 +172,7 @@ def comment_receipts(store, bundle):
     """The comment and note receipts a page shows for a bundle."""
     if not bundle or bundle.get("legacy"):
         return []
-    return [read(store.root / "receipts" / (intent["id"] + ".json"), {})
+    return [store.receipt_of(intent["id"], {})
             for intent in bundle["intents"] if intent["kind"] in ("comment", "note")]
 
 

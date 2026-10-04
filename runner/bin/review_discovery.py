@@ -456,7 +456,7 @@ class Discovery:
             return None
         for intent in bundle["intents"]:
             if intent["kind"] == "comment":
-                receipt = read_json(self.store.root / "receipts" / (intent["id"] + ".json"), {})
+                receipt = self.store.receipt_of(intent["id"], {})
                 if receipt.get("state") == "posted":
                     return bundle["inputs"].get("head")
         return None

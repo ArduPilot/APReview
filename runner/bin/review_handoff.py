@@ -54,19 +54,17 @@ def pending(data, repository=None, deadline=None):
     prefix = "pr:" + (repository.lower() + "#" if repository else "")
     # A crash can leave a committed journal/bundle before outbox fan-out. An
     # empty outbox alone is not a fence against its next recovery controller.
+    store = Store(data)
     operations = [read(p) for p in Path(data).glob("operations/*.json")]
     for operation in operations:
         if operation.get("pr", "").startswith(prefix):
-            if any(not (Path(data) / "receipts" / (i["id"] + ".json")).exists()
-                   for i in operation["intents"]):
+            if any(not store.has_receipt(i["id"]) for i in operation["intents"]):
                 return True
-    store = Store(data)
     results = Path(data) / "results"
     for path in (results / repository).glob("*/current") if repository else results.glob("*/*/*/current"):
         pr = "pr:" + path.parent.parent.parent.name + "/" + path.parent.parent.name + "#" + path.parent.name
         for bundle in store.chain(pr):
-            if any(not (Path(data) / "receipts" / (i["id"] + ".json")).exists()
-                   for i in bundle["intents"]):
+            if any(not store.has_receipt(i["id"]) for i in bundle["intents"]):
                 return True
     for path in Path(data).glob("runs/*/run.json"):
         config = read(path)

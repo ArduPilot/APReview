@@ -57,7 +57,7 @@ for pr in map(canonical, a.prs):
                     or entry["kind"] not in ("publish", "projection", "annotation")
                     or canonical(entry["target"]) != page
                     or entry["id"] in done
-                    or (store.root / "receipts" / (entry["id"] + ".json")).exists()
+                    or store.has_receipt(entry["id"])
                 ):
                     continue
                 store.receipt(

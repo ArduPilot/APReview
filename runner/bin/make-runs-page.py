@@ -712,11 +712,12 @@ def queue_rows():
             continue                    # removed by a drain mid-read
         entries.append(e)
     receipts = {}
+    store = Store(DATA)
 
     def settled(dep):
         if dep not in receipts:
             try:
-                receipts[dep] = json.load(open(os.path.join(DATA, 'receipts', dep + '.json')))['state'] in settled_states
+                receipts[dep] = (store.receipt_of(dep) or {}).get('state') in settled_states
             except Exception:
                 receipts[dep] = False
         return receipts[dep]
