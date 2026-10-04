@@ -313,7 +313,8 @@ class Supervisor:
                     return True
                 review_metrics.count("local", "projection journalled")
                 return False
-        except (ValueError, OSError):
+        except Exception as error:      # any doubt: journal, as before
+            print("projection: %s on %s not examined: %s" % (pr, target, str(error)[:200]), file=sys.stderr)
             return False
 
     def generation_receipts(self, pr, generation):
@@ -371,7 +372,7 @@ class Supervisor:
                     x = read(p)
                 except (OSError, ValueError):
                     continue
-                if isinstance(x, dict) and "id" in x and "pr" in x:
+                if isinstance(x, dict) and isinstance(x.get("id"), str) and isinstance(x.get("pr"), str):
                     debts.append(x)
             atomic(
                 self.directory / "summary.json",
@@ -572,8 +573,12 @@ class Supervisor:
         if not self.store.clean_owner(lock):
             self.finish(pr, "deferred", "previous payload not empty")
             return
-        self.store.recover_pr(lock, pr)
-        current = self.store.bundle(pr)
+        try:
+            self.store.recover_pr(lock, pr)
+            current = self.store.bundle(pr)
+        except Exception as error:      # this PR's records, not the run
+            self.finish(pr, "deferred", "recovery failed: %s" % str(error)[:120])
+            return
         existing = self.store.claim(pr)
         if existing and existing["node_id"] != candidate["node_id"]:
             self.finish(pr, "deferred", "stored node id changed")
@@ -1155,7 +1160,12 @@ class Supervisor:
             # behind it (sixteen minutes before the first pass of one run);
             # the cron drain and the next pass carry the rest.
             seconds = min(seconds, self.DRAIN_BUSY)
-        cursor = read(self.directory / "recovery.json")
+        try:
+            cursor = read(self.directory / "recovery.json")
+        except (OSError, ValueError):
+            cursor = None
+        if cursor is not None and not isinstance(cursor, list):
+            cursor = None
         if startup and cursor is None:
             cursor = self.startup_work
         with review_metrics.scope("drain"):
