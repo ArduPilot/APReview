@@ -35,6 +35,7 @@ OWNED = {
     "owners", "metrics", "gc", "references", "mirror", "locks", "observation.json",
     "drain-recovery.json", "recovery.json", "runs.html", "tmp", "scratch",
     "held", "handoff", "legacy-facts.json", "quota.json", "stub-deliveries",
+    "drain.lock", "drain-last.json",
 }
 # Caches agents made inside the store before passes were given shared ones
 # under $REVIEW_ROOT/cache are litter like the rest once they go quiet.
