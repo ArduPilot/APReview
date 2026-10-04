@@ -4,11 +4,14 @@ Recordings contain public responses and request identities, never tokens.
 Writes require explicit construction with writes=True; discovery cannot write.
 """
 
+import http.client
 import json
 import re
 import os
 from pathlib import Path
+import ssl
 import subprocess
+import threading
 
 import review_metrics
 import time
@@ -25,14 +28,85 @@ class RateLimited(OSError):
         self.reset = reset
 
 
+class Retry(OSError):
+    """A read that failed for a reason other than the request itself."""
+
+
 class GitHub:
-    def __init__(self, directory=None, mode="live", accounts=None, writes=False):
+    def __init__(self, directory=None, mode="live", accounts=None, writes=False, http_cache=None):
         if mode not in ("live", "record", "replay"):
             raise ValueError("unknown GitHub transport mode")
         self.directory = Path(directory) if directory else None
         if mode != "live" and self.directory is None:
             raise ValueError("record/replay needs a directory")
         self.mode, self.accounts, self.writes = mode, accounts or {}, writes
+        # REST reads over one kept-alive connection per thread with
+        # conditional requests, instead of a gh process each (about 360 ms);
+        # GraphQL and every write stay on gh
+        self.http_cache = Path(http_cache) if http_cache else None
+        self._local = threading.local()
+        self._tokens = {}
+        self._token_lock = threading.Lock()
+
+    def token(self, account, env):
+        """The account's token, as gh would use it, asked for once."""
+        with self._token_lock:
+            if account not in self._tokens:
+                if env.get("GH_TOKEN"):
+                    self._tokens[account] = env["GH_TOKEN"]
+                else:
+                    out = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True,
+                                         env=env, timeout=20)
+                    if out.returncode or not out.stdout.strip():
+                        raise OSError("no GitHub token for " + account)
+                    self._tokens[account] = out.stdout.strip()
+            return self._tokens[account]
+
+    def http_get(self, endpoint, account, env, timeout, text):
+        """One conditional GET. An unchanged answer comes back as 304, which
+        costs no rate-limit budget, and the cached body is returned; a cached
+        body is never used without GitHub confirming it."""
+        accept = "application/vnd.github.raw+json" if text else "application/vnd.github+json"
+        key = digest([account, env.get("GH_CONFIG_DIR"), endpoint, accept])
+        path = self.http_cache / key[:2] / (key + ".json")
+        cached = read(path)
+        headers = {"Authorization": "Bearer " + self.token(account, env), "Accept": accept,
+                   "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "APReview"}
+        if cached and cached.get("etag"):
+            headers["If-None-Match"] = cached["etag"]
+        connection = getattr(self._local, "connection", None)
+        if connection is None:
+            connection = self._local.connection = http.client.HTTPSConnection(
+                "api.github.com", timeout=timeout, context=ssl.create_default_context())
+        connection.timeout = timeout
+        if connection.sock is not None:
+            connection.sock.settimeout(timeout)
+        try:
+            connection.request("GET", "/" + endpoint, headers=headers)
+            response = connection.getresponse()
+            body = response.read()
+        except (OSError, http.client.HTTPException) as error:
+            connection.close()
+            self._local.connection = None
+            raise Retry("GitHub connection: %s" % error) from error
+        status = response.status
+        if status == 304 and cached:
+            review_metrics.count("github-304", "unchanged")
+            os.utime(path)
+            return cached["body"]
+        if status in (403, 429) and response.getheader("x-ratelimit-remaining") == "0":
+            reset = response.getheader("x-ratelimit-reset")
+            raise RateLimited("API rate limit exceeded (HTTP %d)" % status, float(reset) if reset else None)
+        if status >= 500 or status == 429:
+            raise Retry("HTTP %d" % status)
+        if status >= 400:
+            raise OSError("HTTP %d: %s" % (status, body[:300].decode(errors="replace")))
+        text_body = body.decode()
+        result = text_body if text else json.loads(text_body)
+        etag = response.getheader("etag")
+        if etag:
+            atomic(path, dict(etag=etag, body=result))
+        return result
 
     def request(
         self, endpoint, *, account="read", method="GET", payload=None, deadline=None, text=False
@@ -88,6 +162,21 @@ class GitHub:
                 if timeout <= 0:
                     raise TimeoutError("GitHub deadline")
             started = time.monotonic()
+            if self.http_cache and method == "GET" and endpoint != "graphql" and self.mode != "replay":
+                try:
+                    response = self.http_get(endpoint, account, env, timeout, text)
+                    review_metrics.count("github", kind, time.monotonic() - started)
+                    review_metrics.count("github-account", account)
+                    break
+                except Retry as error:
+                    review_metrics.count("github", kind, time.monotonic() - started)
+                    if attempt == (2 if reading else 0):
+                        raise OSError(str(error)) from error
+                    continue
+                except ValueError as error:
+                    if attempt == (2 if reading else 0):
+                        raise OSError("invalid GitHub JSON") from error
+                    continue
             try:
                 result = subprocess.run(
                     command,

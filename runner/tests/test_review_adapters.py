@@ -1673,6 +1673,77 @@ class PhaseController(unittest.TestCase):
                             or (row.get("ticket") == 99 and row.get("removed")))
 
 
+class GitHubHttp(unittest.TestCase):
+    def setUp(self):
+        from review_github import GitHub
+        self.root = workspace(self)
+        self.gh = GitHub(http_cache=self.root / "http-cache")
+        self.gh._tokens["read"] = "t"
+        self.script, self.sent = [], []
+        test = self
+
+        class Response:
+            def __init__(self, status, body=b"", headers=None):
+                self.status, self.body, self.headers = status, body, headers or {}
+
+            def read(self):
+                return self.body
+
+            def getheader(self, name):
+                return self.headers.get(name.lower())
+
+        class Connection:
+            sock = None
+
+            def __init__(self, *a, **kw):
+                self.timeout = kw.get("timeout")
+
+            def request(self, method, url, headers):
+                test.sent.append((url, dict(headers)))
+
+            def getresponse(self):
+                return Response(*test.script.pop(0))
+
+            def close(self):
+                pass
+
+        patcher = patch("review_github.http.client.HTTPSConnection", Connection)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_an_unchanged_answer_is_revalidated_not_refetched(self):
+        self.script = [(200, b'{"n": 1}', {"etag": 'W/"a"'}), (304, b"", {})]
+        self.assertEqual(self.gh.request("repos/o/r/pulls/1"), {"n": 1})
+        self.assertEqual(self.gh.request("repos/o/r/pulls/1"), {"n": 1})
+        self.assertNotIn("If-None-Match", self.sent[0][1])
+        self.assertEqual(self.sent[1][1]["If-None-Match"], 'W/"a"')
+
+    def test_a_spent_allowance_carries_its_reset_and_errors_map_as_gh_did(self):
+        from review_github import RateLimited
+        self.script = [(403, b"", {"x-ratelimit-remaining": "0", "x-ratelimit-reset": "1790000000"})]
+        with self.assertRaises(RateLimited) as caught:
+            self.gh.request("repos/o/r/pulls/1")
+        self.assertEqual(caught.exception.reset, 1790000000.0)
+        self.script = [(404, b"Not Found", {})]
+        with self.assertRaises(OSError) as caught:
+            self.gh.request("repos/o/r/pulls/2")
+        self.assertIn("HTTP 404", str(caught.exception))
+        self.assertEqual(len(self.sent), 2)                 # a 4xx is not retried
+        self.script = [(502, b"", {}), (200, b'{"n": 3}', {})]
+        with patch("review_github.time.sleep"):
+            self.assertEqual(self.gh.request("repos/o/r/pulls/3"), {"n": 3})
+
+    def test_writes_and_graphql_never_use_it(self):
+        from review_github import GitHub
+        gh = GitHub(http_cache=self.root / "c", writes=True)
+        with patch("review_github.subprocess.run") as run:
+            run.return_value = subprocess.CompletedProcess([], 0, '{"data": {}}', "")
+            gh.request("graphql", method="POST", payload={"query": "query { x }"})
+            gh.request("repos/o/r/issues/1/comments", method="POST", payload={"body": "x"})
+        self.assertEqual(self.sent, [])
+        self.assertEqual(run.call_count, 2)
+
+
 class GitHubDeadline(unittest.TestCase):
     def test_retries_and_backoff_never_run_past_the_deadline(self):
         from review_github import GitHub
