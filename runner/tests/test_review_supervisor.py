@@ -375,12 +375,22 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.claim_candidate = Mock(side_effect=KeyError("request"))
         supervisor.store = Mock(wraps=self.store)
         supervisor.store.mark_pending.side_effect = OSError("disk")
+        supervisor.states[PR]["review"] = "claimed"                     # damage after it was claimed
         supervisor.admit(dict(candidate(), pr=PR))
         self.assertEqual(supervisor.states[PR]["review"], "pending")      # retried later
         self.assertGreater(supervisor.next_claim[PR], time.time())
         supervisor.config["admission_deadline"] = time.time() - 1
         supervisor.admit(dict(candidate(), pr=PR))
         self.assertEqual(supervisor.states[PR]["review"], "deferred")     # the run can end
+
+    def test_invalid_routing_still_ends_the_run(self):
+        supervisor = self._bare_supervisor(time.time() + 3600)
+        supervisor.config["configuration"]["routing_root"] = str(self.root / "routing")
+        supervisor.config["mode"] = "pr"
+        (self.root / "routing").mkdir()
+        with patch("review_routing.load", side_effect=ValueError("bad routing")):
+            with self.assertRaises(SUPERVISOR.RoutingFatal):
+                supervisor.admit(dict(candidate(), pr=PR))
 
     def test_a_rate_limited_claim_waits_for_the_reset_instead_of_deferring(self):
         from review_github import RateLimited

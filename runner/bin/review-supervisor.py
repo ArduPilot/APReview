@@ -69,6 +69,10 @@ def reconciliation_snapshot(candidate):
     }
 
 
+class RoutingFatal(Exception):
+    """Routing present but unreadable or invalid: fatal to the run."""
+
+
 class Supervisor:
     def __init__(
         self,
@@ -416,6 +420,8 @@ class Supervisor:
         to this PR's records defers this PR and leaves the run going."""
         try:
             self.claim_candidate(candidate)
+        except RoutingFatal:
+            raise                       # invalid routing is the run's, not the PR's
         except Exception as error:
             self.defer_damaged(candidate["pr"], "admission failed: %s: %s"
                                % (type(error).__name__, str(error)[:120]))
@@ -438,6 +444,7 @@ class Supervisor:
             if final:
                 state.update(review="deferred", reason="%s; pending mark failed: %s" % (reason, str(error)[:80]))
                 return
+            state["review"] = "pending"     # admission visits it again
             delay = min(300, self.backoff.get(pr, 0) * 2 + 30)
             self.backoff[pr] = delay
             self.next_claim[pr] = time.time() + delay
@@ -592,7 +599,11 @@ class Supervisor:
         routing_root = self.config["configuration"].get("routing_root")
         if routing_root:
             from review_routing import load, owner
-            if owner(load(routing_root), candidate.get("mode", self.config["mode"]), candidate["repository"]) != "new":
+            try:
+                route = owner(load(routing_root), candidate.get("mode", self.config["mode"]), candidate["repository"])
+            except Exception as error:
+                raise RoutingFatal(error) from error
+            if route != "new":
                 self.finish(candidate["pr"], "deferred", "ownership transferred")
                 return
         pr = candidate["pr"]
