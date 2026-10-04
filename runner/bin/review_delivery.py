@@ -132,17 +132,13 @@ class Publication:
                     page = None
                 if not (isinstance(page, dict) and Store.valid_key(page.get("target"))
                         and page["target"].startswith("page:")
+                        and isinstance(page.get("state"), str)
                         and isinstance(page.get("anchors", []), list)
                         and all(isinstance(a, str) for a in page.get("anchors", []))
                         and isinstance(page.get("revision", 0), int)):
                     # a damaged record would drop its label from the page:
-                    # remove it and rebuild the index from the receipts
-                    # (the mark goes first: a rebuild cut short must rescan)
-                    print("landing: damaged index record %s rebuilt" % record, file=sys.stderr)
-                    (index / ".complete").unlink(missing_ok=True)
-                    record.unlink(missing_ok=True)
-                    complete = False
-                    continue
+                    # this page waits for repair; the drain carries on
+                    raise ValueError("landing: damaged index record %s" % record)
                 if page.get("state") in ("published", "superseded"):
                     indexed[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
                                                 anchors=page.get("anchors", []), target=page["target"])
@@ -157,11 +153,9 @@ class Publication:
                 # project id, which canonical() rejects and must not end the scan.
                 # A receipt that may be one of this page's labels but is damaged
                 # raises: the page waits rather than going out without it.
-                if not isinstance(receipt, dict):
+                if not (isinstance(receipt, dict) and isinstance(receipt.get("target"), str)):
                     raise ValueError("landing: a receipt is not a record")
-                if not isinstance(receipt.get("target"), str):
-                    continue
-                where = receipt.get("target", "")
+                where = receipt["target"]
                 try:
                     where = canonical(where) if where.startswith("page:") else ""
                 except ValueError:
@@ -171,7 +165,8 @@ class Publication:
                     + r"/([^/]+)/devcall_pr_reviews.html",
                     where,
                 )
-                if match and not (isinstance(receipt.get("revision", 0), int)
+                if match and not (isinstance(receipt.get("state"), str)
+                                  and isinstance(receipt.get("revision", 0), int)
                                   and isinstance(receipt.get("anchors", []), list)
                                   and all(isinstance(a, str) for a in receipt.get("anchors", []))):
                     raise ValueError("landing: damaged receipt %s for %s" % (receipt.get("id"), match[2]))
