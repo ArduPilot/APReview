@@ -514,6 +514,32 @@ class ReviewStore(unittest.TestCase):
         atomic(receipt, dict(read(receipt), state="held"))
         self.assertTrue(self.store.in_followup_window(PR, cutoff))
 
+    def test_recovery_skips_a_pr_unchanged_since_it_was_recovered(self):
+        self.accept()
+        self.lock.close()
+        calls = []
+        real = self.store.recover_pr
+        self.store.recover_pr = lambda lock, pr: calls.append(pr) or real(lock, pr)
+        self.store.recover()
+        self.store.recover()
+        self.assertEqual(len(calls), 1)
+        claim = self.store.pr_dir(PR) / "claim.json"
+        later = time.time() + 5
+        os.utime(claim, (later, later))
+        self.store.recover()
+        self.assertEqual(len(calls), 2)
+
+    def test_a_bundle_is_verified_once_per_process(self):
+        self.accept()
+        self.lock.close()
+        self.store.bundle(PR)
+        generation = self.store.pr_dir(PR) / "generations" / str(self.store.current(PR)["generation"])
+        evidence = generation / "bundle.json"
+        evidence.write_bytes(evidence.read_bytes() + b" ")
+        self.store.bundle(PR)                          # this process verified it already
+        with self.assertRaises(ValueError):
+            Store(self.root).bundle(PR)                # a new one checks again
+
     def test_tombstones_and_accepted_generation_are_independent(self):
         self.accept()
         page = "page:end/latest"

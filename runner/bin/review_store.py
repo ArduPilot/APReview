@@ -131,8 +131,14 @@ class Store:
         if not pointer:
             return None
         path = self.pr_dir(pr) / "generations" / str(pointer["generation"])
-        if bundle_digest(path) != pointer["digest"]:
-            raise ValueError("bundle digest mismatch")
+        # A promoted generation never changes; hashing all its evidence on
+        # every read of every bundle, every pass, was most of a recovery
+        # slice. Verified once per process, keyed by the digest it matched.
+        verified = self.__dict__.setdefault("_verified", set())
+        if (str(path), pointer["digest"]) not in verified:
+            if bundle_digest(path) != pointer["digest"]:
+                raise ValueError("bundle digest mismatch")
+            verified.add((str(path), pointer["digest"]))
         return read(path / "bundle.json")
 
     def chain(self, pr):
@@ -551,6 +557,7 @@ class Store:
         deadline = time.monotonic() + seconds
         pending = list(self.snapshot() if snapshot is None else snapshot)
         done = 0
+        recovered = read(self.root / "recovered.json", {})
         while pending and done < limit and time.monotonic() < deadline:
             path = Path(pending.pop(0))
             done += 1
@@ -573,14 +580,34 @@ class Store:
                 continue
             repo = path.parent.parent.parent.name + "/" + path.parent.parent.name
             pr = "pr:%s#%s" % (repo, path.parent.name)
+            # A PR whose claim and current pointer have not changed since it
+            # was last recovered has nothing new to recover.
+            key = self.recovery_key(path, pr)
+            if key is not None and recovered.get(str(path)) == key:
+                continue
             lock = try_lock(self.locks, pr)
             if lock is None:
                 continue
             with lock:
                 if self.clean_owner(lock, deadline):
                     self.recover_pr(lock, pr)
+                    recovered[str(path)] = self.recovery_key(path, pr)
         self.last_recovered = done
+        atomic(self.root / "recovered.json", recovered)
         return pending
+
+    def recovery_key(self, claim_path, pr):
+        """What would make a PR need recovery again: its claim, its current
+        pointer, or its owner record (payloads to clean) changing."""
+        parts = []
+        for path in (claim_path, claim_path.parent / "current", self.root / "owners" / (str(region(pr)) + ".json")):
+            try:
+                parts.append(path.stat().st_mtime_ns)
+            except FileNotFoundError:
+                parts.append(0)
+            except OSError:
+                return None
+        return parts
 
     def recover_slice(self, limit=100, seconds=30):
         """One bounded slice of recovery for a caller with no controller of
