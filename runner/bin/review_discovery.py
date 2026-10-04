@@ -86,6 +86,14 @@ def rebase_only(clone, old, new, base, files):
     return True
 
 
+def has_commit(clone, revision):
+    try:
+        git(clone, "cat-file", "-e", revision + "^{commit}")
+        return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
 def same_head(a, b):
     return bool(a and b and (a.startswith(b) or b.startswith(a)))
 
@@ -784,18 +792,28 @@ class Discovery:
             if self.store and lock is None:
                 raise TimeoutError("refresh busy")
             # Fetches add objects/refs; they never check out the mutable base.
+            # A commit the clone already has needs no fetch.
             for revision in dict.fromkeys([candidate["head"], candidate["base"]]):
-                with review_metrics.timed("github", "git fetch"):
-                    git(clone, "fetch", "--no-tags", "origin", revision)
+                if not has_commit(clone, revision):
+                    with review_metrics.timed("github", "git fetch"):
+                        git(clone, "fetch", "--no-tags", "origin", revision)
             if old:
                 old = self.told_commit(clone, candidate["repository"], old)
             candidate["merge_base"] = git(clone, "merge-base", candidate["base"], candidate["head"])
-            files = [
-                x["filename"]
-                for x in self.gh.pages(
-                    f"repos/{candidate['repository']}/pulls/{candidate['number']}/files"
-                )
-            ]
+            # The files GitHub lists for a PR are those changed between the
+            # merge base and the head, which the clone gives without a call or
+            # the files endpoint's 3000-file cap; the API is the fallback.
+            try:
+                files = [f for f in git(clone, "diff", "--name-only", "-z", candidate["merge_base"],
+                                        candidate["head"]).split("\0") if f]
+                review_metrics.count("local", "files from git")
+            except OSError:
+                files = [
+                    x["filename"]
+                    for x in self.gh.pages(
+                        f"repos/{candidate['repository']}/pulls/{candidate['number']}/files"
+                    )
+                ]
             candidate["diff"] = git(
                 clone, "diff", candidate["merge_base"], candidate["head"], "--", *files
             )
