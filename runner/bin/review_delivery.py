@@ -14,7 +14,7 @@ from review_discovery import LABELS, POST, module
 import review_metrics
 from review_lock import acquire, canonical, region
 from review_render import Renderer, anchor, bundle_at, sha, verify
-from review_store import atomic, create_once, digest, mkdir, read
+from review_store import Store, atomic, create_once, digest, mkdir, read
 
 # Line 1 of every comment, verbatim what the command writes today: the tools
 # match "AI-generated" and readers know the sentence.
@@ -130,7 +130,7 @@ class Publication:
                 except (OSError, ValueError):
                     page = None
                 if (isinstance(page, dict) and page.get("state") in ("published", "superseded")
-                        and isinstance(page.get("target"), str) and page["target"].startswith("page:")
+                        and Store.valid_key(page.get("target")) and page["target"].startswith("page:")
                         and isinstance(page.get("anchors", []), list)
                         and all(isinstance(a, str) for a in page.get("anchors", []))
                         and isinstance(page.get("revision", 0), int)):
@@ -140,7 +140,7 @@ class Publication:
             pages.update(indexed)
             indexed_revisions = dict(revisions)
             scan = not complete
-            for receipt in (self.store.receipts() if scan else ()):
+            for receipt in (self.store.receipts(skip_unreadable=True) if scan else ()):
                 # only page receipts have page keys: a board receipt targets a
                 # project id, which canonical() rejects and must not end the scan;
                 # a receipt not shaped like a page publish is skipped
