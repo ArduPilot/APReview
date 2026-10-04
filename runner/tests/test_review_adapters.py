@@ -1008,6 +1008,13 @@ class LocalPublication(unittest.TestCase):
         self.assertEqual(fetched, [target])
         served = served_copy(self.store, target)
         self.assertEqual(served, (self.served / "report.html").read_bytes())
+        self.assertEqual(served_copy(self.store, target, self.publisher.destination(target)), served)
+        self.assertIsNone(served_copy(self.store, target, ["elsewhere", "http://elsewhere.invalid"]))
+        # an upload attempted since, even one that failed, voids the copy
+        epoch = self.store.root / "pages" / digest(target) / "epoch.json"
+        atomic(epoch, read(epoch) + 1)
+        self.assertIsNone(served_copy(self.store, target))
+        atomic(epoch, read(epoch) - 1)
         # a local source that no longer matches the confirmed upload is not used
         source = self.store.root / "pages" / digest(target) / "report.html"
         source.write_bytes(source.read_bytes() + b"<!-- later attempt -->")

@@ -191,7 +191,10 @@ class Publication:
         destination = publish.rstrip("/") + "/" + str(Path(path).parent) + "/"
         with review_metrics.timed("site", "rsync page"):
             result = run_external(
-                ["rsync", "--mkpath", "--delay-updates", *endpoint.get("rsync_args", []), "--", str(source), destination],
+                # --checksum: the quick check skips a same-size change made in
+                # the same second, and a sampled upload trusts the exit status
+                ["rsync", "--mkpath", "--delay-updates", "--checksum", *endpoint.get("rsync_args", []),
+                 "--", str(source), destination],
                 capture_output=True,
                 timeout=timeout(deadline),
             )
@@ -234,8 +237,9 @@ class Publication:
             views=None if landing or entry.get("retained") else self.renderer.views,
         )
         if not entry.get("retained"):
-            # the page as last verified served: a later publish whose fresh
-            # render has these bytes, with no upload since, needs no upload
+            # the page as last confirmed uploaded (fetched back when sampled):
+            # a later publish whose fresh render has these bytes, with no
+            # upload since, needs no upload
             atomic(directory / "confirmed.json", dict(result, destination=self.destination(target)))
         return result
 

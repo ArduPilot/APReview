@@ -575,13 +575,16 @@ class Renderer:
         return seal(body)
 
 
-def served_copy(store, target):
+def served_copy(store, target, destination=None):
     """The bytes of a page as its last confirmed upload left it, read from the
-    store, or None: the local source must match the confirmed digest, so a
-    later failed or unfinished upload never passes for what is served."""
+    store, or None: the local source must match the confirmed digest, no
+    upload may have been attempted since (the epoch), and when a destination
+    is given the upload must have gone there."""
     directory = store.root / "pages" / digest(canonical(target))
     confirmed = read(directory / "confirmed.json")
-    if not confirmed:
+    if not confirmed or confirmed.get("epoch") != read(directory / "epoch.json", 0):
+        return None
+    if destination is not None and confirmed.get("destination") != destination:
         return None
     try:
         raw = (directory / canonical(target).rsplit("/", 1)[1]).read_bytes()

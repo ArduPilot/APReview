@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 import importlib.util
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import os
 import re
 import sys
 import subprocess
@@ -197,12 +198,18 @@ class Discovery:
         if not hasattr(self, "_pages"):
             self._pages = {}
         for label, url in urls.items():
-            if url not in self._pages and self.store and endpoint.get("url") \
-                    and url.startswith(endpoint["url"].rstrip("/") + "/"):
-                # our own page, as its last confirmed upload left it: no fetch
+            base = (endpoint.get("url") or "").rstrip("/") + "/"
+            if url not in self._pages and self.store and endpoint.get("url") and url.startswith(base) \
+                    and not re.search(r"[?#]", url):
+                # our own page, as its last confirmed upload to this endpoint
+                # left it: no fetch; anything doubtful is fetched as before
                 from review_render import served_copy
-                local = served_copy(self.store, "page:%s/%s" % (
-                    self.config.get("endpoint", "review"), url[len(endpoint["url"].rstrip("/")) + 1:]))
+                path = url[len(base):]
+                try:
+                    local = served_copy(self.store, "page:%s/%s" % (self.config.get("endpoint", "review"), path),
+                                        [endpoint.get("publish") or os.environ.get("REVIEW_PUBLISH"), url])
+                except ValueError:
+                    local = None
                 if local is not None:
                     review_metrics.count("local", "manifest from the store")
                     self._pages[url] = self.parse_manifest(local.decode())
