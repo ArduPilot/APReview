@@ -621,12 +621,13 @@ class ReviewStore(unittest.TestCase):
             return [read(p) for p in outbox.glob("*.json")
                     if p.name not in ("garbage.json", "shapeless.json", "nokind.json")
                     and read(p)["kind"] == "comment"][0]
-        self.assertEqual(comment()["failures"], 0)             # held: the damage might be an earlier comment
+        self.assertNotIn("quarantined", comment())             # held: the damage might be an earlier comment
         for name in ("garbage.json", "shapeless.json", "nokind.json"):
             (outbox / name).unlink()
         self.store.drain(adapter)
         comment = [comment()]
-        self.assertEqual(comment[0]["failures"], 1)            # recorded on the one that failed
+        self.assertEqual(comment[0]["quarantined"], 1)         # recorded on the one that failed
+        self.assertEqual(comment[0]["failures"], 0)            # the ordinary budget is untouched
         self.assertIn("a bug in one delivery", comment[0]["error"])
 
     def test_malformed_dependencies_or_keys_never_block_selection(self):
@@ -653,6 +654,15 @@ class ReviewStore(unittest.TestCase):
         self.store.drain(StubAdapter(self.root))
         self.assertFalse(self.store.has_receipt("proj"))       # no row to update: the page would lose the PR
 
+    def test_a_malformed_whole_row_is_no_reason_to_bypass(self):
+        self.lock.close()
+        atomic(self.root / "outbox" / "proj.json", dict(id="proj", pr=PR, generation="op", kind="projection",
+                                                        target="page:end/a", gate="page",
+                                                        dependencies=["never-journalled"],
+                                                        patches={PR: {"ticket": 1, "removed": "false"}},
+                                                        state="owed", failures=0, next_attempt=0))
+        self.assertFalse(self.store.unsatisfiable(read(self.root / "outbox" / "proj.json"), "never-journalled"))
+
     def test_unexpected_failures_never_exhaust_an_entry(self):
         self.accept()
         self.lock.close()
@@ -663,7 +673,12 @@ class ReviewStore(unittest.TestCase):
             for p in outbox.glob("*.json"):
                 e = read(p); e["next_attempt"] = 0; atomic(p, e)
             self.store.drain(adapter)
-        self.assertTrue(all(read(p)["failures"] == 4 for p in outbox.glob("*.json")))
+        self.assertTrue(all(read(p)["failures"] == 0 and read(p)["quarantined"] == 8
+                            for p in outbox.glob("*.json")))
+        self.assertEqual(len(self.store.delivery_snapshot(limit=100)), 0)     # backing off
+        for p in outbox.glob("*.json"):
+            e = read(p); e["next_attempt"] = 0; atomic(p, e)
+        self.assertTrue(self.store.delivery_snapshot(limit=100))              # but never given up
 
     def test_a_due_dependency_is_never_crowded_out_by_its_dependents(self):
         self.lock.close()

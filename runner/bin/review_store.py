@@ -880,7 +880,8 @@ class Store:
             return False
         for pr, patch in patches.items():
             row = rows.get(pr)
-            whole = isinstance(patch, dict) and "ticket" in patch and "removed" in patch
+            whole = (isinstance(patch, dict) and isinstance(patch.get("ticket"), int)
+                     and isinstance(patch.get("removed"), bool))
             if not whole and not (isinstance(row, dict) and row.get("removed") is False):
                 return False
         if self.has_receipt(dep) or (self.root / "outbox" / (dep + ".json")).exists():
@@ -1048,10 +1049,12 @@ class Store:
                 entry = read(path)
                 if not isinstance(entry, dict):
                     return
-                # capped below the give-up count: an unexpected failure keeps
-                # being retried, and works again once the cause is fixed
-                entry["failures"] = min(4, int(entry.get("failures", 0)) + 1)
-                entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** (entry["failures"] - 1))
+                # counted apart from the ordinary give-up budget: an
+                # unexpected failure keeps being retried, backing off, and
+                # works again once the cause is fixed
+                count = entry.get("quarantined", 0)
+                entry["quarantined"] = (count if isinstance(count, int) else 0) + 1
+                entry["next_attempt"] = time.time() + min(3600, 60 * 2 ** min(6, entry["quarantined"] - 1))
                 entry["error"] = "unexpected: %s" % str(error)[:200]
                 atomic(path, entry)
             except Exception:
