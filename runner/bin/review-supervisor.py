@@ -399,7 +399,9 @@ class Supervisor:
         # the PR in the followup window until it is settled
         if review == "deferred":
             self.store.mark_pending(pr, reason or "deferred")
-        elif review in ("accepted", "reused", "dropped"):
+        elif review in ("accepted", "reused") or (review == "dropped" and reason != "label removed"):
+            # a label run dropping a PR whose label went does not settle a
+            # followup review it may still owe
             self.store.clear_pending(pr)
         lock = self.owned.pop(pr, None)
         if lock:
@@ -521,7 +523,7 @@ class Supervisor:
             or (fresh.get("draft", False) and "AIReview" not in fresh.get("labels", []))
         ):
             self.project(fresh, "refresh-" + str(fresh.get("observation", 0)))
-            self.finish(pr, "dropped")
+            self.finish(pr, "dropped", fresh.get("reason"))
             return
         if fresh.get("classification") == "DEFERRED":
             self.finish(pr, "deferred", fresh.get("reason", "candidate deferred"))

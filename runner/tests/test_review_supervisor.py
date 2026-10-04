@@ -613,6 +613,8 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.owned = {}
         supervisor.finish(PR, "deferred", "quota paused")
         supervisor.store.mark_pending.assert_called_once_with(PR, "quota paused")
+        supervisor.finish(PR, "dropped", "label removed")
+        supervisor.store.clear_pending.assert_not_called()
         supervisor.finish(PR, "reused")
         supervisor.store.clear_pending.assert_called_once_with(PR)
 
