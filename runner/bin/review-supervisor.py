@@ -413,14 +413,20 @@ class Supervisor:
         finish() would read the same damaged claim again."""
         print("admission: %s deferred: %s" % (pr, reason), file=sys.stderr)
         state = self.states[pr]
-        state.update(review="deferred", reason=reason)
-        try:
-            self.store.mark_pending(pr, reason)
-        except Exception:
-            pass
         lock = self.owned.pop(pr, None)
         if lock:
             lock.close()
+        try:
+            self.store.mark_pending(pr, reason)
+        except Exception as error:
+            # without the marker a deferral could drop the PR from the
+            # followup window: stay pending and retry, as for a busy PR
+            delay = min(300, self.backoff.get(pr, 0) * 2 + 30)
+            self.backoff[pr] = delay
+            self.next_claim[pr] = time.time() + delay
+            state["reason"] = "%s; pending mark failed: %s" % (reason, str(error)[:80])
+            return
+        state.update(review="deferred", reason=reason)
 
     def finish(self, pr, review, reason=None):
         state = self.states[pr]
@@ -584,7 +590,12 @@ class Supervisor:
             state["reason"] = "PR busy"
             return
         self.owned[pr] = lock
-        if not self.store.clean_owner(lock):
+        try:
+            clean = self.store.clean_owner(lock)
+        except Exception as error:
+            self.defer_damaged(pr, "owner unreadable: %s" % str(error)[:120])
+            return
+        if not clean:
             self.finish(pr, "deferred", "previous payload not empty")
             return
         try:
@@ -1338,9 +1349,13 @@ class Supervisor:
                     pr = candidate["pr"]
                     state = self.states[pr]
                     if state["review"] == "pending":
+                        if time.time() < self.next_claim.get(pr, 0):
+                            continue
                         try:
                             old_claim = self.store.claim(pr)
-                            if old_claim is not None and not isinstance(old_claim, dict):
+                            if old_claim and not (isinstance(old_claim, dict)
+                                                  and isinstance(old_claim.get("run"), str)
+                                                  and isinstance(old_claim.get("status"), str)):
                                 raise ValueError("claim is not a record")
                         except Exception as error:
                             self.defer_damaged(pr, "claim unreadable: %s" % str(error)[:120])
