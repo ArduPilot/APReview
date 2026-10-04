@@ -670,6 +670,12 @@ class ReviewStore(unittest.TestCase):
                                                         target="page:bad", next_attempt=0, failures=0))
         self.assertEqual(self.store.delivery_snapshot(limit=10), [])
 
+    def test_an_entry_whose_id_is_not_its_filename_never_enters_selection(self):
+        self.lock.close()
+        atomic(self.root / "outbox" / "one.json", dict(id="other", pr=PR, kind="comment",
+                                                       next_attempt=0, failures=0))
+        self.assertEqual(self.store.delivery_snapshot(limit=10), [])
+
     def test_a_damaged_recovery_cursor_entry_is_skipped(self):
         self.accept()
         self.lock.close()

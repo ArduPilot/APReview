@@ -800,7 +800,7 @@ class Store:
             if x is None:
                 continue
             gate = x.get("gate", "pr") if isinstance(x, dict) else None
-            if not (isinstance(x, dict) and isinstance(x.get("id"), str) and isinstance(x.get("kind"), str)
+            if not (isinstance(x, dict) and x.get("id") == p.stem and isinstance(x.get("kind"), str)
                     and isinstance(x.get("next_attempt", 0), (int, float))
                     and isinstance(x.get("failures", 0), int)
                     and isinstance(x.get("dependencies", []), list)
