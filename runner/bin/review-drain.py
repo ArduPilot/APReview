@@ -4,7 +4,7 @@
 import argparse
 import os
 import time
-from review_store import Store, read
+from review_store import Store, atomic, read
 from review_github import GitHub
 from review_delivery import Delivery
 import review_metrics
@@ -19,7 +19,8 @@ c = read(a.config) if a.config else {}
 # one drainer at a time: a cron start that finds another running leaves it
 # the work rather than contending for every lock it holds
 import fcntl
-_single = open(os.path.join(a.data, "drain.lock"), "a")
+# private, like the store's lock file: anyone able to hold it stops delivery
+_single = os.open(os.path.join(a.data, "drain.lock"), os.O_RDWR | os.O_CREAT, 0o600)
 try:
     fcntl.flock(_single, fcntl.LOCK_EX | fcntl.LOCK_NB)
 except OSError:
@@ -52,4 +53,6 @@ while True:
         break
     if before <= {p.name for p in (s.root / "outbox").glob("*.json")}:
         break
+# the runs page warns when this goes stale: delivery depends on it
+atomic(os.path.join(a.data, "drain-last.json"), dict(at=time.time(), owed=len(debts or [])))
 raise SystemExit(1 if debts else 0)

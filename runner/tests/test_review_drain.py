@@ -34,6 +34,8 @@ class Drainer(unittest.TestCase):
         r = self.drain()
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue((self.data / "outbox").exists())
+        self.assertEqual(os.stat(self.data / "drain.lock").st_mode & 0o777, 0o600)
+        self.assertTrue((self.data / "drain-last.json").exists())
 
 
 if __name__ == "__main__":
