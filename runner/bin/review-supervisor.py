@@ -449,6 +449,8 @@ class Supervisor:
         """Discovery found it unchanged or gone within the hour: admission
         settles it from that read instead of asking GitHub again. A PR going
         to review is always read again just before its first pass."""
+        if candidate.get("reason") == "label removed":
+            return False        # admission may find it under another label
         return (candidate.get("classification") in ("REUSE", "DROPPED")
                 and time.time() - candidate.get("discovered_at", 0) < self.DISCOVERY_FRESH)
 
