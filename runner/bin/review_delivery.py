@@ -165,7 +165,7 @@ class Publication:
                     + r"/([^/]+)/devcall_pr_reviews.html",
                     where,
                 )
-                if match and not (isinstance(receipt.get("state"), str)
+                if match and not (isinstance(receipt.get("state"), str) and isinstance(receipt.get("id"), str)
                                   and isinstance(receipt.get("revision", 0), int)
                                   and isinstance(receipt.get("anchors", []), list)
                                   and all(isinstance(a, str) for a in receipt.get("anchors", []))):
