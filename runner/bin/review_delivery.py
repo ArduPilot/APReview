@@ -130,7 +130,9 @@ class Publication:
                 except (OSError, ValueError):
                     page = None
                 if (isinstance(page, dict) and page.get("state") in ("published", "superseded")
-                        and isinstance(page.get("target"), str) and isinstance(page.get("anchors", []), list)
+                        and isinstance(page.get("target"), str) and page["target"].startswith("page:")
+                        and isinstance(page.get("anchors", []), list)
+                        and all(isinstance(a, str) for a in page.get("anchors", []))
                         and isinstance(page.get("revision", 0), int)):
                     indexed[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
                                                 anchors=page.get("anchors", []), target=page["target"])
@@ -144,7 +146,8 @@ class Publication:
                 # a receipt not shaped like a page publish is skipped
                 if not (isinstance(receipt, dict) and isinstance(receipt.get("target"), str)
                         and isinstance(receipt.get("revision", 0), int)
-                        and isinstance(receipt.get("anchors", []), list)):
+                        and isinstance(receipt.get("anchors", []), list)
+                        and all(isinstance(a, str) for a in receipt.get("anchors", []))):
                     continue
                 where = receipt.get("target", "")
                 try:
