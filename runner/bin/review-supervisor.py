@@ -408,7 +408,7 @@ class Supervisor:
     def inputs(self, candidate):
         return {k: v for k, v in candidate.items() if k not in ("live", "stub")}
 
-    def defer_damaged(self, pr, reason):
+    def defer_damaged(self, pr, reason, final=False):
         """Defer a PR whose records cannot be read, touching nothing of them:
         finish() would read the same damaged claim again."""
         print("admission: %s deferred: %s" % (pr, reason), file=sys.stderr)
@@ -420,7 +420,11 @@ class Supervisor:
             self.store.mark_pending(pr, reason)
         except Exception as error:
             # without the marker a deferral could drop the PR from the
-            # followup window: stay pending and retry, as for a busy PR
+            # followup window: stay pending and retry, as for a busy PR,
+            # until the run is closing, when the summary records the debt
+            if final:
+                state.update(review="deferred", reason="%s; pending mark failed: %s" % (reason, str(error)[:80]))
+                return
             delay = min(300, self.backoff.get(pr, 0) * 2 + 30)
             self.backoff[pr] = delay
             self.next_claim[pr] = time.time() + delay
@@ -604,7 +608,13 @@ class Supervisor:
         except Exception as error:      # this PR's records, not the run
             self.defer_damaged(pr, "recovery failed: %s" % str(error)[:120])
             return
-        existing = self.store.claim(pr)
+        try:
+            existing = self.store.claim(pr)
+            if existing and not (isinstance(existing, dict) and isinstance(existing.get("node_id"), str)):
+                raise ValueError("claim is not a record")
+        except Exception as error:
+            self.defer_damaged(pr, "claim unreadable: %s" % str(error)[:120])
+            return
         if existing and existing["node_id"] != candidate["node_id"]:
             self.finish(pr, "deferred", "stored node id changed")
             return
@@ -1349,16 +1359,19 @@ class Supervisor:
                     pr = candidate["pr"]
                     state = self.states[pr]
                     if state["review"] == "pending":
-                        if time.time() < self.next_claim.get(pr, 0):
+                        closing = ((self.directory / "abort.json").exists()
+                                   or time.time() >= self.config["admission_deadline"])
+                        if time.time() < self.next_claim.get(pr, 0) and not closing:
                             continue
                         try:
                             old_claim = self.store.claim(pr)
                             if old_claim and not (isinstance(old_claim, dict)
                                                   and isinstance(old_claim.get("run"), str)
-                                                  and isinstance(old_claim.get("status"), str)):
+                                                  and isinstance(old_claim.get("status"), str)
+                                                  and isinstance(old_claim.get("node_id"), str)):
                                 raise ValueError("claim is not a record")
                         except Exception as error:
-                            self.defer_damaged(pr, "claim unreadable: %s" % str(error)[:120])
+                            self.defer_damaged(pr, "claim unreadable: %s" % str(error)[:120], final=closing)
                             continue
                         continuing = (
                             old_claim
