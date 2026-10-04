@@ -1085,6 +1085,11 @@ class LocalPublication(unittest.TestCase):
         index.mkdir(parents=True)
         atomic(index / ".complete", True)
         (self.store.root / "landing" / "2026_10_08.json").write_text("[]")
+        landing0 = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
+                        target="page:test/DevCallReviews/2026_10_08/devcall_pr_reviews.html")
+        with self.assertRaises(ValueError):                       # route history damaged
+            self.publisher.render(landing0)
+        (self.store.root / "landing" / "2026_10_08.json").write_text("{}")
         landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
                        target="page:test/DevCallReviews/2026_10_08/devcall_pr_reviews.html")
         for damage in ("{not json", "[1]", '{"target": "page:x", "revision": 1}'):

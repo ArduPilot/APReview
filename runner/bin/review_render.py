@@ -507,12 +507,10 @@ class Renderer:
         commit false the routes are left in self.pending for the caller to
         save once the page is really published; a probe render saves nothing."""
         path = self.store.root / "landing" / (date + ".json")
-        try:
-            previous = read(path, {})
-        except (OSError, ValueError):
-            previous = {}
+        previous = read(path, {})
         if not isinstance(previous, dict):
-            previous = {}               # a damaged route history is rebuilt, not fatal
+            # served routes would be lost for good: hold this page
+            raise ValueError("landing: damaged route history %s" % path)
         served = {a: [] for p in pages.values() for a in p["anchors"]}
         for label, page in pages.items():
             for a in page["anchors"]:
