@@ -387,7 +387,7 @@ class Discovery:
                     "labels(first: 50) { nodes { name } pageInfo { hasNextPage } } }" % (n, n) for n in part)
                 query = 'query { rateLimit { cost } repository(owner: "%s", name: "%s") { %s } }' % (owner, name, fields)
                 try:
-                    data = self.gh.graphql(query, account="read")
+                    data = self.gh.graphql(query, account="read", deadline=deadline)
                     review_metrics.count("github-points", "graphql",
                                          n=int((data.get("rateLimit") or {}).get("cost", 0)))
                     nodes = list((data.get("repository") or {}).values())
@@ -426,15 +426,15 @@ class Discovery:
         comment, or one held or not yet sent, says nothing."""
         if not self.store:
             return None
-        from review_store import delivery_id
-        for bundle in self.store.chain(pr):            # newest first
-            if bundle.get("legacy"):
-                return None
-            for intent in bundle["intents"]:
-                if intent["kind"] == "comment":
-                    receipt = read_json(self.store.root / "receipts" / (intent["id"] + ".json"), {})
-                    if receipt.get("state") == "posted":
-                        return bundle["inputs"].get("head")
+        # the current review only: walking the history hashes every bundle
+        bundle = self.store.bundle(pr)
+        if not bundle or bundle.get("legacy"):
+            return None
+        for intent in bundle["intents"]:
+            if intent["kind"] == "comment":
+                receipt = read_json(self.store.root / "receipts" / (intent["id"] + ".json"), {})
+                if receipt.get("state") == "posted":
+                    return bundle["inputs"].get("head")
         return None
 
     SHADOW_SECONDS = 120
@@ -446,9 +446,9 @@ class Discovery:
         or reuse found only by comparing diffs)."""
         if candidate["classification"] == "REUSE" and candidate.get("reason") == "head already told":
             return "REUSE"
-        if candidate["classification"] == "DROPPED":
+        if candidate["classification"] == "DROPPED" and candidate.get("reason") != "no AI comment with told-head":
             return "DROPPED"
-        return "FETCH"
+        return "FETCH"          # including a drop that only the thread could decide
 
     def shadow(self, wanted, out):
         """Run the batched read beside the per-PR reads and count where its
@@ -456,13 +456,17 @@ class Discovery:
         Nothing here may fail or slow discovery: every error is counted and
         the whole is bounded in time."""
         started = time.monotonic()
+        deadline = started + self.SHADOW_SECONDS
         try:
-            heads = self.batch_heads(wanted, started + self.SHADOW_SECONDS)
+            heads = self.batch_heads(wanted, deadline)
         except Exception as error:
             review_metrics.count("local", "shadow failed")
             print("discovery: shadow failed: %s" % str(error)[:200], file=sys.stderr)
             return
         for c in out:
+            if time.monotonic() >= deadline:
+                review_metrics.count("local", "shadow out of time")
+                break
             try:
                 predicted = self.predict(c["pr"], heads)
                 actual = self.stage(c)

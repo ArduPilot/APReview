@@ -400,6 +400,18 @@ class DiscoveryContract(unittest.TestCase):
         with patch.object(self.discover, "predict", side_effect=ValueError("bad history")):
             self.discover.shadow([PR], [dict(pr=PR, classification="REVIEW")])
 
+    def test_the_shadow_stops_at_its_deadline_and_maps_stages(self):
+        self.assertEqual(Discovery.stage(dict(classification="DROPPED", reason="no AI comment with told-head")), "FETCH")
+        self.assertEqual(Discovery.stage(dict(classification="DROPPED", reason="closed")), "DROPPED")
+        self.assertEqual(Discovery.stage(dict(classification="REUSE", reason="head already told")), "REUSE")
+        self.assertEqual(Discovery.stage(dict(classification="REUSE", reason="rebase only")), "FETCH")
+        seen = []
+        self.gh.graphql.side_effect = lambda q, account=None, deadline=None: seen.append(deadline) or {}
+        with patch.object(Discovery, "SHADOW_SECONDS", 0):
+            with patch.object(self.discover, "predict", side_effect=AssertionError("ran past its deadline")):
+                self.discover.shadow([PR], [dict(pr=PR, classification="REVIEW")])
+        self.assertTrue(all(d is not None for d in seen))
+
     def test_a_failed_followup_discovery_never_moves_the_window(self):
         self.discover.swept = Mock(return_value={"owner/repo": {}})
         self.discover.board_rows = Mock(return_value={PR: {}})
