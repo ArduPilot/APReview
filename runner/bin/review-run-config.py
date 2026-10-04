@@ -77,6 +77,9 @@ def freeze(args):
                        for kind, seconds in {"primary": 5400, "cold": 1800,
                                              "validation": 1800, "reconciliation": 2700}.items()},
         quota={"paused": args.quota != 0, "observation": args.quota_message},
+        # delivery belongs to the standalone drainer (review-outbox.sh each
+        # minute); the controller only enqueues
+        controller_delivers=env.get("REVIEW_CONTROLLER_DELIVERS", "0") == "1",
         path=path,
     )
     if args.dry_run:
