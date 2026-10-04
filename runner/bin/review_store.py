@@ -58,6 +58,25 @@ def atomic(path, value, crash=lambda point: None, prefix="record", *, encode=enc
     crash(prefix + "_fsync")
 
 
+def create_once(path, value):
+    """Write path only if it does not exist yet, never replacing anything."""
+    path = Path(path)
+    mkdir(path.parent)
+    temp = path.with_name("." + path.name + "." + uuid.uuid4().hex)
+    with open(temp, "xb") as stream:
+        stream.write(encoded(value))
+        stream.flush()
+        os.fsync(stream.fileno())
+    try:
+        os.link(temp, path)
+        fsync_dir(path.parent)
+        return True
+    except FileExistsError:
+        return False
+    finally:
+        os.unlink(temp)
+
+
 def read(path, default=None):
     try:
         return json.loads(Path(path).read_bytes())
@@ -223,11 +242,11 @@ class Store:
             return None
         newest = max(generations, key=lambda p: int(p.name))
         times = [newest.stat().st_mtime]
-        receipt = self.root / "receipts" / (delivery_id(pr, int(newest.name), "comment", pr) + ".json")
-        try:
-            times.append(receipt.stat().st_mtime)
-        except OSError:
-            pass                        # a compacted receipt is old: the generation's time stands
+        # when the comment was posted, from its file or the ledger, which
+        # keeps the time a compacted receipt was written
+        posted = self.receipt_time(delivery_id(pr, int(newest.name), "comment", pr))
+        if posted:
+            times.append(posted)
         return max(times)
 
     def mark_pending(self, pr, reason):
@@ -401,7 +420,8 @@ class Store:
             db = sqlite3.connect(str(self.root / "receipts.db"), timeout=60, check_same_thread=False)
             db.execute("PRAGMA journal_mode=WAL")
             db.execute("PRAGMA synchronous=FULL")
-            db.execute("CREATE TABLE IF NOT EXISTS receipt (id TEXT PRIMARY KEY, body TEXT NOT NULL)")
+            db.execute("CREATE TABLE IF NOT EXISTS receipt (id TEXT PRIMARY KEY, body TEXT NOT NULL, "
+                       "written REAL NOT NULL DEFAULT 0)")
             self._ledger = db
         return self._ledger
 
@@ -411,8 +431,26 @@ class Store:
             return record
         if not (self.root / "receipts.db").exists():
             return default
-        row = self.ledger().execute("SELECT body FROM receipt WHERE id = ?", (ident,)).fetchone()
+        row = self.query("SELECT body FROM receipt WHERE id = ?", (ident,))
         return json.loads(row[0]) if row else default
+
+    def receipt_time(self, ident):
+        """When a receipt was written, from its file or the ledger, or None."""
+        try:
+            return (self.root / "receipts" / (ident + ".json")).stat().st_mtime
+        except OSError:
+            pass
+        if not (self.root / "receipts.db").exists():
+            return None
+        row = self.query("SELECT written FROM receipt WHERE id = ?", (ident,))
+        return row[0] if row and row[0] else None
+
+    def query(self, sql, args):
+        import sqlite3
+        try:
+            return self.ledger().execute(sql, args).fetchone()
+        except sqlite3.Error as error:
+            raise OSError("receipt ledger: %s" % error) from error
 
     def has_receipt(self, ident):
         return (self.root / "receipts" / (ident + ".json")).exists() or self.receipt_of(ident) is not None
@@ -443,12 +481,13 @@ class Store:
             try:
                 if not entry.name.endswith(".json") or entry.stat().st_mtime >= older_than:
                     continue
+                written = entry.stat().st_mtime
                 with open(entry.path) as f:
                     body = f.read()
                 json.loads(body)
             except (OSError, ValueError):
                 continue
-            batch.append((entry.name[:-5], body, entry.path))
+            batch.append((entry.name[:-5], body, entry.path, written))
             if len(batch) >= 500:
                 moved += self._commit_receipts(db, batch)
                 batch = []
@@ -459,9 +498,9 @@ class Store:
     @staticmethod
     def _commit_receipts(db, batch):
         with db:
-            db.executemany("INSERT OR IGNORE INTO receipt (id, body) VALUES (?, ?)",
-                           [(ident, body) for ident, body, _ in batch])
-        for _, _, path in batch:
+            db.executemany("INSERT OR IGNORE INTO receipt (id, body, written) VALUES (?, ?, ?)",
+                           [(ident, body, written) for ident, body, _, written in batch])
+        for _, _, path, _ in batch:
             try:
                 os.unlink(path)
             except OSError:

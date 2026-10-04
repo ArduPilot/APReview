@@ -554,10 +554,26 @@ class ReviewStore(unittest.TestCase):
             self.assertEqual(self.store.receipt_of(ident), record)
             self.assertTrue(Store(self.root).has_receipt(ident))
         self.assertEqual(sorted(r["id"] for r in self.store.receipts()), files)
+        # the time each was written survives, for the followup window
+        for ident in files:
+            self.assertIsNotNone(self.store.receipt_time(ident))
         # nothing owed comes back: recovery sees the receipts in the ledger
         self.store.recover()
         self.assertEqual(list((self.root / "outbox").glob("*.json")), [])
         self.assertFalse(self.store.has_receipt("never-written"))
+
+    def test_a_posting_time_survives_compaction(self):
+        self.accept()
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root))
+        comment = delivery_id(PR, self.store.current(PR)["generation"], "comment", PR)
+        posted = time.time() - 22 * 86400
+        os.utime(self.root / "receipts" / (comment + ".json"), (posted, posted))
+        generation = self.store.pr_dir(PR) / "generations" / str(self.store.current(PR)["generation"])
+        os.utime(generation, (posted - 18 * 86400,) * 2)
+        before = self.store.last_worked(PR)
+        self.store.compact_receipts(time.time() + 60)
+        self.assertAlmostEqual(Store(self.root).last_worked(PR), before, places=3)
 
     def test_a_bundle_is_verified_once_per_process(self):
         self.accept()
