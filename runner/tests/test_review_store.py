@@ -636,6 +636,27 @@ class ReviewStore(unittest.TestCase):
         kinds = [read(p)["kind"] for p in (self.root / "receipts").glob("*.json")]
         self.assertIn("publish", kinds)
 
+    def test_a_due_dependency_is_never_crowded_out_by_its_dependents(self):
+        self.lock.close()
+        outbox = self.root / "outbox"
+        # a retried projection due now, behind a hundred publishes waiting on it
+        atomic(outbox / "proj.json", dict(id="proj", pr=PR, generation="op", kind="projection",
+                                          target="page:end/a", gate="page", patches={PR: {"ticket": 1, "removed": False}},
+                                          state="owed", failures=1, next_attempt=time.time() - 1))
+        for n in range(100):
+            atomic(outbox / ("pub%d.json" % n), dict(id="pub%03d" % n, pr=PR, generation="op%d" % n, kind="publish",
+                                                    target="page:end/a", gate="page", dependencies=["proj"],
+                                                    state="owed", failures=0, next_attempt=0))
+        self.assertIn("proj", [x["id"] for x in self.store.delivery_snapshot(limit=100)])
+
+    def test_an_invalid_lock_key_never_enters_selection(self):
+        self.lock.close()
+        atomic(self.root / "outbox" / "bad.json", dict(id="bad", pr="", kind="comment", target="x",
+                                                       next_attempt=0, failures=0))
+        atomic(self.root / "outbox" / "bad2.json", dict(id="bad2", pr=PR, kind="publish", gate="page",
+                                                        target="page:bad", next_attempt=0, failures=0))
+        self.assertEqual(self.store.delivery_snapshot(limit=10), [])
+
     def test_a_damaged_recovery_cursor_entry_is_skipped(self):
         self.accept()
         self.lock.close()

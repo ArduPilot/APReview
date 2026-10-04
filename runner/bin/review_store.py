@@ -459,11 +459,19 @@ class Store:
     def has_receipt(self, ident):
         return (self.root / "receipts" / (ident + ".json")).exists() or self.receipt_of(ident) is not None
 
-    def receipts(self):
-        """Every receipt, files and ledger; for the rare full scan."""
+    def receipts(self, skip_unreadable=False):
+        """Every receipt, files and ledger; for the rare full scan. A scan
+        that only displays (a landing page) may skip an unreadable receipt;
+        nothing deciding delivery does."""
         seen = set()
         for path in (self.root / "receipts").glob("*.json"):
-            record = read(path)
+            try:
+                record = read(path)
+            except (OSError, ValueError):
+                if not skip_unreadable:
+                    raise
+                print("receipts: unreadable %s skipped" % path.name, file=sys.stderr)
+                continue
             if record:
                 seen.add(path.stem)
                 yield record
@@ -475,7 +483,11 @@ class Store:
                 raise OSError("receipt ledger: %s" % error) from error
             for ident, body in rows:
                 if ident not in seen:
-                    yield json.loads(body)
+                    try:
+                        yield json.loads(body)
+                    except ValueError:
+                        if not skip_unreadable:
+                            raise
 
     def compact_receipts(self, older_than, limit=10000, deadline=None):
         """Move receipt files last changed before older_than into the ledger:
@@ -795,7 +807,7 @@ class Store:
                     and all(isinstance(d, str) for d in x.get("dependencies", []))
                     # the key its lock is taken on must exist, or it could
                     # never even be quarantined and would block every pass
-                    and isinstance(x.get("target" if gate == "page" else "pr"), str)):
+                    and self.valid_key(x.get("target" if gate == "page" else "pr"))):
                 print("drain: malformed outbox entry %s" % p.name, file=sys.stderr)
                 review_metrics.count("local", "malformed outbox entry")
                 continue
@@ -809,6 +821,7 @@ class Store:
         now = time.time()
         queued = {x["id"]: x for x in snapshot}
         settled = {}
+        receipted = set()
 
         def ok(dep):
             if dep not in settled:
@@ -819,6 +832,8 @@ class Store:
                     return False
                 if isinstance(receipt, dict):
                     settled[dep] = receipt.get("state") in self.SETTLED
+                    if settled[dep]:
+                        receipted.add(dep)
                 elif dep in queued:
                     settled[dep] = ready(queued[dep])
             return settled[dep]
@@ -830,9 +845,26 @@ class Store:
             except Exception:
                 return False
 
-        return [x for x in snapshot if ready(x)][:limit]
+        # Entries whose dependencies are already settled come first, then those
+        # ready only through a queued dependency: a batch cut at the limit
+        # never holds dependents while what they wait on is left outside.
+        chosen = [x for x in snapshot if ready(x)]
+        def waits(x):
+            try:
+                return any(d not in receipted for d in x.get("dependencies", []))
+            except Exception:
+                return True
+        chosen.sort(key=waits)
+        return chosen[:limit]
 
     SETTLED = ("published", "posted", "not_applicable", "synced", "held", "superseded")
+
+    @staticmethod
+    def valid_key(key):
+        try:
+            return isinstance(key, str) and bool(canonical(key))
+        except ValueError:
+            return False
 
     def unsatisfiable(self, entry, dep):
         """A projection's dependency that can never settle: no receipt, no
