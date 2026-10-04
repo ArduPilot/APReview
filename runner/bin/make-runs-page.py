@@ -763,6 +763,12 @@ def queue_rows():
     rows.append(('PRs in review', dict(n=review), ''))
     rows.append(('AI passes in progress', dict(n=passes), ''))
 
+    try:
+        last = json.load(open(os.path.join(DATA, 'drain-last.json')))
+        rows.append(('drainer last finished', dict(n=last.get('owed', 0), oldest=t - last['at']),
+                     'controllers only enqueue; every delivery waits for it'))
+    except Exception:
+        rows.append(('drainer last finished', dict(n=0), 'no record yet'))
     gc = None
     try:
         gc = json.load(open(os.path.join(DATA, 'gc', 'last.json')))
@@ -777,11 +783,12 @@ def queue_rows():
     for name, k, note in rows:
         cell = lambda f: ('<td data-sort="%d">%d</td>' % (k[f], k[f])) if f in k else '<td data-sort="-1">&mdash;</td>'
         bad = k.get('dead') or (k.get('n') and name.startswith('outbox') and (k.get('oldest') or 0) > 3600) \
-            or (name.startswith('store files') and k['n'] > 1000000)
+            or (name.startswith('store files') and k['n'] > 1000000) \
+            or (name.startswith('drainer') and (k.get('oldest') or 0) > 600)
         out.append('<tr%s><td>%s</td>%s%s%s%s%s<td data-sort="%d">%s</td><td class="wrap"><span class="sub">%s</span></td></tr>' % (
             ' class="bad"' if bad else '', html.escape(name), cell('n'), cell('ready'), cell('waiting'),
             cell('retrying'), cell('dead'), k.get('oldest') or 0,
-            _age(k.get('oldest')) if k.get('n') else '&mdash;', html.escape(note[:90])))
+            _age(k.get('oldest')) if k.get('n') or k.get('oldest') else '&mdash;', html.escape(note[:90])))
     return out
 
 

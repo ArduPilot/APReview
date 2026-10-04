@@ -388,6 +388,15 @@ class Dashboard(unittest.TestCase):
         self.assertIn('class="bad"', row)
         self.assertIn("3090930 files of agent litter", sec)
 
+    def test_a_stale_drainer_is_marked(self):
+        data = os.path.join(self.home, "review", "data")
+        os.makedirs(data, exist_ok=True)
+        with open(os.path.join(data, "drain-last.json"), "w") as f:
+            json.dump({"at": time.time() - 3600, "owed": 3}, f)
+        sec = self.queue_section(self.build())
+        row = sec.split("drainer last finished")[0].rsplit("<tr", 1)[1]
+        self.assertIn('class="bad"', row)
+
     def test_an_empty_store_says_so(self):
         sec = self.queue_section(self.build())
         self.assertIn("empty", sec)
