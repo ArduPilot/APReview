@@ -440,10 +440,11 @@ class Supervisor:
         except Exception as error:
             # without the marker a deferral could drop the PR from the
             # followup window: stay pending and retry, as for a busy PR,
-            # until the run is closing, when the summary records the debt
+            # until the run is closing
             if final:
-                state.update(review="deferred", reason="%s; pending mark failed: %s" % (reason, str(error)[:80]))
-                return
+                # the debt cannot be recorded: end without completing the
+                # run, whose recovery picks the PR up again
+                raise
             state["review"] = "pending"     # admission visits it again
             delay = min(300, self.backoff.get(pr, 0) * 2 + 30)
             self.backoff[pr] = delay

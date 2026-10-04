@@ -370,7 +370,7 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual(supervisor.states[PR]["review"], "deferred")
         self.assertTrue((self.store.pr_dir(PR) / "pending.json").exists())
 
-    def test_a_closing_run_defers_even_when_the_marker_cannot_be_written(self):
+    def test_a_closing_run_never_completes_without_the_marker(self):
         supervisor = self._bare_supervisor(time.time() + 3600)
         supervisor.claim_candidate = Mock(side_effect=KeyError("request"))
         supervisor.store = Mock(wraps=self.store)
@@ -380,8 +380,9 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual(supervisor.states[PR]["review"], "pending")      # retried later
         self.assertGreater(supervisor.next_claim[PR], time.time())
         supervisor.config["admission_deadline"] = time.time() - 1
-        supervisor.admit(dict(candidate(), pr=PR))
-        self.assertEqual(supervisor.states[PR]["review"], "deferred")     # the run can end
+        with self.assertRaises(OSError):                                  # never complete owing it
+            supervisor.admit(dict(candidate(), pr=PR))
+        self.assertNotEqual(supervisor.states[PR]["review"], "deferred")
 
     def test_invalid_routing_still_ends_the_run(self):
         supervisor = self._bare_supervisor(time.time() + 3600)
