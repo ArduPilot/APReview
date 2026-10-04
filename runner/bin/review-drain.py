@@ -2,6 +2,7 @@
 """One finite outbox drain; no outer board lock."""
 
 import argparse
+import os
 import time
 from review_store import Store, read
 from review_github import GitHub
@@ -15,6 +16,14 @@ p.add_argument("--budget", type=float, default=240, help="seconds of passes")
 a = p.parse_args()
 BUDGET = a.budget
 c = read(a.config) if a.config else {}
+# one drainer at a time: a cron start that finds another running leaves it
+# the work rather than contending for every lock it holds
+import fcntl
+_single = open(os.path.join(a.data, "drain.lock"), "a")
+try:
+    fcntl.flock(_single, fcntl.LOCK_EX | fcntl.LOCK_NB)
+except OSError:
+    raise SystemExit(0)
 s = Store(a.data)
 review_metrics.context(process="drain", data=a.data)
 g = GitHub(
