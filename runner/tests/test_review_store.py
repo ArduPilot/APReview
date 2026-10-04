@@ -8,7 +8,7 @@ import time
 import unittest
 from unittest.mock import Mock
 
-from review_fixtures import BIN, PR, complete_claim, python, stop, workspace
+from review_fixtures import BIN, PR, candidate, complete_claim, python, stop, workspace
 from review_lock import region, try_lock
 from review_store import Store, StubAdapter, atomic, delivery_id, digest, read
 
@@ -485,6 +485,18 @@ class ReviewStore(unittest.TestCase):
         self.lock.close()
         self.store.drain(StubAdapter(self.root))
         self.assertGreaterEqual(self.store.last_worked(PR), promoted)
+
+    def test_the_followup_window_keeps_anything_pending_or_unknown(self):
+        cutoff = time.time() + 60                      # everything counts as old
+        self.assertTrue(self.store.in_followup_window(PR, cutoff))     # no record: kept
+        self.accept()
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root))
+        self.assertFalse(self.store.in_followup_window(PR, cutoff))    # done with and old
+        # a newer claim still unfinished keeps it
+        with try_lock(self.store.locks, PR) as lock:
+            self.store.allocate(lock, PR, "run2", "request2", candidate())
+        self.assertTrue(self.store.in_followup_window(PR, cutoff))
 
     def test_tombstones_and_accepted_generation_are_independent(self):
         self.accept()

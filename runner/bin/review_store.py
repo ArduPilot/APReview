@@ -224,6 +224,22 @@ class Store:
             pass
         return max(times)
 
+    def in_followup_window(self, pr, cutoff):
+        """False only when we know a PR is done with and old: its last work
+        is before cutoff, no newer claim is still unfinished, and no comment
+        is held for a human (who may post it at any time). A PR with no
+        local record of our work stays in: a posting we cannot see locally
+        must not take it out."""
+        worked = self.last_worked(pr)
+        if worked is None or worked >= cutoff:
+            return True
+        claim, current = self.claim(pr), self.current(pr)
+        if claim and (not current or current["generation"] < claim["generation"]):
+            return True
+        receipt = read(self.root / "receipts" / (delivery_id(pr, current["generation"], "comment", pr) + ".json"), {}) \
+            if current else {}
+        return receipt.get("state") == "held"
+
     def claim(self, pr):
         return read(self.pr_dir(pr) / "claim.json")
 
