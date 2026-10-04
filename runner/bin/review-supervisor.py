@@ -493,6 +493,11 @@ class Supervisor:
         bundle = read(generation / "bundle.json", {})
         if bundle.get("legacy"):
             return False
+        # Only a PR whose review comment was posted: it stays on the board
+        # while open, and followup can always pick it up again from the head
+        # that comment names. Without one, nothing guarantees a later run.
+        if self.store.receipt_of(delivery_id(pr, current["generation"], "comment", pr), {}).get("state") != "posted":
+            return False
         try:
             age = time.time() - generation.stat().st_mtime
         except OSError:

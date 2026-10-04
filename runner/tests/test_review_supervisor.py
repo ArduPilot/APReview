@@ -645,7 +645,11 @@ class ReviewSupervisor(unittest.TestCase):
         generation = supervisor.store.pr_dir(PR) / "generations" / "1"
         atomic(generation / "bundle.json", {"intents": []})
         atomic(supervisor.store.pr_dir(PR) / "current", {"generation": 1, "digest": "x"})
-        self.assertTrue(supervisor.too_soon(PR, c))                    # reviewed just now
+        self.assertFalse(supervisor.too_soon(PR, c))                   # no posted comment yet
+        from review_store import delivery_id
+        atomic(supervisor.store.root / "receipts" / (delivery_id(PR, 1, "comment", PR) + ".json"),
+               {"state": "posted"})
+        self.assertTrue(supervisor.too_soon(PR, c))                    # reviewed and posted just now
         self.assertFalse(supervisor.too_soon(PR, dict(c, mode="pr")))  # asked for by name
         self.assertFalse(supervisor.too_soon(PR, dict(c, mode="@someone")))  # an author review
         self.assertTrue(supervisor.too_soon(PR, dict(c, mode="AIReview")))   # a label sweep
