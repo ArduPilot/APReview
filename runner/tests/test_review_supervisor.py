@@ -353,6 +353,35 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.prefetch([dict(candidate(4), pr="pr:owner/repo#4")])
         self.assertIsNone(supervisor.prefetched_refresh("pr:owner/repo#4"))
 
+    def _bare_supervisor(self, deadline):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.config = {"configuration": {}, "stub": False, "admission_deadline": deadline}
+        supervisor.store = self.store
+        supervisor.directory = self.root / "run"
+        supervisor.directory.mkdir(exist_ok=True)
+        supervisor.states = {PR: {"review": "pending", "candidate": dict(candidate(), pr=PR)}}
+        supervisor.owned, supervisor.next_claim, supervisor.backoff = {}, {}, {}
+        return supervisor
+
+    def test_damage_found_during_admission_defers_only_that_pr(self):
+        supervisor = self._bare_supervisor(time.time() + 3600)
+        supervisor.claim_candidate = Mock(side_effect=KeyError("request"))
+        supervisor.admit(dict(candidate(), pr=PR))
+        self.assertEqual(supervisor.states[PR]["review"], "deferred")
+        self.assertTrue((self.store.pr_dir(PR) / "pending.json").exists())
+
+    def test_a_closing_run_defers_even_when_the_marker_cannot_be_written(self):
+        supervisor = self._bare_supervisor(time.time() + 3600)
+        supervisor.claim_candidate = Mock(side_effect=KeyError("request"))
+        supervisor.store = Mock(wraps=self.store)
+        supervisor.store.mark_pending.side_effect = OSError("disk")
+        supervisor.admit(dict(candidate(), pr=PR))
+        self.assertEqual(supervisor.states[PR]["review"], "pending")      # retried later
+        self.assertGreater(supervisor.next_claim[PR], time.time())
+        supervisor.config["admission_deadline"] = time.time() - 1
+        supervisor.admit(dict(candidate(), pr=PR))
+        self.assertEqual(supervisor.states[PR]["review"], "deferred")     # the run can end
+
     def test_a_rate_limited_claim_waits_for_the_reset_instead_of_deferring(self):
         from review_github import RateLimited
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)

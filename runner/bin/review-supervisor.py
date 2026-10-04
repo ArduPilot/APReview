@@ -408,10 +408,23 @@ class Supervisor:
     def inputs(self, candidate):
         return {k: v for k, v in candidate.items() if k not in ("live", "stub")}
 
+    def closing(self):
+        return (self.directory / "abort.json").exists() or time.time() >= self.config["admission_deadline"]
+
+    def admit(self, candidate):
+        """claim_candidate inside a boundary: it launches nothing, so damage
+        to this PR's records defers this PR and leaves the run going."""
+        try:
+            self.claim_candidate(candidate)
+        except Exception as error:
+            self.defer_damaged(candidate["pr"], "admission failed: %s: %s"
+                               % (type(error).__name__, str(error)[:120]))
+
     def defer_damaged(self, pr, reason, final=False):
         """Defer a PR whose records cannot be read, touching nothing of them:
         finish() would read the same damaged claim again."""
         print("admission: %s deferred: %s" % (pr, reason), file=sys.stderr)
+        final = final or self.closing()
         state = self.states[pr]
         lock = self.owned.pop(pr, None)
         if lock:
@@ -1359,8 +1372,7 @@ class Supervisor:
                     pr = candidate["pr"]
                     state = self.states[pr]
                     if state["review"] == "pending":
-                        closing = ((self.directory / "abort.json").exists()
-                                   or time.time() >= self.config["admission_deadline"])
+                        closing = self.closing()
                         if time.time() < self.next_claim.get(pr, 0) and not closing:
                             continue
                         try:
@@ -1380,7 +1392,7 @@ class Supervisor:
                         )
                         if (self.directory / "abort.json").exists():
                             if continuing:
-                                self.claim_candidate(candidate)
+                                self.admit(candidate)
                             else:
                                 self.finish(pr, "deferred", "aborted")
                         elif self.config["configuration"].get("quota", {}).get("paused") and not continuing:
@@ -1392,7 +1404,7 @@ class Supervisor:
                                 "paused" if paused else state.get("reason", "admission deadline"),
                             )
                         elif continuing or (not paused and (pr in batch or not self.discovery)):
-                            self.claim_candidate(candidate)
+                            self.admit(candidate)
                 admitted = time.monotonic()
                 # Furthest along first: a PR ready to finish takes the next
                 # free slot before a newly claimed one starts its first pass.
