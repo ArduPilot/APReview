@@ -76,10 +76,16 @@ class GitHub:
         # A read that fails for a reason other than the request itself (a cut
         # reply, a 5xx, a dropped connection) is tried again; a write never is,
         # since it may have taken effect.
+        def remaining():
+            return (deadline - time.monotonic()) if deadline else 20
+
         for attempt in range(3 if reading else 1):
             if attempt:
-                time.sleep(2 * attempt)
-                if deadline and time.monotonic() >= deadline:
+                # the deadline bounds the backoff and every attempt, not just
+                # the first: a caller's budget is a promise to it
+                time.sleep(max(0, min(2 * attempt, remaining())))
+                timeout = min(20, remaining())
+                if timeout <= 0:
                     raise TimeoutError("GitHub deadline")
             started = time.monotonic()
             try:
@@ -103,7 +109,7 @@ class GitHub:
             if result.returncode:
                 failure = result.stderr.strip()[:500]
                 if "rate limit exceeded" in failure.lower():
-                    raise RateLimited(failure, self.rate_reset(env))
+                    raise RateLimited(failure, self.rate_reset(env, deadline))
                 if re.search(r"HTTP 4\d\d", failure) and "HTTP 429" not in failure:
                     raise OSError(failure)
             else:
@@ -122,12 +128,15 @@ class GitHub:
         return response
 
     @staticmethod
-    def rate_reset(env):
+    def rate_reset(env, deadline=None):
         """When the spent allowance returns; the rate endpoint itself is free."""
+        timeout = min(20, (deadline - time.monotonic()) if deadline else 20)
+        if timeout <= 0:
+            return None
         review_metrics.count("github", "GET rate_limit")
         try:
             out = subprocess.run(["gh", "api", "rate_limit", "--jq", ".resources.core.reset"],
-                                 capture_output=True, text=True, env=env, timeout=20)
+                                 capture_output=True, text=True, env=env, timeout=timeout)
             return float(out.stdout.strip()) if out.returncode == 0 else None
         except (OSError, ValueError, subprocess.TimeoutExpired):
             return None

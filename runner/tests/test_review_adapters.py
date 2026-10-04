@@ -153,7 +153,7 @@ class GithubTransport(unittest.TestCase):
         from review_github import RateLimited
         limited = Mock(returncode=1, stdout="", stderr="gh: API rate limit exceeded for user ID 1. (HTTP 403)")
         with patch("subprocess.run", return_value=limited) as run, \
-                patch.object(GitHub, "rate_reset", staticmethod(lambda env: 1790000000.0)):
+                patch.object(GitHub, "rate_reset", staticmethod(lambda env, deadline=None: 1790000000.0)):
             with self.assertRaises(RateLimited) as caught:
                 GitHub().request("repos/o/r/pulls/1")
             self.assertEqual(caught.exception.reset, 1790000000.0)
@@ -405,12 +405,16 @@ class DiscoveryContract(unittest.TestCase):
         self.assertEqual(Discovery.stage(dict(classification="DROPPED", reason="closed")), "DROPPED")
         self.assertEqual(Discovery.stage(dict(classification="REUSE", reason="head already told")), "REUSE")
         self.assertEqual(Discovery.stage(dict(classification="REUSE", reason="rebase only")), "FETCH")
-        seen = []
+        seen, predicted = [], []
         self.gh.graphql.side_effect = lambda q, account=None, deadline=None: seen.append(deadline) or {}
-        with patch.object(Discovery, "SHADOW_SECONDS", 0):
-            with patch.object(self.discover, "predict", side_effect=AssertionError("ran past its deadline")):
-                self.discover.shadow([PR], [dict(pr=PR, classification="REVIEW")])
-        self.assertTrue(all(d is not None for d in seen))
+        self.discover.shadow([PR], [dict(pr=PR, classification="REVIEW")])
+        self.assertEqual(len(seen), 1)
+        self.assertGreater(seen[0], time.monotonic())           # a real deadline reached GraphQL
+        seen.clear()
+        with patch.object(Discovery, "SHADOW_SECONDS", 0), \
+                patch.object(self.discover, "predict", side_effect=lambda *a: predicted.append(a)):
+            self.discover.shadow([PR], [dict(pr=PR, classification="REVIEW")])
+        self.assertEqual((seen, predicted), ([], []))           # out of time: neither ran
 
     def test_a_failed_followup_discovery_never_moves_the_window(self):
         self.discover.swept = Mock(return_value={"owner/repo": {}})
@@ -1667,6 +1671,22 @@ class PhaseController(unittest.TestCase):
             row = controller.store.merge_membership("page:stub/report.html", {}).get(PR, {})
             self.assertTrue(any(p["ticket"] == 99 and p["removed"] for p in patches)
                             or (row.get("ticket") == 99 and row.get("removed")))
+
+
+class GitHubDeadline(unittest.TestCase):
+    def test_retries_and_backoff_never_run_past_the_deadline(self):
+        from review_github import GitHub
+        timeouts = []
+        def slow(*args, timeout=None, **kw):
+            timeouts.append(timeout)
+            time.sleep(min(timeout, 0.5))
+            raise subprocess.TimeoutExpired(args[0], timeout)
+        start = time.monotonic()
+        with patch("review_github.subprocess.run", side_effect=slow):
+            with self.assertRaises(TimeoutError):
+                GitHub().request("repos/o/r/pulls/1", deadline=start + 3)
+        self.assertLess(time.monotonic() - start, 3.5)
+        self.assertTrue(all(t <= 3 for t in timeouts))
 
 
 if __name__ == "__main__":
