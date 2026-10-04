@@ -11,7 +11,7 @@ from unittest.mock import Mock, patch
 
 from review_fixtures import BIN, PR, candidate, python, stop, until, workspace
 from review_lock import try_lock
-from review_store import Store, StubAdapter, atomic, read
+from review_store import Store, StubAdapter, atomic, digest, read
 
 SPEC = importlib.util.spec_from_file_location("review_supervisor", BIN / "review-supervisor.py")
 SUPERVISOR = importlib.util.module_from_spec(SPEC)
@@ -525,6 +525,33 @@ class ReviewSupervisor(unittest.TestCase):
         rows = supervisor.store.merge_membership(page, {})
         self.assertEqual(rows[PR]["ci"]["state"], "failure")
         self.assertEqual(rows[PR]["published"]["view"][1], "failure")
+
+    def test_a_view_from_an_older_upload_or_no_destination_never_matches_live(self):
+        supervisor = self.quiet_supervisor()
+        supervisor.config["stub"] = False
+        page = "page:stub/end/a.html"
+        ci = {"state": "success", "at": "2026-10-04T01:00"}
+        supervisor.store.merge_membership(page, {PR: {"ticket": 1, "removed": False, "ci": ci,
+                                                      "progress": "discovery"}})
+        epoch = supervisor.store.root / "pages" / digest(page) / "epoch.json"
+        def record(**published):
+            rows = supervisor.store.merge_membership(page, {})
+            rows[PR]["published"] = dict(view=supervisor.view(rows[PR], PR), **published)
+            with try_lock(supervisor.store.locks, page) as lock:
+                supervisor.store.write_membership(lock, page, rows)
+        c = dict(candidate(), pr=PR, destinations=[page], ci=ci)
+        examine = lambda n: supervisor.examine(page, PR, {"ticket": n, "removed": False, "ci": ci,
+                                                          "progress": "discovery"}, True)
+        atomic(epoch, 3)
+        record(destination=supervisor.destination(page), epoch=3)
+        self.assertTrue(examine(2))
+        # another upload since (an annotation, a comment repair, or one that
+        # died before recording): stale
+        atomic(epoch, 4)
+        self.assertFalse(examine(3))
+        # a stub-recorded view has no destination: never enough for a live run
+        record(destination=None, epoch=4)
+        self.assertFalse(examine(4))
 
     def test_a_partly_suppressed_discovery_resumes_and_feeds_acceptance(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)

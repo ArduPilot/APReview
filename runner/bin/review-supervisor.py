@@ -297,10 +297,15 @@ class Supervisor:
         try:
             with lock:
                 rows = self.store._merge_membership(lock, target, {pr: patch}, write=False)
-                published = rows.get(pr, {}).get("published")
-                # (the stub adapter has no destinations; delivery always records one)
-                if (published and published.get("destination") in (None, self.destination(target))
-                        and published.get("view") == self.view(rows.get(pr), pr)):
+                published = rows.get(pr, {}).get("published") or {}
+                epoch = read(self.store.root / "pages" / digest(canonical(target)) / "epoch.json", 0)
+                stub = self.config.get("stub")
+                # still the page's latest upload attempt, to this destination
+                # (the stub adapter records neither epoch nor destination)
+                current = (published.get("epoch") == epoch or (stub and published.get("epoch") is None)) and (
+                    published.get("destination") == self.destination(target)
+                    or (stub and published.get("destination") is None))
+                if published and current and published.get("view") == self.view(rows.get(pr), pr):
                     self.store.write_membership(lock, target, rows)
                     review_metrics.count("local", "projection merged unchanged")
                     return True
