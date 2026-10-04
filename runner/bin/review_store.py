@@ -462,7 +462,10 @@ class Store:
         if not rows:
             return
         for pr, row in rows.items():
-            row["published"] = {"view": views.get(pr), "destination": destination}
+            # the epoch names the upload; any later one, of any kind and even
+            # one that died, moves it and makes this record stale
+            row["published"] = {"view": views.get(pr), "destination": destination,
+                                "epoch": result.get("epoch")}
         atomic(path, rows, self.crash, "membership")
 
     def write_membership(self, lock, page, rows):
@@ -632,8 +635,8 @@ class Store:
         rows = read(self.root / "membership" / (digest(canonical(entry["target"])) + ".json"), {})
         removed = (isinstance(entry["generation"], int) and not entry.get("retained")
                    and rows.get(entry["pr"], {}).get("removed"))
-        self.receipt(entry, **dict(result, state="superseded" if removed else "published"))
         self.record_published(lock, entry["target"], result, destination)
+        self.receipt(entry, **dict(result, state="superseded" if removed else "published"))
 
     def settled(self, entry):
         for dep in entry.get("dependencies", []):
@@ -772,11 +775,13 @@ class Store:
                             atomic(path, entry)
                             result = adapter.deliver(entry, deadline)
                             self.crash("remote_effect")
-                    self.receipt(entry, **result)
                     if entry["kind"] == "publish" and not entry.get("retained"):
+                        # before the receipt: a crash between leaves the entry
+                        # owed, never a receipted upload with an older record
                         page_lock = lock if gate == "page" else side_locks.get(region(entry["target"]))
                         self.record_published(page_lock, entry["target"], result,
                                               self.destination(adapter, entry))
+                    self.receipt(entry, **result)
                     if entry["kind"] == "publish" and entry.get("gate") == "page" and delivered:
                         self._coalesce(entry, result, adapter, deadline, lock)
                 except (OSError, TimeoutError) as error:

@@ -485,8 +485,8 @@ class Renderer:
                     + "</code>, now <code>" + escape(snapshot["head"][:10])
                     + "</code>. The new head is not covered.</p>\n"
                 )
-            receipts = [] if retained or b.get("legacy") else shown_receipts.get(
-                b["pr"], comment_receipts(self.store, b))
+            receipts = ([] if retained or b.get("legacy") else shown_receipts[b["pr"]]
+                        if b["pr"] in shown_receipts else comment_receipts(self.store, b))
             for r in receipts:
                 if r.get("url"):
                     annotation += '<p class="annot">Comment: <a href="' + escape(r["url"]) + '">posted</a></p>\n'
