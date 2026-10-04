@@ -368,6 +368,22 @@ class DiscoveryContract(unittest.TestCase):
         self.assertEqual({c["pr"] for c in rows}, {PR})
         self.assertEqual(asked, [PR])           # no GitHub reads for the old one
 
+    def test_a_failed_followup_discovery_never_moves_the_window(self):
+        self.discover.swept = Mock(return_value={"owner/repo": {}})
+        self.discover.board_rows = Mock(return_value={PR: {}})
+        self.discover.manifests = Mock(return_value={})
+        coverage = self.discover.store.root / "followup-coverage.json"
+        atomic(coverage, {"at": time.time() - 30 * 86400})
+        seen = []
+        with patch.object(self.discover.store, "in_followup_window",
+                          side_effect=lambda pr, cutoff: seen.append(cutoff) or True), \
+                patch.object(self.discover, "candidate", side_effect=OSError("GitHub 502")):
+            self.discover.discover("followup")
+        # the cutoff came from the last completed coverage, a month back
+        self.assertLess(seen[0], time.time() - 40 * 86400)
+        # and the PR it could not read is kept in the window
+        self.assertTrue((self.discover.store.pr_dir(PR) / "pending.json").exists())
+
     def test_search_restricts_organisations_and_repositories(self):
         self.gh.pages.return_value = [
             dict(repository_url="https://api.github.com/repos/owner/repo", number=1),

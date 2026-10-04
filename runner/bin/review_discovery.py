@@ -22,6 +22,7 @@ from urllib.error import HTTPError
 from html import unescape
 
 import review_metrics
+from review_store import atomic as atomic_json, read as read_json
 
 LABELS = ("DevCallTopic", "DevCallEU", "AIReview")
 
@@ -393,8 +394,13 @@ class Discovery:
             # outside the window comes back when it is labelled or asked for.
             # A followup interval of overlap, so a push just before a PR
             # leaves the window is still seen.
+            # measured from the last followup discovery that completed, so a
+            # failed or interrupted one never moves the window past a PR it
+            # did not look at
             days = float(self.config.get("followup_days", 14))
-            cutoff = time.time() - days * 86400 - 6 * 3600
+            started = time.time()
+            covered = read_json(self.store.root / "followup-coverage.json", {}).get("at", started)
+            cutoff = min(started, covered) - days * 86400 - 6 * 3600
             recent = {pr for pr in keys if self.store.in_followup_window(pr, cutoff)}
             review_metrics.count("local", "followup outside window", n=len(keys) - len(recent))
             keys = recent
@@ -421,6 +427,9 @@ class Discovery:
             except (OSError, TimeoutError, KeyError, subprocess.TimeoutExpired) as error:
                 print("discovery: skipping %s: %s" % (pr, str(error)[:200]), file=sys.stderr)
                 self.skipped.append(pr)
+                if mode == "followup" and self.store:
+                    # unread, it may have changed: keep it in the window
+                    self.store.mark_pending(pr, "discovery error")
                 return None
 
         self.skipped = []
@@ -428,6 +437,8 @@ class Discovery:
             out = [c for c in pool.map(one, wanted) if c is not None]
         for candidate in out:
             candidate["observation"] = ticket
+        if mode == "followup" and self.store:
+            atomic_json(self.store.root / "followup-coverage.json", {"at": started})
         if mode == "followup" and not any(c["classification"] == "REVIEW" for c in out):
             for c in out:
                 c["destinations"] = []
