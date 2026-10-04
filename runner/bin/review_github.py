@@ -208,6 +208,9 @@ class GitHub:
             connection = self._local.connection = self.open_connection(end)
         # a kept connection that reconnects does so within this deadline
         connection.end = end
+        remaining = end - time.monotonic()      # after any connection setup
+        if remaining <= 0:
+            raise TimeoutError("GitHub deadline")
         # A socket timeout bounds each wait, not the whole: an answer that
         # trickles in can keep a read going. At the deadline the watchdog
         # shuts the socket, which ends any blocking connect or read at once.
