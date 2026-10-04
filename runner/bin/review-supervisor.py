@@ -395,6 +395,12 @@ class Supervisor:
             )
         if reason:
             state["reason"] = reason
+        # a deferral, with or without a claim, is work still owed: it keeps
+        # the PR in the followup window until it is settled
+        if review == "deferred":
+            self.store.mark_pending(pr, reason or "deferred")
+        elif review in ("accepted", "reused", "dropped"):
+            self.store.clear_pending(pr)
         lock = self.owned.pop(pr, None)
         if lock:
             lock.close()

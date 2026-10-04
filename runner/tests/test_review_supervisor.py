@@ -605,6 +605,17 @@ class ReviewSupervisor(unittest.TestCase):
         # and an old discovery read is not trusted
         self.assertFalse(supervisor.settled_at_discovery(dict(fresh, discovered_at=time.time() - 7200)))
 
+    def test_finishing_marks_and_clears_pending_work(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = Mock()
+        supervisor.states = {PR: {"review": "pending"}}
+        supervisor.config = {"candidates": [], "configuration": {}}
+        supervisor.owned = {}
+        supervisor.finish(PR, "deferred", "quota paused")
+        supervisor.store.mark_pending.assert_called_once_with(PR, "quota paused")
+        supervisor.finish(PR, "reused")
+        supervisor.store.clear_pending.assert_called_once_with(PR)
+
     def test_the_loops_own_drain_is_short_while_prs_wait(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root
