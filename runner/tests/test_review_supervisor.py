@@ -647,10 +647,14 @@ class ReviewSupervisor(unittest.TestCase):
         atomic(supervisor.store.pr_dir(PR) / "current", {"generation": 1, "digest": "x"})
         self.assertTrue(supervisor.too_soon(PR, c))                    # reviewed just now
         self.assertFalse(supervisor.too_soon(PR, dict(c, mode="pr")))  # asked for by name
-        tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).strftime("%Y_%m_%d")
+        self.assertFalse(supervisor.too_soon(PR, dict(c, mode="@someone")))  # an author review
+        self.assertTrue(supervisor.too_soon(PR, dict(c, mode="AIReview")))   # a label sweep
+        from zoneinfo import ZoneInfo
+        today = datetime.datetime.now(ZoneInfo("Australia/Canberra")).date()
+        tomorrow = (today + datetime.timedelta(days=1)).strftime("%Y_%m_%d")
         call = dict(c, destinations=["page:review/DevCallReviews/%s/DevCallEU/devcall_pr_reviews.html" % tomorrow])
         self.assertFalse(supervisor.too_soon(PR, call))                # due at a call
-        later = (datetime.date.today() + datetime.timedelta(days=5)).strftime("%Y_%m_%d")
+        later = (today + datetime.timedelta(days=5)).strftime("%Y_%m_%d")
         self.assertTrue(supervisor.too_soon(PR, dict(c, destinations=[
             "page:review/DevCallReviews/%s/DevCallEU/devcall_pr_reviews.html" % later])))
         old = time.time() - 13 * 3600

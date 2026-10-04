@@ -482,7 +482,9 @@ class Supervisor:
         Pushes drive re-reviews (all but one of 309 on blu6 were of a new
         head), and a review after the interval covers every push since."""
         hours = float(self.config["configuration"].get("rereview_hours", 0))
-        if hours <= 0 or candidate.get("mode", self.config["mode"]) == "pr":
+        # only modes whose PRs later runs reliably revisit: followup, and the
+        # label sweeps; a review asked for by name or by author is done now
+        if hours <= 0 or candidate.get("mode", self.config["mode"]) not in ("followup", *LABELS):
             return False
         current = self.store.current(pr)
         if not current:
@@ -500,11 +502,16 @@ class Supervisor:
     @staticmethod
     def call_soon(candidate):
         """On a DevCallEU or DevCallTopic page dated today or tomorrow."""
-        today = datetime.date.today()
+        # the time zone call pages are dated in
+        from zoneinfo import ZoneInfo
+        today = datetime.datetime.now(ZoneInfo("Australia/Canberra")).date()
         for target in candidate.get("destinations", []):
             m = re.search(r"/DevCallReviews/(\d{4})_(\d{2})_(\d{2})/(DevCallEU|DevCallTopic)/", target)
-            if m and 0 <= (datetime.date(int(m[1]), int(m[2]), int(m[3])) - today).days <= 1:
-                return True
+            try:
+                if m and 0 <= (datetime.date(int(m[1]), int(m[2]), int(m[3])) - today).days <= 1:
+                    return True
+            except ValueError:
+                return True             # a date it cannot read is not held back
         return False
 
     def settled_at_discovery(self, candidate):
