@@ -4,6 +4,7 @@ from contextlib import ExitStack
 import os
 from pathlib import Path
 import re
+import sys
 import shlex
 import subprocess
 import time
@@ -129,18 +130,27 @@ class Publication:
                     page = read(record)
                 except (OSError, ValueError):
                     page = None
-                if (isinstance(page, dict) and page.get("state") in ("published", "superseded")
-                        and Store.valid_key(page.get("target")) and page["target"].startswith("page:")
+                if not (isinstance(page, dict) and Store.valid_key(page.get("target"))
+                        and page["target"].startswith("page:")
                         and isinstance(page.get("anchors", []), list)
                         and all(isinstance(a, str) for a in page.get("anchors", []))
                         and isinstance(page.get("revision", 0), int)):
+                    # a damaged record would drop its label from the page:
+                    # remove it and rebuild the index from the receipts
+                    print("landing: damaged index record %s rebuilt" % record, file=sys.stderr)
+                    record.unlink(missing_ok=True)
+                    complete = False
+                    continue
+                if page.get("state") in ("published", "superseded"):
                     indexed[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
                                                 anchors=page.get("anchors", []), target=page["target"])
                     revisions[record.stem] = page.get("revision", 0)
             pages.update(indexed)
             indexed_revisions = dict(revisions)
             scan = not complete
-            for receipt in (self.store.receipts(skip_unreadable=True) if scan else ()):
+            # an unreadable receipt raises: this page waits, rather than being
+            # published without a label the receipt may hold
+            for receipt in (self.store.receipts() if scan else ()):
                 # only page receipts have page keys: a board receipt targets a
                 # project id, which canonical() rejects and must not end the scan;
                 # a receipt not shaped like a page publish is skipped

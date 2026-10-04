@@ -459,19 +459,12 @@ class Store:
     def has_receipt(self, ident):
         return (self.root / "receipts" / (ident + ".json")).exists() or self.receipt_of(ident) is not None
 
-    def receipts(self, skip_unreadable=False):
-        """Every receipt, files and ledger; for the rare full scan. A scan
-        that only displays (a landing page) may skip an unreadable receipt;
-        nothing deciding delivery does."""
+    def receipts(self):
+        """Every receipt, files and ledger; for the rare full scan. An
+        unreadable receipt raises: no scan may take it as absent."""
         seen = set()
         for path in (self.root / "receipts").glob("*.json"):
-            try:
-                record = read(path)
-            except (OSError, ValueError):
-                if not skip_unreadable:
-                    raise
-                print("receipts: unreadable %s skipped" % path.name, file=sys.stderr)
-                continue
+            record = read(path)
             if record:
                 seen.add(path.stem)
                 yield record
@@ -483,11 +476,7 @@ class Store:
                 raise OSError("receipt ledger: %s" % error) from error
             for ident, body in rows:
                 if ident not in seen:
-                    try:
-                        yield json.loads(body)
-                    except ValueError:
-                        if not skip_unreadable:
-                            raise
+                    yield json.loads(body)
 
     def compact_receipts(self, older_than, limit=10000, deadline=None):
         """Move receipt files last changed before older_than into the ledger:
