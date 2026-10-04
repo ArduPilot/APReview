@@ -4,6 +4,8 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import os
+import re
+import datetime
 from pathlib import Path
 import sys
 import subprocess
@@ -474,6 +476,37 @@ class Supervisor:
 
     DISCOVERY_FRESH = 3600
 
+    def too_soon(self, pr, candidate):
+        """A PR reviewed less than rereview_hours ago waits, unless it was
+        asked for by name or is on a dev call's page for today or tomorrow.
+        Pushes drive re-reviews (all but one of 309 on blu6 were of a new
+        head), and a review after the interval covers every push since."""
+        hours = float(self.config["configuration"].get("rereview_hours", 0))
+        if hours <= 0 or candidate.get("mode", self.config["mode"]) == "pr":
+            return False
+        current = self.store.current(pr)
+        if not current:
+            return False
+        generation = self.store.pr_dir(pr) / "generations" / str(current["generation"])
+        bundle = read(generation / "bundle.json", {})
+        if bundle.get("legacy"):
+            return False
+        try:
+            age = time.time() - generation.stat().st_mtime
+        except OSError:
+            return False
+        return age < hours * 3600 and not self.call_soon(candidate)
+
+    @staticmethod
+    def call_soon(candidate):
+        """On a DevCallEU or DevCallTopic page dated today or tomorrow."""
+        today = datetime.date.today()
+        for target in candidate.get("destinations", []):
+            m = re.search(r"/DevCallReviews/(\d{4})_(\d{2})_(\d{2})/(DevCallEU|DevCallTopic)/", target)
+            if m and 0 <= (datetime.date(int(m[1]), int(m[2]), int(m[3])) - today).days <= 1:
+                return True
+        return False
+
     def settled_at_discovery(self, candidate):
         """Discovery found it unchanged or gone within the hour: admission
         settles it from that read instead of asking GitHub again. A PR going
@@ -570,6 +603,12 @@ class Supervisor:
             self.finish(pr, "reused", fresh.get("reason"))
             return
         claim = self.store.claim(pr)
+        continuing = (claim and claim["run"] == self.run_id and claim["request"] == self.config["request"]
+                      and claim["status"] == "active")
+        if not continuing and self.too_soon(pr, fresh):
+            # pushes come in bursts: one review after the interval covers them all
+            self.finish(pr, "deferred", "re-review interval")
+            return
         inputs = self.inputs(fresh)
         if (
             claim

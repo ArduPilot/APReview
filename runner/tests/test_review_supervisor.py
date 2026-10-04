@@ -635,6 +635,33 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual(supervisor.generation_receipts(PR, 1), [{"kind": "comment", "state": "posted"}])
         self.assertEqual(supervisor.generation_receipts(PR, None), [])
 
+    def test_a_pr_reviewed_recently_waits_unless_named_or_due_at_a_call(self):
+        import datetime
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = Store(self.root / "data")
+        supervisor.config = {"mode": "followup", "configuration": {"rereview_hours": 12}}
+        c = dict(candidate(), pr=PR, destinations=[])
+        self.assertFalse(supervisor.too_soon(PR, c))                   # never reviewed
+        generation = supervisor.store.pr_dir(PR) / "generations" / "1"
+        atomic(generation / "bundle.json", {"intents": []})
+        atomic(supervisor.store.pr_dir(PR) / "current", {"generation": 1, "digest": "x"})
+        self.assertTrue(supervisor.too_soon(PR, c))                    # reviewed just now
+        self.assertFalse(supervisor.too_soon(PR, dict(c, mode="pr")))  # asked for by name
+        tomorrow = (datetime.date.today() + datetime.timedelta(days=1)).strftime("%Y_%m_%d")
+        call = dict(c, destinations=["page:review/DevCallReviews/%s/DevCallEU/devcall_pr_reviews.html" % tomorrow])
+        self.assertFalse(supervisor.too_soon(PR, call))                # due at a call
+        later = (datetime.date.today() + datetime.timedelta(days=5)).strftime("%Y_%m_%d")
+        self.assertTrue(supervisor.too_soon(PR, dict(c, destinations=[
+            "page:review/DevCallReviews/%s/DevCallEU/devcall_pr_reviews.html" % later])))
+        old = time.time() - 13 * 3600
+        os.utime(generation, (old, old))
+        self.assertFalse(supervisor.too_soon(PR, c))                   # interval passed
+        atomic(generation / "bundle.json", {"intents": [], "legacy": True})
+        os.utime(generation, None)
+        self.assertFalse(supervisor.too_soon(PR, c))                   # an imported review
+        supervisor.config["configuration"]["rereview_hours"] = 0
+        self.assertFalse(supervisor.too_soon(PR, c))
+
     def test_the_loops_own_drain_is_short_while_prs_wait(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
         supervisor.directory = self.root
