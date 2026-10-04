@@ -408,6 +408,20 @@ class Supervisor:
     def inputs(self, candidate):
         return {k: v for k, v in candidate.items() if k not in ("live", "stub")}
 
+    def defer_damaged(self, pr, reason):
+        """Defer a PR whose records cannot be read, touching nothing of them:
+        finish() would read the same damaged claim again."""
+        print("admission: %s deferred: %s" % (pr, reason), file=sys.stderr)
+        state = self.states[pr]
+        state.update(review="deferred", reason=reason)
+        try:
+            self.store.mark_pending(pr, reason)
+        except Exception:
+            pass
+        lock = self.owned.pop(pr, None)
+        if lock:
+            lock.close()
+
     def finish(self, pr, review, reason=None):
         state = self.states[pr]
         state["review"] = review
@@ -577,7 +591,7 @@ class Supervisor:
             self.store.recover_pr(lock, pr)
             current = self.store.bundle(pr)
         except Exception as error:      # this PR's records, not the run
-            self.finish(pr, "deferred", "recovery failed: %s" % str(error)[:120])
+            self.defer_damaged(pr, "recovery failed: %s" % str(error)[:120])
             return
         existing = self.store.claim(pr)
         if existing and existing["node_id"] != candidate["node_id"]:
@@ -1195,8 +1209,11 @@ class Supervisor:
             self.startup_budget -= 1
             if directory == self.directory:
                 continue
-            summary = read(directory / "summary.json", {})
-            if summary.get("state") == "complete":
+            try:
+                summary = read(directory / "summary.json", {})
+            except (OSError, ValueError):
+                summary = {}            # damaged: let its own recovery decide
+            if isinstance(summary, dict) and summary.get("state") == "complete":
                 continue
             lock = try_lock(self.store.locks, "run:" + str(directory))
             if lock is None:
@@ -1321,7 +1338,13 @@ class Supervisor:
                     pr = candidate["pr"]
                     state = self.states[pr]
                     if state["review"] == "pending":
-                        old_claim = self.store.claim(pr)
+                        try:
+                            old_claim = self.store.claim(pr)
+                            if old_claim is not None and not isinstance(old_claim, dict):
+                                raise ValueError("claim is not a record")
+                        except Exception as error:
+                            self.defer_damaged(pr, "claim unreadable: %s" % str(error)[:120])
+                            continue
                         continuing = (
                             old_claim
                             and old_claim["run"] == self.run_id
