@@ -5,7 +5,7 @@ Every review comment states its verdict on its second line, directly under
 the AI-generated marker line, so that a person skimming the PR sees the
 conclusion before the reasoning and a program does not have to guess:
 
-    **Automated review note — AI-generated (Claude), validated against ...
+    **Automated review note — AI-generated (Claude+Codex), validated against ...
     **Verdict: REQUEST CHANGES**
 
 That line is the verdict. Comments written before 2026-09-28 said it in prose

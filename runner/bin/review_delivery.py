@@ -19,7 +19,7 @@ from review_store import Store, atomic, create_once, digest, mkdir, read
 
 # Line 1 of every comment, verbatim what the command writes today: the tools
 # match "AI-generated" and readers know the sentence.
-MARKER = ("**Automated review note — AI-generated (Claude), validated against the "
+MARKER = ("**Automated review note — AI-generated (Claude+Codex), validated against the "
           "live diff.** Please sanity-check before acting.")
 
 
