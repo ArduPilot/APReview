@@ -1786,10 +1786,12 @@ class GitHubTrickle(unittest.TestCase):
         def trickle():
             conn, _ = server.accept()
             conn.recv(65536)
-            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000000\r\n\r\n")
+            # a chunk-size line trickled a digit at a time and never ended:
+            # one read keeps receiving bytes, so no socket timeout fires
+            conn.sendall(b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n")
             try:
-                for _ in range(200):
-                    conn.sendall(b"x" * 10)
+                for _ in range(40):
+                    conn.sendall(b"0")
                     time.sleep(0.05)
             except OSError:
                 pass

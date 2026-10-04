@@ -138,11 +138,19 @@ class GitHub:
         # A socket timeout bounds each wait, not the whole: an answer that
         # trickles in can keep a read going. At the deadline the watchdog
         # shuts the socket, which ends any blocking connect or read at once.
+        # The socket is captured once sent: a response that closes the
+        # connection takes the socket over and connection.sock goes None. A
+        # timer firing after the exchange finished does nothing, so it can
+        # never shut the next request's socket on a reused connection.
+        state = dict(done=False, sock=None)
+        guard = threading.Lock()
+
         def expire():
-            sock = connection.sock
-            if sock is not None:
+            with guard:
+                if state["done"] or state["sock"] is None:
+                    return
                 try:
-                    sock.shutdown(socket.SHUT_RDWR)
+                    state["sock"].shutdown(socket.SHUT_RDWR)
                 except OSError:
                     pass
 
@@ -154,6 +162,10 @@ class GitHub:
             if connection.sock is not None:
                 connection.sock.settimeout(remaining)
             connection.request("GET", target, headers=headers)
+            with guard:
+                state["sock"] = connection.sock
+            if time.monotonic() >= end:
+                raise TimeoutError("GitHub answer took past its deadline")
             response = connection.getresponse()
             chunks = []
             while True:
@@ -173,6 +185,8 @@ class GitHub:
                 raise TimeoutError("GitHub answer took past its deadline") from error
             raise Retry("GitHub connection: %s" % error) from error
         finally:
+            with guard:
+                state["done"] = True
             watchdog.cancel()
 
     def request(
