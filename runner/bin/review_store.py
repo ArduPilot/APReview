@@ -208,6 +208,22 @@ class Store:
         except (ValueError, OSError, KeyError):
             return False
 
+    def last_worked(self, pr):
+        """When we last worked on a PR, from local state alone: its newest
+        accepted generation, or the posting of that generation's comment if
+        later. None if we never reviewed it."""
+        generations = [p for p in (self.pr_dir(pr) / "generations").glob("*") if p.name.isdigit()]
+        if not generations:
+            return None
+        newest = max(generations, key=lambda p: int(p.name))
+        times = [newest.stat().st_mtime]
+        receipt = self.root / "receipts" / (delivery_id(pr, int(newest.name), "comment", pr) + ".json")
+        try:
+            times.append(receipt.stat().st_mtime)
+        except OSError:
+            pass
+        return max(times)
+
     def claim(self, pr):
         return read(self.pr_dir(pr) / "claim.json")
 

@@ -477,6 +477,15 @@ class ReviewStore(unittest.TestCase):
         settled = sorted(p.stem for p in receipts.glob("land*.json"))
         self.assertEqual(settled, ["land1", "land2"])
 
+    def test_last_worked_is_the_newest_generation_or_its_posting(self):
+        self.assertIsNone(self.store.last_worked(PR))
+        self.accept()
+        promoted = self.store.last_worked(PR)
+        self.assertGreater(promoted, time.time() - 60)
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root))
+        self.assertGreaterEqual(self.store.last_worked(PR), promoted)
+
     def test_tombstones_and_accepted_generation_are_independent(self):
         self.accept()
         page = "page:end/latest"
