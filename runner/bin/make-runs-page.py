@@ -754,7 +754,7 @@ def queue_rows():
             mtime = os.path.getmtime(path)
         except Exception:
             continue
-        if not all(os.path.exists(os.path.join(DATA, 'receipts', i['id'] + '.json'))
+        if not all(store.has_receipt(i['id'])
                    or os.path.exists(os.path.join(DATA, 'outbox', i['id'] + '.json'))
                    for i in op.get('intents', [])):
             ops += 1
