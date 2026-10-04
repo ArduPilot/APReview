@@ -1029,6 +1029,7 @@ class LocalPublication(unittest.TestCase):
                                             target=target, gate="page"), time.monotonic() + 10)
         landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
                        target="page:test/DevCallReviews/2026_10_04/devcall_pr_reviews.html")
+        first, _ = self.publisher.render(landing)        # a date's first landing scans once
         real = Path.glob
         def glob(path, pattern):
             if path.name == "receipts":
@@ -1038,6 +1039,26 @@ class LocalPublication(unittest.TestCase):
             raw, _ = self.publisher.render(landing)
         body = raw.decode()
         self.assertIn("AIReview/devcall_pr_reviews.html", body)
+        self.assertIn("DevCallTopic", body)
+        self.assertEqual(raw, first)
+
+    def test_a_landing_index_started_by_one_label_keeps_the_older_ones(self):
+        # labels published before the index existed are known only by their
+        # receipts: the first index entry must not hide them
+        old = "page:test/DevCallReviews/2026_10_06/DevCallTopic/devcall_pr_reviews.html"
+        self.store.receipt(dict(id="old", pr=PR, generation=1, kind="publish", target=old),
+                           "published", revision=1, anchors=["pr-x"])
+        new = "page:test/DevCallReviews/2026_10_06/AIReview/devcall_pr_reviews.html"
+        self.store.merge_membership(new, {PR: dict(ticket=1, removed=False, generation=1)})
+        with try_lock(self.store.locks, new):
+            self.publisher.deliver(dict(id="pubn", pr=PR, generation="op", kind="publish",
+                                        target=new, gate="page"), time.monotonic() + 10)
+        landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
+                       target="page:test/DevCallReviews/2026_10_06/devcall_pr_reviews.html")
+        for _ in range(2):                   # before and after the index is marked complete
+            body = self.publisher.render(landing)[0].decode()
+            self.assertIn("DevCallTopic", body)
+            self.assertIn("AIReview", body)
 
     def test_a_landing_page_includes_a_label_outside_the_standard_three(self):
         target = "page:test/DevCallReviews/2026_10_05/CustomLabel/devcall_pr_reviews.html"

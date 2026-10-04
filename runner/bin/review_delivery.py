@@ -14,7 +14,7 @@ from review_discovery import LABELS, POST, module
 import review_metrics
 from review_lock import acquire, canonical, region
 from review_render import Renderer, anchor, bundle_at, sha, verify
-from review_store import atomic, digest, mkdir, read
+from review_store import atomic, create_once, digest, mkdir, read
 
 # Line 1 of every comment, verbatim what the command writes today: the tools
 # match "AI-generated" and readers know the sentence.
@@ -114,21 +114,28 @@ class Publication:
             revisions = {}
             consumed = []
             # Each dated label page records its latest upload in
-            # landing/<date>/<label>.json, written under its own page lock
-            # as it is published: a handful of reads instead of parsing every
-            # receipt in the store. A date with no such records, from before
-            # they existed, is found by scanning the receipts as before.
-            index = self.store.root / "landing" / date
+            # landing/<endpoint>/<date>/<label>.json, written under its own
+            # page lock as it is published: a handful of reads instead of
+            # parsing every receipt in the store. The index is trusted only
+            # once marked complete; until then the receipts are scanned and
+            # any label missing from the index is backfilled, never
+            # overwriting a fresher entry, and the mark written.
+            endpoint_name = canonical(target)[5:].split("/", 1)[0]
+            index = self.store.root / "landing" / endpoint_name / date
+            complete = (index / ".complete").exists()
+            indexed = {}
             for record in sorted(index.glob("*.json")) if index.is_dir() else ():
                 page = read(record)
                 if page and page.get("state") in ("published", "superseded"):
-                    pages[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
-                                              anchors=page.get("anchors", []), target=page["target"])
-            scan = not index.is_dir()
+                    indexed[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
+                                                anchors=page.get("anchors", []), target=page["target"])
+            pages.update(indexed)
+            scan = not complete
             for receipt in (self.store.receipts() if scan else ()):
                 match = re.fullmatch(
-                    r"page:([^/]+)/DevCallReviews/" + date + r"/([^/]+)/devcall_pr_reviews.html",
-                    receipt["target"],
+                    r"page:(" + re.escape(endpoint_name) + r")/DevCallReviews/" + date
+                    + r"/([^/]+)/devcall_pr_reviews.html",
+                    canonical(receipt["target"]),
                 )
                 if match and receipt["state"] in ("published", "superseded"):
                     # every label publish this render saw; the page then shows
@@ -145,6 +152,16 @@ class Publication:
                         anchors=receipt.get("anchors", []),
                         target=receipt["target"],
                     )
+            if scan:
+                # an indexed entry is the label's latest upload: it wins
+                pages.update(indexed)
+                mkdir(index)
+                for label, page in pages.items():
+                    if canonical(page["target"]).startswith("page:%s/" % endpoint_name):
+                        create_once(index / (label + ".json"), dict(
+                            target=canonical(page["target"]), state="published",
+                            revision=revisions.get(label, 0), anchors=page["anchors"]))
+                atomic(index / ".complete", True)
             with review_metrics.timed("local", "render landing"):
                 raw = self.renderer.landing(date, pages, commit=commit)
         else:
@@ -250,7 +267,8 @@ class Publication:
         )
         if dated:
             # this label's entry in its date's landing index
-            atomic(self.store.root / "landing" / dated[1] / (dated[2] + ".json"),
+            atomic(self.store.root / "landing" / canonical(target)[5:].split("/", 1)[0] / dated[1]
+                   / (dated[2] + ".json"),
                    dict(target=canonical(target), state=result["state"], revision=revision,
                         anchors=result["anchors"]))
         if not entry.get("retained"):
