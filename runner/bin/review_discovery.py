@@ -22,7 +22,7 @@ from urllib.error import HTTPError
 from html import unescape
 
 import review_metrics
-from review_store import atomic as atomic_json, read as read_json
+from review_store import read as read_json
 
 LABELS = ("DevCallTopic", "DevCallEU", "AIReview")
 
@@ -438,7 +438,10 @@ class Discovery:
         for candidate in out:
             candidate["observation"] = ticket
         if mode == "followup" and self.store:
-            atomic_json(self.store.root / "followup-coverage.json", {"at": started})
+            # the controller records coverage once these candidates are
+            # durable in its run; recording it here could lose a review to a
+            # crash before then
+            self.followup_started = started
         if mode == "followup" and not any(c["classification"] == "REVIEW" for c in out):
             for c in out:
                 c["destinations"] = []

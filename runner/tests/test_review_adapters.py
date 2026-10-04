@@ -383,6 +383,10 @@ class DiscoveryContract(unittest.TestCase):
         self.assertLess(seen[0], time.time() - 40 * 86400)
         # and the PR it could not read is kept in the window
         self.assertTrue((self.discover.store.pr_dir(PR) / "pending.json").exists())
+        # discovery itself never records coverage: the controller does, once
+        # its candidates are durable
+        self.assertLess(read(coverage)["at"], time.time() - 29 * 86400)
+        self.assertTrue(self.discover.followup_started)
 
     def test_search_restricts_organisations_and_repositories(self):
         self.gh.pages.return_value = [

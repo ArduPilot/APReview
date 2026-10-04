@@ -1029,6 +1029,12 @@ class Supervisor:
             merged.values(), key=lambda row: (row["created_at"], row["pr"])
         )
         atomic(self.directory / "run.json", self.config)
+        # only now, with the followup's candidates durable in this run, may
+        # the window advance past what it looked at
+        started = getattr(self.discovery, "followup_started", None)
+        if isinstance(started, (int, float)) and started:
+            atomic(self.store.root / "followup-coverage.json", {"at": started})
+            self.discovery.followup_started = None
         self.admit_snapshot()
 
     def admit_snapshot(self):
