@@ -751,6 +751,26 @@ class ReviewStore(unittest.TestCase):
             self.assertFalse(self.store.has_receipt("puba"))   # same page: waits with the failed merge
         self.assertTrue(self.store.has_receipt("pubc"))        # another page goes
 
+    def test_inherited_intents_drop_dead_waits_and_follow_the_new_projection(self):
+        old = [{"kind": "projection", "target": "page:end/old", "patches": {PR: {"generation": 1}},
+                "dependencies": ["ghost", "queued"]},
+               {"kind": "publish", "target": "page:end/old",
+                "dependencies": [delivery_id(PR, 1, "projection", "page:end/old")]},
+               {"kind": "comment", "target": PR}]
+        atomic(self.root / "outbox" / "queued.json", {"id": "queued"})
+        self.store.accept(self.lock, PR, complete_claim(self.store, self.lock, run="r1"), old)
+        claim = complete_claim(self.store, self.lock, run="r2", request="q2")
+        self.store.accept(self.lock, PR, claim, [{"kind": "comment", "target": PR}])
+        bundle = self.store.bundle(PR)
+        self.assertEqual(bundle["generation"], 2)
+        projection = [i for i in bundle["intents"] if i["kind"] == "projection"][0]
+        publish = [i for i in bundle["intents"] if i["kind"] == "publish"][0]
+        self.assertEqual(projection["dependencies"], ["queued"])            # the dead wait is gone
+        self.assertEqual(projection["patches"][PR]["generation"], 2)
+        self.assertEqual(publish["dependencies"], [projection["id"]])       # waits on its own generation
+        # the recipe recovery replays holds the inherited intents as accepted
+        self.assertEqual(len(self.store.claim(PR)["prepared"]), 3)
+
     def test_a_missing_dependency_is_never_treated_as_met(self):
         self.lock.close()
         atomic(self.root / "outbox" / "proj.json", dict(id="proj", pr=PR, generation="op", kind="projection",

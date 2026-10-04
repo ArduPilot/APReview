@@ -322,14 +322,73 @@ class Store:
             raise ValueError("selected reconciliation coverage")
         return results
 
+    def inherited(self, pr, generation, intents):
+        """The earlier generations' page intents this one carries forward:
+        retained destinations, unless an operator retired the page. Their
+        dependencies are rewritten as the supervisor builds new ones: a wait
+        on an older generation's projection of the same page becomes a wait
+        on this generation's, and a wait that can never settle (an old
+        observation never journalled) is dropped, or it would hold the
+        intent, and the comment behind it, generation after generation."""
+        seen = {(x["kind"], x["target"]) for x in intents}
+        unreachable, carried = set(), []
+        chain = list(self.chain(pr))
+        for old in chain:
+            for intent in old["intents"]:
+                identity = intent["kind"], intent["target"]
+                if identity in seen or intent.get("retained") or intent["kind"] not in ("publish", "projection", "annotation"):
+                    continue
+                if intent["target"] not in unreachable:
+                    rows = read(self.root / "membership" / (digest(canonical(intent["target"])) + ".json"), {})
+                    if rows.get(pr, {}).get("unreachable"):
+                        unreachable.add(intent["target"])
+                if intent["target"] not in unreachable:
+                    item = copy.deepcopy({k: v for k, v in intent.items() if k != "id"})
+                    if item["kind"] == "projection" and pr in item.get("patches", {}):
+                        item["patches"][pr]["generation"] = generation
+                    carried.append(item)
+                    seen.add(identity)
+        projected = {canonical(x["target"]) for x in list(intents) + carried if x["kind"] == "projection"}
+        recorded = {i.get("id") for b in chain for i in b["intents"]}     # rebuild remakes these
+        generations = [b["generation"] for b in chain]
+        for item in carried:
+            if "dependencies" not in item:
+                continue
+            target = canonical(item["target"])
+            older = {delivery_id(pr, g, "projection", target) for g in generations}
+            kept = []
+            for dep in item["dependencies"]:
+                if dep in older and target in projected and item["kind"] != "projection":
+                    dep = delivery_id(pr, generation, "projection", target)
+                elif dep not in recorded and not self.may_settle(dep):
+                    continue
+                if dep not in kept:
+                    kept.append(dep)
+            item["dependencies"] = kept
+        return carried
+
+    def may_settle(self, dep):
+        """A dependency that is settled, queued, or journalled to be."""
+        if self.has_receipt(dep) or (self.root / "outbox" / (dep + ".json")).exists():
+            return True
+        for path in (self.root / "operations").glob("*.json"):
+            try:
+                if any(isinstance(i, dict) and i.get("id") == dep for i in read(path).get("intents", [])):
+                    return True
+            except Exception:
+                return True             # cannot tell: keep it
+        return False
+
     def accept(self, lock, pr, claim, intents):
         self.gate(lock, pr)
         active = self.claim(pr)
         if active != claim or claim["status"] != "active":
             raise ValueError("fenced acceptance")
         results = self.selected(pr, claim)
-        # Persist the complete transaction recipe before any bundle writes.
-        claim = dict(claim, prepared=intents)
+        # Persist the complete transaction recipe before any bundle writes,
+        # inherited intents included: recovery replays exactly this, never a
+        # recomputation from state that may have moved since.
+        claim = dict(claim, prepared=list(intents) + self.inherited(pr, claim["generation"], intents))
         self.save_claim(lock, pr, claim)
         self.crash("prepared")
         return self._promote(lock, pr, claim, results)
