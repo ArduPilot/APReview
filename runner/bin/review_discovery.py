@@ -208,8 +208,8 @@ class Discovery:
                 try:
                     local = served_copy(self.store, "page:%s/%s" % (self.config.get("endpoint", "review"), path),
                                         [endpoint.get("publish") or os.environ.get("REVIEW_PUBLISH"), url])
-                except ValueError:
-                    local = None
+                except Exception:
+                    local = None        # any doubt: fetch it as before
                 if local is not None:
                     review_metrics.count("local", "manifest from the store")
                     self._pages[url] = self.parse_manifest(local.decode())

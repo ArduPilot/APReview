@@ -349,18 +349,30 @@ class Supervisor:
         # receipt in the store cost a controller two minutes at start, and
         # grew with every delivery ever made.
         for pr, state in self.states.items():
-            for receipt in self.generation_receipts(pr, state.get("generation")):
-                if receipt["kind"] == "publish":
-                    state["publish"][receipt["target"]] = receipt["state"]
-                elif receipt["kind"] in ("comment", "board"):
-                    state[receipt["kind"]] = receipt["state"]
+            try:
+                for receipt in self.generation_receipts(pr, state.get("generation")):
+                    if not isinstance(receipt, dict):
+                        continue
+                    if receipt.get("kind") == "publish":
+                        state["publish"][receipt["target"]] = receipt.get("state")
+                    elif receipt.get("kind") in ("comment", "board"):
+                        state[receipt["kind"]] = receipt.get("state")
+            except Exception as error:      # one PR's records do not stop the run
+                print("save: %s receipts unreadable: %s" % (pr, str(error)[:200]), file=sys.stderr)
         changed = digest(self.states) != self.saved_state
         if changed:
             atomic(self.directory / "state.json", self.states)
             self.saved_state = digest(self.states)
         if changed or force or now - self.last_summary >= 30:
             self.last_summary = now
-            debts = [x for x in (read(p) for p in (self.store.root / "outbox").glob("*.json")) if x]
+            debts = []
+            for p in (self.store.root / "outbox").glob("*.json"):
+                try:
+                    x = read(p)
+                except (OSError, ValueError):
+                    continue
+                if isinstance(x, dict) and "id" in x and "pr" in x:
+                    debts.append(x)
             atomic(
                 self.directory / "summary.json",
                 {
@@ -621,7 +633,12 @@ class Supervisor:
         claim = self.store.claim(pr)
         continuing = (claim and claim["run"] == self.run_id and claim["request"] == self.config["request"]
                       and claim["status"] == "active")
-        if not continuing and self.too_soon(pr, fresh):
+        try:
+            soon = not continuing and self.too_soon(pr, fresh)
+        except Exception as error:      # unreadable records: review it, do not wait
+            print("admission: %s interval check failed: %s" % (pr, str(error)[:200]), file=sys.stderr)
+            soon = False
+        if soon:
             # pushes come in bursts: one review after the interval covers them all
             self.finish(pr, "deferred", "re-review interval")
             return
