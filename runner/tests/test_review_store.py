@@ -498,6 +498,22 @@ class ReviewStore(unittest.TestCase):
             self.store.allocate(lock, PR, "run2", "request2", candidate())
         self.assertTrue(self.store.in_followup_window(PR, cutoff))
 
+    def test_a_review_deferred_before_any_claim_stays_in_the_window(self):
+        cutoff = time.time() + 60
+        self.accept()
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root))
+        self.assertFalse(self.store.in_followup_window(PR, cutoff))
+        self.store.mark_pending(PR, "diff unavailable")
+        self.assertTrue(self.store.in_followup_window(PR, cutoff))
+        self.store.clear_pending(PR)
+        self.assertFalse(self.store.in_followup_window(PR, cutoff))
+        # a held comment keeps it too: a human may post it at any time
+        current = self.store.current(PR)
+        receipt = self.root / "receipts" / (delivery_id(PR, current["generation"], "comment", PR) + ".json")
+        atomic(receipt, dict(read(receipt), state="held"))
+        self.assertTrue(self.store.in_followup_window(PR, cutoff))
+
     def test_tombstones_and_accepted_generation_are_independent(self):
         self.accept()
         page = "page:end/latest"

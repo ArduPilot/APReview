@@ -224,6 +224,14 @@ class Store:
             pass
         return max(times)
 
+    def mark_pending(self, pr, reason):
+        """A review deferred, perhaps before any claim was made: keeps the PR
+        in the followup window until it is reviewed, reused or dropped."""
+        atomic(self.pr_dir(pr) / "pending.json", dict(at=time.time(), reason=reason))
+
+    def clear_pending(self, pr):
+        unlink(self.pr_dir(pr) / "pending.json")
+
     def in_followup_window(self, pr, cutoff):
         """False only when we know a PR is done with and old: its last work
         is before cutoff, no newer claim is still unfinished, and no comment
@@ -231,7 +239,7 @@ class Store:
         local record of our work stays in: a posting we cannot see locally
         must not take it out."""
         worked = self.last_worked(pr)
-        if worked is None or worked >= cutoff:
+        if worked is None or worked >= cutoff or (self.pr_dir(pr) / "pending.json").exists():
             return True
         claim, current = self.claim(pr), self.current(pr)
         if claim and (not current or current["generation"] < claim["generation"]):
