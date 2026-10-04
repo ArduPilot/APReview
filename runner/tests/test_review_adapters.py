@@ -1020,6 +1020,25 @@ class LocalPublication(unittest.TestCase):
         source.write_bytes(source.read_bytes() + b"<!-- later attempt -->")
         self.assertIsNone(served_copy(self.store, target))
 
+    def test_a_landing_page_is_built_from_label_pages_confirmed_uploads(self):
+        for label in ("DevCallTopic", "AIReview"):
+            target = "page:test/DevCallReviews/2026_10_04/%s/devcall_pr_reviews.html" % label
+            self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
+            with try_lock(self.store.locks, target):
+                self.publisher.deliver(dict(id="pub" + label, pr=PR, generation="op", kind="publish",
+                                            target=target, gate="page"), time.monotonic() + 10)
+        landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
+                       target="page:test/DevCallReviews/2026_10_04/devcall_pr_reviews.html")
+        real = Path.glob
+        def glob(path, pattern):
+            if path.name == "receipts":
+                raise AssertionError("landing scanned every receipt")
+            return real(path, pattern)
+        with patch.object(Path, "glob", glob):
+            raw, _ = self.publisher.render(landing)
+        body = raw.decode()
+        self.assertIn("AIReview/devcall_pr_reviews.html", body)
+
     def test_publication_uses_frozen_rsync_auth_options(self):
         from review_delivery import run_external
         option = "--password-file=/outside/credentials with spaces"

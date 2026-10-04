@@ -10,7 +10,7 @@ import time
 from urllib.request import urlopen, Request
 from urllib.parse import quote
 
-from review_discovery import POST, module
+from review_discovery import LABELS, POST, module
 import review_metrics
 from review_lock import acquire, canonical, region
 from review_render import Renderer, anchor, bundle_at, sha, verify
@@ -113,7 +113,24 @@ class Publication:
             pages = {}
             revisions = {}
             consumed = []
-            for receipt_path in (self.store.root / "receipts").glob("*.json"):
+            # Each label page's last confirmed upload holds its revision and
+            # anchors: a handful of reads instead of parsing every receipt in
+            # the store, as many as a quarter of a million. A page uploaded
+            # before those records existed sends it back to the receipts.
+            endpoint_name = canonical(target)[5:].split("/", 1)[0]
+            scan = False
+            for label in LABELS:
+                page = "page:%s/DevCallReviews/%s/%s/devcall_pr_reviews.html" % (endpoint_name, date, label)
+                directory = self.store.root / "pages" / digest(page)
+                confirmed = read(directory / "confirmed.json")
+                if confirmed and confirmed.get("state") in ("published", "superseded"):
+                    pages[label] = dict(path=label + "/devcall_pr_reviews.html",
+                                        anchors=confirmed.get("anchors", []), target=page)
+                elif directory.exists():
+                    scan = True
+            if scan:
+                pages = {}
+            for receipt_path in ((self.store.root / "receipts").glob("*.json") if scan else ()):
                 receipt = read(receipt_path)
                 match = re.fullmatch(
                     r"page:([^/]+)/DevCallReviews/" + date + r"/([^/]+)/devcall_pr_reviews.html",
