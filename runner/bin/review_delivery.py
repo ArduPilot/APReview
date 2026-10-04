@@ -113,25 +113,19 @@ class Publication:
             pages = {}
             revisions = {}
             consumed = []
-            # Each label page's last confirmed upload holds its revision and
-            # anchors: a handful of reads instead of parsing every receipt in
-            # the store, as many as a quarter of a million. A page uploaded
-            # before those records existed sends it back to the receipts.
-            endpoint_name = canonical(target)[5:].split("/", 1)[0]
-            scan = False
-            for label in LABELS:
-                page = "page:%s/DevCallReviews/%s/%s/devcall_pr_reviews.html" % (endpoint_name, date, label)
-                directory = self.store.root / "pages" / digest(page)
-                confirmed = read(directory / "confirmed.json")
-                if confirmed and confirmed.get("state") in ("published", "superseded"):
-                    pages[label] = dict(path=label + "/devcall_pr_reviews.html",
-                                        anchors=confirmed.get("anchors", []), target=page)
-                elif directory.exists():
-                    scan = True
-            if scan:
-                pages = {}
-            for receipt_path in ((self.store.root / "receipts").glob("*.json") if scan else ()):
-                receipt = read(receipt_path)
+            # Each dated label page records its latest upload in
+            # landing/<date>/<label>.json, written under its own page lock
+            # as it is published: a handful of reads instead of parsing every
+            # receipt in the store. A date with no such records, from before
+            # they existed, is found by scanning the receipts as before.
+            index = self.store.root / "landing" / date
+            for record in sorted(index.glob("*.json")) if index.is_dir() else ():
+                page = read(record)
+                if page and page.get("state") in ("published", "superseded"):
+                    pages[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
+                                              anchors=page.get("anchors", []), target=page["target"])
+            scan = not index.is_dir()
+            for receipt in (self.store.receipts() if scan else ()):
                 match = re.fullmatch(
                     r"page:([^/]+)/DevCallReviews/" + date + r"/([^/]+)/devcall_pr_reviews.html",
                     receipt["target"],
@@ -234,8 +228,9 @@ class Publication:
         revision = read(directory / "revision.json", 0) + 1
         atomic(directory / "revision.json", revision)
         if landing:
-            # routes saved only for a page that was really served
+            # routes saved only for a page that was really uploaded
             atomic(*self.renderer.pending)
+        dated = re.fullmatch(r"DevCallReviews/(\d{4}[-_]\d{2}[-_]\d{2})/([^/]+)/devcall_pr_reviews.html", path)
         rows = read(self.store.root / "membership" / (digest(target) + ".json"), {})
         removed = (
             isinstance(entry["generation"], int)
@@ -253,6 +248,11 @@ class Publication:
             # what each row put on the page this upload served
             views=None if landing or entry.get("retained") else self.renderer.views,
         )
+        if dated:
+            # this label's entry in its date's landing index
+            atomic(self.store.root / "landing" / dated[1] / (dated[2] + ".json"),
+                   dict(target=canonical(target), state=result["state"], revision=revision,
+                        anchors=result["anchors"]))
         if not entry.get("retained"):
             # the page as last confirmed uploaded (fetched back when sampled):
             # a later publish whose fresh render has these bytes, with no
@@ -463,7 +463,7 @@ class Posting:
         return self.deliver(entry, deadline)
 
     def deprecate(self, entry, deadline):
-        receipt = read(self.store.root / "receipts" / (entry["dependencies"][0] + ".json"))
+        receipt = self.store.receipt_of(entry["dependencies"][0])
         if receipt["state"] != "posted":
             return dict(state="not_applicable")
         poster = receipt.get("account", self.config["comment_accounts"][0])
@@ -621,7 +621,7 @@ class Delivery:
             return self.posting.prepare(entry, deadline)
         if entry["kind"] in ("board", "deprecate"):
             dependencies = [
-                read(self.store.root / "receipts" / (ident + ".json"), {})
+                self.store.receipt_of(ident, {})
                 for ident in entry.get("dependencies", [])
             ]
             if any(

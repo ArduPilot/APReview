@@ -1039,6 +1039,17 @@ class LocalPublication(unittest.TestCase):
         body = raw.decode()
         self.assertIn("AIReview/devcall_pr_reviews.html", body)
 
+    def test_a_landing_page_includes_a_label_outside_the_standard_three(self):
+        target = "page:test/DevCallReviews/2026_10_05/CustomLabel/devcall_pr_reviews.html"
+        self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
+        with try_lock(self.store.locks, target):
+            self.publisher.deliver(dict(id="pubc", pr=PR, generation="op", kind="publish",
+                                        target=target, gate="page"), time.monotonic() + 10)
+        raw, _ = self.publisher.render(dict(id="land", pr=PR, generation="op", kind="publish", gate="page",
+                                            landing=True,
+                                            target="page:test/DevCallReviews/2026_10_05/devcall_pr_reviews.html"))
+        self.assertIn("CustomLabel", raw.decode())
+
     def test_publication_uses_frozen_rsync_auth_options(self):
         from review_delivery import run_external
         option = "--password-file=/outside/credentials with spaces"
@@ -1687,7 +1698,7 @@ class PhaseController(unittest.TestCase):
             controller.save(force=True)
             before = (directory / "state.json").stat().st_mtime_ns
             with patch.object(self.supervisor, "atomic", wraps=atomic) as writes, patch.object(
-                controller.store, "receipt_index", wraps=controller.store.receipt_index
+                controller, "generation_receipts", wraps=controller.generation_receipts
             ) as scans:
                 for _ in range(20):
                     controller.save()
