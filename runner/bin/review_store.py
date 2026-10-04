@@ -807,7 +807,8 @@ class Store:
                     and all(isinstance(d, str) for d in x.get("dependencies", []))
                     # the key its lock is taken on must exist, or it could
                     # never even be quarantined and would block every pass
-                    and self.valid_key(x.get("target" if gate == "page" else "pr"))):
+                    and self.valid_key(x.get("target" if gate == "page" else "pr"))
+                    and x.get("target" if gate == "page" else "pr", "").startswith("page:" if gate == "page" else "pr:")):
                 print("drain: malformed outbox entry %s" % p.name, file=sys.stderr)
                 review_metrics.count("local", "malformed outbox entry")
                 continue

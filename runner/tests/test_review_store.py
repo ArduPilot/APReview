@@ -670,6 +670,14 @@ class ReviewStore(unittest.TestCase):
                                                         target="page:bad", next_attempt=0, failures=0))
         self.assertEqual(self.store.delivery_snapshot(limit=10), [])
 
+    def test_an_entry_gated_on_the_wrong_kind_of_key_never_enters_selection(self):
+        self.lock.close()
+        atomic(self.root / "outbox" / "bad.json", dict(id="bad", pr="permit:claude:255", kind="comment",
+                                                       next_attempt=0, failures=0))
+        atomic(self.root / "outbox" / "bad2.json", dict(id="bad2", pr=PR, kind="publish", gate="page",
+                                                        target=PR, next_attempt=0, failures=0))
+        self.assertEqual(self.store.delivery_snapshot(limit=10), [])
+
     def test_an_entry_whose_id_is_not_its_filename_never_enters_selection(self):
         self.lock.close()
         atomic(self.root / "outbox" / "one.json", dict(id="other", pr=PR, kind="comment",
