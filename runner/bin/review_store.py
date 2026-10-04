@@ -831,7 +831,7 @@ class Store:
         def ready(x):
             try:
                 return (x.get("next_attempt", 0) <= now and x.get("failures", 0) < 5
-                        and all(ok(d) or self.unsatisfiable(x, d) for d in x.get("dependencies", [])))
+                        and all(map(ok, x.get("dependencies", []))))
             except Exception:
                 return False
 
@@ -841,8 +841,7 @@ class Store:
         chosen = [x for x in snapshot if ready(x)]
         def waits(x):
             try:
-                return any(d not in receipted and not self.unsatisfiable(x, d)
-                           for d in x.get("dependencies", []))
+                return any(d not in receipted for d in x.get("dependencies", []))
             except Exception:
                 return True
         chosen.sort(key=waits)
@@ -856,43 +855,6 @@ class Store:
             return isinstance(key, str) and bool(canonical(key))
         except ValueError:
             return False
-
-    def unsatisfiable(self, entry, dep):
-        """A projection's dependency that can never settle: no receipt, no
-        outbox entry and no journalled operation that could produce one.
-        Generations accepted before 860dc32 wait on discovery projections
-        that were never journalled. A projection is a ticket-ordered
-        membership merge, so it may go ahead, but only when every PR it
-        patches already has a live row on the page or the patch carries a
-        whole row: otherwise the missing projection is what would have added
-        the PR, and the page would go out without it. Nothing else ever
-        treats a missing dependency as met."""
-        if entry.get("kind") != "projection":
-            return False
-        patches = entry.get("patches")
-        if not isinstance(patches, dict) or not isinstance(entry.get("target"), str):
-            return False
-        try:
-            rows = read(self.root / "membership" / (digest(canonical(entry["target"])) + ".json"), {})
-        except (OSError, ValueError):
-            return False
-        if not isinstance(rows, dict):
-            return False
-        for pr, patch in patches.items():
-            row = rows.get(pr)
-            whole = (isinstance(patch, dict) and isinstance(patch.get("ticket"), int)
-                     and isinstance(patch.get("removed"), bool))
-            if not whole and not (isinstance(row, dict) and row.get("removed") is False):
-                return False
-        if self.has_receipt(dep) or (self.root / "outbox" / (dep + ".json")).exists():
-            return False
-        for path in (self.root / "operations").glob("*.json"):
-            try:
-                if any(i.get("id") == dep for i in (read(path) or {}).get("intents", [])):
-                    return False
-            except (OSError, ValueError):
-                return False            # cannot tell: keep waiting
-        return True
 
     def _coalesce(self, entry, result, adapter, deadline=None, lock=None):
         """One publish of a page satisfies every other owed publish of it that
@@ -1083,8 +1045,7 @@ class Store:
                 return
             if entry["failures"] >= 5 or entry["next_attempt"] > time.time():
                 return
-            dependencies = [self.receipt_of(dep) for dep in entry.get("dependencies", [])
-                            if not self.unsatisfiable(entry, dep)]
+            dependencies = [self.receipt_of(dep) for dep in entry.get("dependencies", [])]
             if any(not dep or dep["state"] not in self.SETTLED for dep in dependencies):
                 return
             if entry["kind"] in ("comment", "note"):
