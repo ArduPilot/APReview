@@ -920,6 +920,51 @@ for mode in sorted(by_mode, key=lambda m: -by_mode[m]['n']):
         ('%dm' % max(m['mins'])) if m['mins'] else '&mdash;',
         fmt_tok(m['tok'])))
 
+# ------------------------------------------------- pass context
+# From each finished pass's context.json (review_context.py): how large its
+# context grew and how many model requests re-read it. A pass with no
+# record, or whose logs could not be read, is counted as unknown.
+def quant(v, q):
+    v = sorted(v)
+    return v[int((len(v) - 1) * q)] if v else None
+
+
+passctx = {}
+for sv in SUMMARIES:
+    try:
+        created = json.load(open(os.path.join(DATA, 'runs', sv['name'], 'run.json'))).get('created')
+    except Exception:
+        created = None
+    if not created or datetime.datetime.fromtimestamp(created).astimezone() < cutoff:
+        continue
+    for a in sv.get('attempts', []):
+        # every pass whose guardian ran, as the baseline counts them: one
+        # that died before its final usage record is unknown, not absent
+        if not a.get('pid') or (a.get('state') != 'terminal' and a.get('liveness') != 'dead'):
+            continue
+        key = '%s %s' % (a.get('provider', '?'), a.get('kind', '?'))
+        passctx.setdefault(key, []).append(a.get('context'))
+
+
+def tokn(n):
+    return fmt_tok(n) if n is not None else '&mdash;'
+
+
+from review_context import known as ctx_known, readback as ctx_readback   # noqa: E402
+crows = []
+for key in sorted(passctx):
+    recs = passctx[key]
+    good = [c for c in recs if ctx_known(c)]
+    def col(field, q):
+        return quant([c[field] for c in good], q)
+    crows.append('<tr><td>%s</td><td>%d</td><td>%d</td><td>%s / %s</td><td>%s</td>'
+                 '<td>%s / %s / %s</td><td>%s</td><td>%s</td></tr>' % (
+        html.escape(key), len(recs), len(recs) - len(good),
+        col('requests', .5) if good else '&mdash;', col('requests', .9) if good else '&mdash;',
+        tokn(col('peak_input', .5)), tokn(col('sum_input', .5)), tokn(col('sum_input', .9)),
+        tokn(col('sum_input', .95)), tokn(col('tool_output_chars', .5)),
+        tokn(sum(ctx_readback(c) for c in good)) if good else '&mdash;'))
+
 qline = ('<strong>%.1f%%</strong> of the weekly window used' % cur_quota) if cur_quota is not None \
         else 'no sample available'
 
@@ -1018,6 +1063,17 @@ so their state is read from the published reports instead.</p>
 <th>Median</th><th>Longest</th><th>Tokens</th></tr></thead>
 <tbody>__SROWS__</tbody></table></div>
 
+<h2>Pass context</h2>
+<p class="sub">Per pass kind over the runs shown: model requests, the largest context one
+request sent, and the context summed over all requests, which is what each pass re-reads.
+Tool output is what commands returned into context; read-back is saved oversized output
+read again. Unknown: no record, or logs that could not be read.</p>
+<div class="scroll"><table class="sortable">
+<thead><tr><th>Pass</th><th>Passes</th><th>Unknown</th><th>Requests p50 / p90</th>
+<th>Peak context p50</th><th>Summed context p50 / p90 / p95</th><th>Tool output chars p50</th>
+<th>Read-back chars</th></tr></thead>
+<tbody>__CROWS__</tbody></table></div>
+
 <h2>Runs</h2>
 <div class="scroll"><table class="runs sortable">
 <thead><tr><th>Started</th><th>Mode</th><th>Duration</th><th>Status</th>
@@ -1096,6 +1152,7 @@ doc = (doc.replace('__DAYS__', str(DAYS))
           .replace('__QUEUES__', '\n'.join(queue))
           .replace('__LROWS__', '\n'.join(lrows))
           .replace('__SROWS__', '\n'.join(srows))
+          .replace('__CROWS__', '\n'.join(crows))
           .replace('__ROWS__', '\n'.join(rows))
           .replace('__BOX__', html.escape(BOX)))
 

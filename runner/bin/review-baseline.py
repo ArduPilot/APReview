@@ -10,7 +10,10 @@ from collections import Counter, defaultdict
 import glob
 import json
 import os
+import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def load(path, default=None):
@@ -57,6 +60,7 @@ def runs(data, since):
         # or not. Its minutes run from launch to the last heartbeat: attempt
         # time, including permit and account waits, not model time.
         passes, minutes, first, reviewed = Counter(), Counter(), None, set()
+        contexts = defaultdict(list)
         for job_path in glob.glob(os.path.join(directory, "attempts", "*", "job.json")):
             job = load(job_path, {})
             attempt = os.path.dirname(job_path)
@@ -77,6 +81,14 @@ def runs(data, since):
             end = status.get("heartbeat")
             if end and end > launched:
                 minutes[kind] += (end - launched) / 60
+            # over: terminal, or a guardian killed before its final status
+            from review_guardian import alive
+            try:
+                over = status.get("state") == "terminal" or not alive(status)
+            except Exception:
+                over = False
+            if over:
+                contexts[kind].append(load(os.path.join(attempt, "context.json")))
         out.append(dict(
             name=os.path.basename(directory), mode=run.get("mode", "?"), created=created,
             state=summary.get("state"),
@@ -85,7 +97,27 @@ def runs(data, since):
             outcomes=dict(Counter(v.get("review") for v in state.values())),
             reviewed_because=dict(reasons), passes=dict(passes), reviewed=sorted(reviewed),
             attempt_min={k: round(v) for k, v in minutes.items()},
+            context={k: context_summary(v) for k, v in contexts.items()},
         ))
+    return out
+
+
+def quantile(values, q):
+    values = sorted(values)
+    return values[int((len(values) - 1) * q)] if values else None
+
+
+def context_summary(records):
+    """Per pass kind, from each finished pass's context.json. A pass without
+    one, or whose record is damaged or failed, counts as unknown, never zero."""
+    from review_context import known, readback
+    good = [r for r in records if known(r)]
+    out = dict(passes=len(records), unknown=len(records) - len(good),
+               readback_chars=sum(readback(r) for r in good) if good else None,
+               model_time="unknown")    # attempt minutes include permit, build and account waits
+    for field in ("requests", "peak_input", "sum_input", "tool_output_chars"):
+        for at in (.5, .9, .95):
+            out["%s_p%d" % (field, round(at * 100))] = quantile([r[field] for r in good], at)
     return out
 
 
@@ -152,6 +184,13 @@ def main():
             "%.0fm" % r["launch_latency_min"] if r["launch_latency_min"] is not None else "-",
             ",".join("%s:%d" % kv for kv in sorted(r["passes"].items())) or "-",
             sum(r["github_calls"].values()), ", ".join("%s %d" % kv for kv in list(r["github_calls"].items())[:3])))
+    print("pass context, per run and kind: passes (unknown) requests p50/p90, peak input p50, "
+          "summed input p50/p90, tool output chars p50")
+    for r in report["runs"]:
+        for kind, c in sorted(r["context"].items()):
+            print("  %-40s %-15s %3d (%d) %s/%s %s %s/%s %s" % (
+                r["name"][:40], kind, c["passes"], c["unknown"], c["requests_p50"], c["requests_p90"],
+                c["peak_input_p50"], c["sum_input_p50"], c["sum_input_p90"], c["tool_output_chars_p50"]))
     for k, v in report["other_processes"].items():
         print(k, dict(v))
 

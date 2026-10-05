@@ -42,8 +42,12 @@ def summaries(data):
                 if identity not in seen:
                     seen.add(identity)
                     totals.update(tokens)
+            try:
+                context = read(status_path.parent / "context.json")
+            except (OSError, ValueError):
+                context = None
             attempts.append(dict(status, liveness="live" if alive(status) else "dead",
-                                 sessions=usage))
+                                 sessions=usage, context=context))
             if not identity_readable(status):
                 attempts[-1]["liveness"] = "unknown"
         out.append(dict(summary, name=path.parent.name,

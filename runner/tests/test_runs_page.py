@@ -96,6 +96,36 @@ class Dashboard(unittest.TestCase):
         self.assertIn('<td data-sort="1" class="wrap">1</td>', page)
         self.assertIn(">all<", page)
 
+    def test_pass_context_is_summarised_per_kind_with_unknowns(self):
+        from pathlib import Path
+        directory = Path(self.home) / "review/data/runs/supervisor-ctx"
+        identity = dict(boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                        pid=os.getpid(), start=int(Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]))
+        directory.mkdir(parents=True)
+        (directory / "summary.json").write_text(json.dumps(dict(schema=1, **identity, state="complete",
+                                                                heartbeat=0, prs={})))
+        (directory / "run.json").write_text(json.dumps(dict(mode="all", created=datetime.datetime.now().timestamp() - 600)))
+        figures = dict(input=1, cached_input=2, cache_creation=3, output=4, reasoning=None)
+        contexts = {"a": dict(schema=1, requests=30, peak_input=120000, sum_input=2500000, tool_output_chars=90000,
+                              saved_outputs=dict(readback_chars=4000), error=None, **figures),
+                    "b": dict(schema=1, requests=None, error="ValueError: no usage records"),
+                    "c": None,
+                    # damaged figures with no error are unknown too, and cannot break the page
+                    "d": dict(schema=1, requests="30", error=None, saved_outputs=dict(readback_chars=None))}
+        for name, context in contexts.items():
+            path = directory / "attempts" / name
+            path.mkdir(parents=True)
+            (path / "status.json").write_text(json.dumps(dict(schema=1, **identity, state="terminal",
+                attempt=name, provider="claude", heartbeat=0, pr="pr:owner/repo#1", kind="primary")))
+            if context is not None:
+                (path / "context.json").write_text(json.dumps(context))
+        page = self.build()
+        self.assertIn("<h2>Pass context</h2>", page)
+        # four passes, whether or not a session recorded usage, three of them
+        # unknown; the known one gives the figures
+        self.assertIn("<tr><td>claude primary</td><td>4</td><td>3</td><td>30 / 30</td><td>120.0k</td>"
+                      "<td>2.5M / 2.5M / 2.5M</td><td>90.0k</td><td>4.0k</td></tr>", page)
+
     def supervisor_run(self, name, codex_tokens, claude_tokens, account, home):
         from pathlib import Path
         directory = Path(self.home) / "review/data/runs" / name
