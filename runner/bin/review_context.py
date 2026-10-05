@@ -11,7 +11,7 @@ import json
 import os
 import re
 
-PARSER = "review_context/4"
+PARSER = "review_context/5"
 MAX_BYTES = 256 << 20           # a log larger than this is not parsed
 SAVED = re.compile(r"Full output saved to:?\s*(\S+?\.txt)")
 SHELLS = ("exec", "exec_command", "shell", "local_shell", "container.exec")
@@ -81,7 +81,8 @@ def empty(provider):
                 retries=None,           # not recorded by either CLI
                 compactions=0, saved_outputs=dict(count=0, preview_chars=0, readback_reads=0, readback_chars=0),
                 signals=dict(schema_source_reads=0, schema_checks=0, schema_check_failures=0, schema_repairs=0,
-                             orienting_calls=0, orienting_commands=0, unreadable_commands=0),
+                             orienting_calls=0, orienting_commands=0, unreadable_commands=0,
+                             job_json_reads=0, job_json_read_chars=0, inputs_reads=0, inputs_read_chars=0),
                 subagents=dict(requests=0, sum_input=0, output=0, tool_output_chars=0),
                 **{k: 0 for k in FIELDS})
 
@@ -263,6 +264,52 @@ def commands(text):
     return out
 
 
+# options of the pattern-taking readers that consume the next word
+TAKES_ARG = {"grep": set("ABCDdmf") | {"e"}, "rg": set("ABCgmtTMefErj") | {"e"}, "sed": {"e", "f", "l"},
+             "awk": {"f", "v", "F"}}
+LONG_TAKES_ARG = {"--regexp", "--file", "--glob", "--iglob", "--type", "--type-not", "--type-add", "--max-count",
+                  "--after-context", "--before-context", "--context", "--max-columns", "--expression", "--encoding",
+                  "--replace", "--include", "--exclude", "--exclude-dir", "--max-depth", "--sort", "--sortr",
+                  "--threads", "--field-match-separator", "--path-separator"}
+# long options whose argument is required for one program but optional (=value only) for another
+LONG_TAKES_ARG_BY = {"rg": {"--color", "--colors"}}
+GIVES_PATTERN = {"e", "f"}
+
+
+def reader_files(program, args):
+    """The files a reader command reads: its non-option arguments, less the
+    pattern or script grep, rg, awk and sed take first unless an option
+    (-e, -f, attached or not) supplies it, and less option arguments."""
+    files, pattern_given, k = [], False, 0
+    takes = TAKES_ARG.get(program, set())
+    while k < len(args):
+        word = args[k]
+        k += 1
+        if word == "--":
+            files += args[k:]               # the rest are operands, whatever they look like
+            break
+        if word.startswith("--"):
+            name = word.split("=", 1)[0]
+            if name in ("--regexp", "--file", "--expression"):
+                pattern_given = True
+            if (name in LONG_TAKES_ARG or name in LONG_TAKES_ARG_BY.get(program, ())) and "=" not in word:
+                k += 1
+            continue
+        if word.startswith("-") and len(word) > 1:
+            for n, letter in enumerate(word[1:], 1):
+                if letter in takes:
+                    if letter in GIVES_PATTERN and program in ("grep", "rg", "sed", "awk"):
+                        pattern_given = True
+                    if n == len(word) - 1:
+                        k += 1              # its argument is the next word
+                    break                   # the rest of the cluster is its argument
+            continue
+        files.append(word)
+    if program in ("grep", "rg", "sed", "awk") and not pattern_given and files:
+        files = files[1:]
+    return files
+
+
 def checks_in(words):
     """Whether one command runs review_schema.py's check: the script run
     directly, or as the script argument of a Python interpreter, with only
@@ -359,6 +406,26 @@ def signal(out, name, path, command, text):
                 signals["schema_repairs"] += 1
             signals["schema_checks"] += 1
             signals["schema_check_failures"] += failed
+    # where it read its inputs from: job.json, or the rendered inputs/. A
+    # read is a Read of the file, a reader command given it, or a Python
+    # one-liner that opens job.json; each file read counts, and the call's
+    # output is attributed to what it read
+    read = [path] if name == "Read" and path else []
+    for words in parts:
+        program = os.path.basename(words[0])
+        if program in READERS:
+            read += reader_files(program, words[1:])
+        elif program.startswith("python") and any(
+                "job.json" in w and re.search(r"open\(|read_text\(|json\.load\(", w) for w in words[1:]):
+            read.append("job.json")         # a one-liner that opens it, not one that names it
+    job_reads = [r for r in read if os.path.basename(r) == "job.json"]
+    input_reads = [r for r in read if re.search(r"(^|/)inputs/", r)]
+    if job_reads:
+        signals["job_json_reads"] += len(job_reads)
+        signals["job_json_read_chars"] += len(text)
+    if input_reads:
+        signals["inputs_reads"] += len(input_reads)
+        signals["inputs_read_chars"] += len(text)
     looking = [words for words in parts if orienting(words)]
     signals["orienting_commands"] += len(looking)
     if parts and len(looking) == len(parts):
@@ -568,6 +635,10 @@ def measure(attempt, job):
         result["result_status"] = status.get("result_status") if isinstance(status, dict) else None
     except (OSError, ValueError):
         result["result_status"] = None
+    # the rendered inputs' size on disk, the cost step 4 adds per attempt
+    inputs = os.path.join(attempt, "inputs")
+    result["inputs_bytes"] = sum(os.path.getsize(os.path.join(d, f)) for d, _, names in os.walk(inputs)
+                                 for f in names) if os.path.isdir(inputs) else 0
     return result
 
 

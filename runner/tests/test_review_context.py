@@ -98,7 +98,8 @@ class Claude(unittest.TestCase):
         m = rc.measure(self.dir, {"provider": "claude"})
         self.assertEqual(m["signals"], dict(schema_source_reads=1, schema_checks=4, schema_check_failures=2,
                                             schema_repairs=3, orienting_calls=1, orienting_commands=3,
-                                            unreadable_commands=0))
+                                            unreadable_commands=0, job_json_reads=0, job_json_read_chars=0,
+                                            inputs_reads=0, inputs_read_chars=0))
         self.assertEqual(m["result_status"], "invalid")
 
     def test_only_a_real_check_invocation_counts(self):
@@ -123,6 +124,44 @@ class Claude(unittest.TestCase):
         signals = rc.measure(self.dir, {"provider": "claude"})["signals"]
         self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["schema_repairs"]),
                          (1, 1, 0))
+
+    def test_reads_of_job_json_and_of_the_rendered_inputs(self):
+        def call(ident, name, given, output="x"):
+            return [{"type": "assistant", "message": {"id": "m" + ident, "usage": usage(1, 1, 1), "content": [
+                        {"type": "tool_use", "id": ident, "name": name, "input": given}]}},
+                    {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": ident,
+                                                              "content": output}]}}]
+        rows = (call("a", "Bash", {"command": "python3 -c \"import json;json.load(open('job.json'))\""}, "x" * 10) +
+                call("b", "Read", {"file_path": "/j/inputs/thread.md"}, "y" * 20) +
+                call("c", "Bash", {"command": "sed -n 1,50p inputs/diff/0001.patch inputs/facts.md"}, "z" * 30) +
+                call("d", "Read", {"file_path": "/j/job.json"}, "w" * 40) +
+                call("e", "Read", {"file_path": "inputs/facts.md"}, "v" * 5) +
+                # mentioning, copying or searching for a name is not reading it
+                call("f", "Bash", {"command": "echo job.json inputs/facts.md; cp inputs/result-skeleton.json r.json"}) +
+                call("g", "Bash", {"command": "python3 -c \"print('job.json')\"; rg 'inputs/facts.md' README.md"}) +
+                call("h", "Bash", {"command": "python3 -c \"import shutil;shutil.copy('job.json','x')\""}) +
+                call("i", "Bash", {"command": "python3 -c \"import json;json.loads('\\\"job.json\\\"')\""}))
+        write(self.dir / "payload.log", rows)
+        (self.dir / "inputs").mkdir()
+        (self.dir / "inputs" / "facts.md").write_text("12345")
+        m = rc.measure(self.dir, {"provider": "claude"})
+        signals = m["signals"]
+        self.assertEqual((signals["job_json_reads"], signals["job_json_read_chars"]), (2, 50))
+        self.assertEqual((signals["inputs_reads"], signals["inputs_read_chars"]), (4, 55))
+        self.assertEqual(m["inputs_bytes"], 5)
+
+    def test_reader_arguments_are_parsed_as_the_reader_does(self):
+        cases = {("grep", "-efoo job.json"): ["job.json"], ("sed", "-ne'1,20p' inputs/facts.md"): ["inputs/facts.md"],
+                 ("rg", "--regexp=foo inputs/facts.md"): ["inputs/facts.md"],
+                 ("rg", "-g '*.md' 'inputs/facts.md' ."): ["."], ("grep", "-A 3 pat job.json"): ["job.json"],
+                 ("sed", "-n 1,5p inputs/x.md"): ["inputs/x.md"], ("cat", "-n inputs/a.md inputs/b.md"):
+                     ["inputs/a.md", "inputs/b.md"],
+                 ("rg", "--encoding utf-8 job.json README.md"): ["README.md"],
+                 ("grep", "-- -e job.json"): ["job.json"], ("grep", "--include '*.md' -r x inputs/"): ["inputs/"],
+                 ("grep", "--color foo job.json"): ["job.json"], ("rg", "--color never foo job.json"): ["job.json"]}
+        for (program, args), files in cases.items():
+            words = rc.commands(program + " " + args)[0]
+            self.assertEqual(rc.reader_files(program, words[1:]), files, (program, args))
 
     def test_a_failure_then_a_check_in_one_call_is_a_repair(self):
         rows = [{"type": "assistant", "message": {"id": "m1", "usage": usage(1, 1, 1), "content": [
