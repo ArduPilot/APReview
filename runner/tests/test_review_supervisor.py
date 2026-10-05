@@ -370,12 +370,10 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertNotIn("presentation", supervisor.inputs(dict(candidate(), pr=PR)))
 
     def test_a_new_presentation_is_carried_in_claim_inputs(self):
-        import review_presentation
-        files = {"inputs": "files", "prompts": "v1", "renderer": 1}
+        schema = {"inputs": "json", "prompts": "v2-schema", "renderer": 1}
         supervisor = self._bare_supervisor(time.time() + 3600)
-        supervisor.config["configuration"]["presentation"] = files
-        with patch.dict(review_presentation.KNOWN, inputs=("json", "files"), renderer=(None, 1)):
-            self.assertEqual(supervisor.inputs(dict(candidate(), pr=PR))["presentation"], files)
+        supervisor.config["configuration"]["presentation"] = schema
+        self.assertEqual(supervisor.inputs(dict(candidate(), pr=PR))["presentation"], schema)
 
     def test_a_run_with_a_presentation_this_code_cannot_run_is_refused(self):
         supervisor = self._bare_supervisor(time.time() + 3600)

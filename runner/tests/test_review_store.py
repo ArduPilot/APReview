@@ -296,7 +296,7 @@ class ReviewStore(unittest.TestCase):
 
     def test_passes_carry_only_within_one_presentation(self):
         from review_fixtures import candidate
-        files = {"inputs": "files", "prompts": "v3-files", "renderer": 1}
+        files = {"inputs": "json", "prompts": "v2-schema", "renderer": 1}
         first = complete_claim(self.store, self.lock, run="first", inputs=dict(candidate(), presentation=files))
         for attempt in first["selected"].values():     # a job copies its claim's inputs
             job = read(Path(attempt) / "job.json")
