@@ -9,6 +9,7 @@ import uuid
 import tomllib
 
 import repos
+import review_presentation
 from review_routing import load, route
 from review_store import atomic
 
@@ -69,6 +70,8 @@ def freeze(args):
                          "project": {"id": "project", "project": True}},
         github_writes=env.get("REVIEW_GITHUB_WRITES") == "1",
         project_id=env.get("REVIEW_PROJECT_ID"),
+        # how passes are shown their inputs (review_presentation); legacy unless set
+        presentation=review_presentation.normalise(env.get("REVIEW_PRESENTATION") or None),
         pool_size=int(env.get("REVIEW_POOL_SIZE", "8")),
         heavy_size=int(env.get("REVIEW_HEAVY_SIZE", "4")),
         permit_timeout=float(env.get("REVIEW_PERMIT_TIMEOUT", "120")),
