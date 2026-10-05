@@ -145,6 +145,67 @@ class GC(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertTrue((self.data / "pr34599").exists())
 
+    def test_an_orphan_attempt_is_removed_and_its_worktree_registration_pruned(self):
+        reference = self.data / "references" / "repo"
+        subprocess.run(["git", "init", "-q", str(reference)], check=True)
+        subprocess.run(["git", "-C", str(reference), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+        orphan = self.data / "runs" / "followup-1" / "attempts" / "orphan"
+        subprocess.run(["git", "-C", str(reference), "worktree", "add", "-q", "--detach", str(orphan / "wt")], check=True)
+        write(orphan / "inputs" / "README.md", "x")
+        # a published job, however young or old, is never an orphan
+        published = self.data / "runs" / "followup-1" / "attempts" / "free"
+        age_tree(self.data / "runs" / "followup-1")
+        self.gc("--apply")
+        self.assertFalse(orphan.exists())
+        self.assertTrue((published / "job.json").exists())
+        listed = subprocess.run(["git", "-C", str(reference), "worktree", "list"], capture_output=True, text=True).stdout
+        self.assertNotIn("orphan", listed)
+
+    def test_worktrees_are_pruned_in_configured_reference_clones_too(self):
+        elsewhere = self.root / "clones" / "repo"
+        subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
+        subprocess.run(["git", "-C", str(elsewhere), "-c", "user.email=t@t", "-c", "user.name=t",
+                        "commit", "-q", "--allow-empty", "-m", "base"], check=True)
+        run = self.data / "runs" / "followup-1"
+        write(run / "run.json", {"created": OLD, "configuration": {"reference_clones": {"o/r": str(elsewhere)}}})
+        orphan = run / "attempts" / "orphan2"
+        subprocess.run(["git", "-C", str(elsewhere), "worktree", "add", "-q", "--detach", str(orphan / "wt")], check=True)
+        age_tree(run)
+        self.gc("--apply")
+        self.assertFalse(orphan.exists())
+        listed = subprocess.run(["git", "-C", str(elsewhere), "worktree", "list"], capture_output=True, text=True).stdout
+        self.assertNotIn("orphan2", listed)
+
+    def test_a_clone_is_remembered_after_the_last_run_naming_it_expires(self):
+        elsewhere = self.root / "clones" / "kept"
+        subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
+        run = self.data / "runs" / "followup-1"
+        write(run / "run.json", {"created": OLD, "configuration": {"reference_clones": {"o/r": str(elsewhere)}}})
+        self.gc("--apply")
+        known = json.loads((self.data / "gc" / "references.json").read_text())
+        self.assertIn(str(elsewhere), known)
+        import shutil
+        shutil.rmtree(run)                              # the run naming it is gone
+        self.gc("--apply")
+        self.assertIn(str(elsewhere), json.loads((self.data / "gc" / "references.json").read_text()))
+
+    def test_no_run_expires_when_the_clone_record_cannot_be_saved(self):
+        run = self.data / "runs" / "followup-1"
+        write(run / "run.json", {"created": time.time() - 100 * 86400})
+        age_tree(run)
+        (self.data / "gc").mkdir(parents=True, exist_ok=True)
+        (self.data / "gc" / "references.json.tmp").mkdir()      # the durable write cannot happen
+        report = self.gc("--apply")
+        self.assertTrue(run.exists())
+        self.assertIn("expired run", report["skipped"])
+
+    def test_a_recent_orphan_is_left_alone(self):
+        orphan = self.data / "runs" / "followup-1" / "attempts" / "young"
+        write(orphan / "inputs" / "README.md", "x", age=time.time())
+        self.gc("--apply")
+        self.assertTrue(orphan.exists())
+
     def test_old_runs_keep_the_guardian_proofs(self):
         attempt = self.data / "runs" / "followup-1" / "attempts" / "free"
         write(attempt / "empty.json", {})

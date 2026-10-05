@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import shutil
 import stat
+import subprocess
 import sys
 import time
 
@@ -295,6 +296,62 @@ class GC:
                     self.unresolved = getattr(self, "unresolved", []) + [str(attempt)]
         return bool(getattr(self, "unresolved", None))
 
+    def orphan(self, attempt, pins, processes):
+        """An attempt that preparation began (a worktree, perhaps inputs) but
+        whose job was never published: no claim names it, no guardian ever
+        ran for it, nothing uses it, and it is past the quiet period."""
+        if os.path.realpath(attempt) in pins:
+            return False
+        if any((attempt / name).exists() for name in ("job.json", "launch.json", "status.json", "manager.json")):
+            return False
+        return not newer_than(attempt, self.now - EVIDENCE_DAYS * 86400) and not used(attempt, processes)
+
+    def remember_references(self):
+        """The reference clones whose worktree registrations GC prunes: the
+        default location, every clone a run's configuration names, and every
+        clone seen before, recorded before any run can expire this pass so a
+        retry survives the expiry of the last run naming one."""
+        known = self.data / "gc" / "references.json"
+        references = {Path(p) for p in (load(known, []) or []) if isinstance(p, str)}
+        references |= set(self.data.glob("references/*"))
+        for run in self.data.glob("runs/*/run.json"):
+            clones = (load(run, {}) or {}).get("configuration", {}).get("reference_clones", {})
+            references |= {Path(p) for p in clones.values() if isinstance(p, str)} if isinstance(clones, dict) else set()
+        self.references = sorted(r for r in references if (r / ".git").exists())
+        self.references_saved = True
+        if self.apply:
+            # durably, replacing the old record only whole: if it cannot be
+            # saved, no run expires this pass, so no clone is forgotten
+            try:
+                known.parent.mkdir(parents=True, exist_ok=True)
+                temporary = known.with_name(known.name + ".tmp")
+                with open(temporary, "w") as stream:
+                    stream.write(json.dumps([str(r) for r in self.references]))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, known)
+                directory = os.open(known.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory)
+                finally:
+                    os.close(directory)
+            except OSError as error:
+                self.references_saved = False
+                self.skip("expired run", "reference clones not recorded: %s" % error)
+
+    def prune_worktrees(self):
+        """Drop the reference clones' registrations of worktrees whose
+        directories are gone, as orphan attempts' are; every apply, so a
+        prune that failed last time is retried."""
+        if not self.apply:
+            return
+        for reference in getattr(self, "references", []):
+            try:
+                subprocess.run(["git", "-C", str(reference), "worktree", "prune"],
+                               capture_output=True, timeout=120, check=True)
+            except (OSError, subprocess.SubprocessError):
+                self.skip("orphan attempt", "worktree prune failed in %s" % reference)
+
     def settled_attempt(self, attempt, pins, processes):
         """Why an attempt must stay, or None. Its guardian must have finished
         cleanup (a terminal status): a dead guardian alone does not prove its
@@ -326,13 +383,18 @@ class GC:
             created = load(run / "run.json", {}).get("created") or run.stat().st_mtime
             old = self.now - created > OLD_RUN_DAYS * 86400
             attempts = [a for a in sorted(run.glob("attempts/*")) if a.is_dir() and not a.is_symlink()]
-            if self.now - created > GONE_RUN_DAYS * 86400 and not used(run, processes):
+            if self.now - created > GONE_RUN_DAYS * 86400 and not used(run, processes) \
+                    and getattr(self, "references_saved", True):
                 # the whole run only when every attempt in it could go
                 held = [why for why in (self.settled_attempt(a, pins, processes) for a in attempts) if why]
                 if not held:
                     self.remove("expired run", run)
                     continue
             for attempt in attempts:
+                if self.orphan(attempt, pins, processes):
+                    self.remove("orphan attempt", attempt)
+                    self.orphans = True
+                    continue
                 why = self.settled_attempt(attempt, pins, processes)
                 if why:
                     self.skip("attempt evidence", why)
@@ -488,7 +550,9 @@ def main():
             gc.skip("all rules", "a run or guardian is live, or a launched attempt is unresolved")
         else:
             processes = in_use()
+            gc.remember_references()
             gc.attempts(pinned_attempts(data), processes)
+            gc.prune_worktrees()
             gc.litter(processes)
             gc.scratch(processes)
             gc.venvs(os.path.realpath(a.cache), processes)
