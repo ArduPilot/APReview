@@ -166,7 +166,7 @@ JOB_INPUTS = {"title": "the PR title", "diff": "the PR diff at the pinned head",
               "thread": "the PR conversation", "rules": "the repository's house rules",
               "previous_comment": "our previous comment and its findings",
               "previous_section": "our previous report section",
-              "previous_ids": "previous findings, each needing a disposition",
+              "previous_ids": "our previous findings (what each pass owes them: see its prompt)",
               "primary_result": "the primary review to challenge", "primary_ids": "its finding ids",
               "results": "the primary, cold and validation results", "finding_ids": "every id to settle",
               "fresh_snapshot": "the PR as it is now: title, head, thread", "ci": "CI state"}

@@ -63,6 +63,16 @@ def thread(entries, title):
     return "\n".join(lines)
 
 
+# what each pass owes the previous findings, as its result records it
+OBLIGATION = {
+    "primary": "Every finding below needs a disposition in your result's previous list (RESOLVED, STILL OPEN or DISPUTED).",
+    "cold": "Every finding below needs a disposition in your result's previous list (RESOLVED, STILL OPEN or DISPUTED).",
+    "validation": "Weigh the findings below; the primary and cold reviews give them dispositions and reconciliation "
+                  "settles them, so your result records none.",
+    "reconciliation": "Every finding below is among finding_ids: settle each with an outcome like any other finding.",
+}
+
+
 def previous(job):
     comment = job.get("previous_comment")
     lines = ["# Previous review", ""]
@@ -71,7 +81,7 @@ def previous(job):
     else:
         meta = {k: v for k, v in comment.items() if k not in ("body", "findings")}
         lines += ["Our previous comment: %s" % json.dumps(meta, ensure_ascii=False), "",
-                  "Every finding below needs a disposition (RESOLVED, STILL OPEN or DISPUTED).", ""]
+                  OBLIGATION.get(job.get("kind"), OBLIGATION["primary"]), ""]
         for finding in comment.get("findings") or []:
             extra = {k: v for k, v in finding.items() if k not in ("id", "claim")}
             lines += ["## %s" % finding.get("id"), ""]

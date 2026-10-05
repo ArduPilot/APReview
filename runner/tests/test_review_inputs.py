@@ -164,6 +164,14 @@ class Content(unittest.TestCase):
         self.assertIn('"abc"', text)
         self.assertIn(json.dumps(j["previous_ids"]), text)
 
+    def test_what_each_pass_owes_previous_findings_matches_its_result(self):
+        for kind, needle in (("primary", "previous list"), ("cold", "previous list"),
+                             ("validation", "records none"), ("reconciliation", "settle each with an outcome")):
+            text = render(kind)[0]["previous.md"]
+            self.assertIn(needle, text, kind)
+            if kind in ("validation", "reconciliation"):
+                self.assertNotIn("RESOLVED, STILL OPEN or DISPUTED", text, kind)
+
     def test_facts_carry_every_value_and_nothing_of_the_runner(self):
         files, j = render("primary")
         text = files["facts.md"]
