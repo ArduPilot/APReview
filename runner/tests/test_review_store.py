@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 
 from review_fixtures import BIN, PR, candidate, complete_claim, python, stop, workspace
 from review_lock import region, try_lock
-from review_store import Store, StubAdapter, atomic, delivery_id, digest, read
+from review_store import REVIEW_FIELDS, Store, StubAdapter, atomic, delivery_id, digest, read
 
 
 class Crash(BaseException):
@@ -293,6 +293,33 @@ class ReviewStore(unittest.TestCase):
         # it only needs its reconciliation, and acceptance takes the carried passes
         second = self.finish_with_reconciliation(second)
         self.assertEqual(sorted(self.store.selected(PR, second)), ["cold", "primary", "reconciliation", "validation"])
+
+    def test_passes_carry_only_within_one_presentation(self):
+        from review_fixtures import candidate
+        files = {"inputs": "files", "prompts": "v3-files", "renderer": 1}
+        first = complete_claim(self.store, self.lock, run="first", inputs=dict(candidate(), presentation=files))
+        for attempt in first["selected"].values():     # a job copies its claim's inputs
+            job = read(Path(attempt) / "job.json")
+            atomic(Path(attempt) / "job.json", dict(job, presentation=files))
+        first["status"] = "deferred"
+        del first["selected"]["reconciliation"]
+        self.store.save_claim(self.lock, PR, first)
+        # another presentation: nothing carries, by design
+        other = self.store.allocate(self.lock, PR, "second", "request", candidate())
+        self.assertNotIn("carried", other)
+        other["status"] = "deferred"
+        self.store.save_claim(self.lock, PR, dict(other, inputs=first["inputs"], selected=first["selected"]))
+        # the same presentation: they carry
+        same = self.store.allocate(self.lock, PR, "third", "request", dict(candidate(), presentation=files))
+        self.assertEqual(sorted(same["carried"]), ["cold", "primary", "validation"])
+
+    def test_a_legacy_reuse_key_is_unchanged(self):
+        from review_fixtures import candidate
+        from review_store import review_key
+        inputs = candidate()
+        previous = inputs.get("previous_comment") or {}
+        self.assertEqual(review_key(inputs), digest([[inputs.get(k) for k in REVIEW_FIELDS], digest(inputs.get("thread")),
+                                                    previous.get("id"), previous.get("told_head")]))
 
     def test_nothing_carries_when_the_review_inputs_changed(self):
         from review_fixtures import candidate

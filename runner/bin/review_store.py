@@ -109,8 +109,13 @@ CARRIED = ("primary", "cold", "validation")
 
 def review_key(inputs):
     previous = inputs.get("previous_comment") or {}
-    return digest([[inputs.get(k) for k in REVIEW_FIELDS], digest(inputs.get("thread")),
-                   previous.get("id"), previous.get("told_head")])
+    key = [[inputs.get(k) for k in REVIEW_FIELDS], digest(inputs.get("thread")),
+           previous.get("id"), previous.get("told_head")]
+    # a pass made under one presentation never serves a claim under another;
+    # legacy records none, so its keys are as they always were
+    if inputs.get("presentation"):
+        key.append(inputs["presentation"])
+    return digest(key)
 
 
 def delivery_id(pr, generation, kind, target):
