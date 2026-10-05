@@ -11,7 +11,7 @@ import json
 import os
 import re
 
-PARSER = "review_context/5"
+PARSER = "review_context/6"
 MAX_BYTES = 256 << 20           # a log larger than this is not parsed
 SAVED = re.compile(r"Full output saved to:?\s*(\S+?\.txt)")
 SHELLS = ("exec", "exec_command", "shell", "local_shell", "container.exec")
@@ -48,7 +48,7 @@ def lines(path, damaged):
                 continue
             try:
                 row = json.loads(line)
-            except ValueError:
+            except (ValueError, RecursionError):
                 damaged[0] += 1
                 continue
             if isinstance(row, dict):
@@ -82,7 +82,8 @@ def empty(provider):
                 compactions=0, saved_outputs=dict(count=0, preview_chars=0, readback_reads=0, readback_chars=0),
                 signals=dict(schema_source_reads=0, schema_checks=0, schema_check_failures=0, schema_repairs=0,
                              orienting_calls=0, orienting_commands=0, unreadable_commands=0,
-                             job_json_reads=0, job_json_read_chars=0, inputs_reads=0, inputs_read_chars=0),
+                             job_json_reads=0, job_json_read_chars=0, inputs_reads=0, inputs_read_chars=0,
+                             review_env_sources=0, unattributed_checks=0, signal_errors=0),
                 subagents=dict(requests=0, sum_input=0, output=0, tool_output_chars=0),
                 **{k: 0 for k in FIELDS})
 
@@ -127,7 +128,7 @@ def claude(path):
         child = bool(row.get("parent_tool_use_id"))
         if kind == "assistant":
             usage = message.get("usage") if isinstance(message.get("usage"), dict) else None
-            ident = message.get("id")
+            ident = message.get("id") if isinstance(message.get("id"), str) else None
             # one message is logged once per content block with the same usage;
             # a message without an id cannot be matched, so it counts alone
             if usage is not None and (ident is None or ident not in seen):
@@ -147,45 +148,62 @@ def claude(path):
                     sub["output"] += output
                 else:
                     add_request(out, fresh, cached, written, output)
-            for block in message.get("content") or []:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
-                    given = block.get("input") if isinstance(block.get("input"), dict) else {}
-                    name = block.get("name", "?")
-                    command = given.get("command") if isinstance(given.get("command"), str) else ""
-                    if name == "Bash":
-                        name = label(command)
-                    calls[block.get("id")] = (name, given.get("file_path") if isinstance(given.get("file_path"), str) else None,
-                                              command)
-                    if child:
-                        child_calls.add(block.get("id"))
+            try:
+                record_tool_uses(message, child, calls, child_calls)
+            except Exception:               # a malformed record costs its signals, not the usage
+                out["signals"]["signal_errors"] += 1
         elif kind == "user":
-            content = message.get("content")
-            for block in content if isinstance(content, list) else []:
-                if not isinstance(block, dict) or block.get("type") != "tool_result":
-                    continue
-                body = block.get("content")
-                text = body if isinstance(body, str) else json.dumps(body)
-                ident = block.get("tool_use_id")
-                name, path, command = calls.get(ident, ("?", None, ""))
-                if child or ident in child_calls:
-                    out["subagents"]["tool_output_chars"] += len(text)
-                    continue
-                add_tool(out, name, len(text))
-                signal(out, name, path, command, text)
-                # a read of a saved output, and a new saved output, can be the same call
-                if reads_saved(name, path, command, saved):
-                    out["saved_outputs"]["readback_reads"] += 1
-                    out["saved_outputs"]["readback_chars"] += len(text)
-                found = SAVED.search(text)
-                if found and ("persisted-output" in text or "Output too large" in text):
-                    saved.add(found.group(1))
-                    out["saved_outputs"]["count"] += 1
-                    out["saved_outputs"]["preview_chars"] += len(text)
+            try:
+                record_tool_results(out, message, child, calls, child_calls, saved)
+            except Exception:
+                out["signals"]["signal_errors"] += 1
     if not usage_seen:
         raise ValueError("no usage records")
     if damaged[0]:
         raise Damaged("%d damaged records" % damaged[0], out)
     return out
+
+
+def record_tool_uses(message, child, calls, child_calls):
+    """Note each tool call in an assistant message, for its result."""
+    for block in message.get("content") or []:
+        if isinstance(block, dict) and block.get("type") == "tool_use":
+            given = block.get("input") if isinstance(block.get("input"), dict) else {}
+            name = block.get("name") if isinstance(block.get("name"), str) else "?"
+            command = given.get("command") if isinstance(given.get("command"), str) else ""
+            if name == "Bash":
+                name = label(command)
+            path = given.get("file_path") if isinstance(given.get("file_path"), str) else None
+            calls[block.get("id")] = (name, path, command)
+            if child:
+                child_calls.add(block.get("id"))
+
+
+def record_tool_results(out, message, child, calls, child_calls, saved):
+    """Each tool result in a user message: its size, signals and saved
+    outputs, kept apart for a subagent's."""
+    content = message.get("content")
+    for block in content if isinstance(content, list) else []:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        body = block.get("content")
+        text = body if isinstance(body, str) else json.dumps(body)
+        ident = block.get("tool_use_id")
+        name, path, command = calls.get(ident, ("?", None, ""))
+        if child or ident in child_calls:
+            out["subagents"]["tool_output_chars"] += len(text)
+            continue
+        add_tool(out, name, len(text))
+        safe_signal(out, name, path, command, text)
+        # a read of a saved output, and a new saved output, can be the same call
+        if reads_saved(name, path, command, saved):
+            out["saved_outputs"]["readback_reads"] += 1
+            out["saved_outputs"]["readback_chars"] += len(text)
+        found = SAVED.search(text)
+        if found and ("persisted-output" in text or "Output too large" in text):
+            saved.add(found.group(1))
+            out["saved_outputs"]["count"] += 1
+            out["saved_outputs"]["preview_chars"] += len(text)
 
 
 def reads_saved(name, path, command, saved):
@@ -383,7 +401,16 @@ def orienting(words):
     return first in ORIENTING
 
 
-def signal(out, name, path, command, text):
+def safe_signal(out, *args, **kwargs):
+    """signal(), but an output it cannot read costs that output's signals,
+    never the pass's usage figures."""
+    try:
+        signal(out, *args, **kwargs)
+    except Exception:
+        out["signals"]["signal_errors"] += 1
+
+
+def signal(out, name, path, command, text, verdicts=None):
     """Counts step 3 of the plan watches: reading the schema validator's
     source; running its check, failing it, and checking again after a
     failure (a repair); and looking around (pwd, ls, env, ...), in calls
@@ -394,14 +421,15 @@ def signal(out, name, path, command, text):
             os.path.basename(words[0]) in READERS and any(w.endswith("review_schema.py") for w in words[1:])
             for words in parts):
         signals["schema_source_reads"] += 1
-    invoked = sum(1 for words in parts if checks_in(words))
-    if invoked:
-        # each check that ran printed one verdict line, valid or invalid:/
-        # usage:, in order; a check that printed none (skipped by &&, or
-        # crashed) is not counted, and one after any failure is a repair
-        verdicts = [line.strip().startswith(("invalid:", "usage:")) for line in output_text(text).splitlines()
-                    if line.strip() == "valid" or line.strip().startswith(("invalid:", "usage:"))]
-        for failed in verdicts[:invoked]:
+    if verdicts is None:
+        # one shell (a Claude Bash call): each check that ran printed one
+        # verdict line, in order; one that printed none (skipped by &&, or
+        # crashed) is not counted
+        invoked = sum(1 for words in parts if checks_in(words))
+        verdicts = verdict_lines(output_text(text))[:invoked] if invoked else []
+    if verdicts:
+        # a check after any failure is a repair
+        for failed in verdicts:
             if signals["schema_check_failures"]:
                 signals["schema_repairs"] += 1
             signals["schema_checks"] += 1
@@ -426,6 +454,8 @@ def signal(out, name, path, command, text):
     if input_reads:
         signals["inputs_reads"] += len(input_reads)
         signals["inputs_read_chars"] += len(text)
+    signals["review_env_sources"] += sum(
+        1 for words in parts if words[0] in ("source", ".") and any(w.endswith("review-env.sh") for w in words[1:]))
     looking = [words for words in parts if orienting(words)]
     signals["orienting_commands"] += len(looking)
     if parts and len(looking) == len(parts):
@@ -466,28 +496,108 @@ def js_string(body, quote):
         return body
 
 
-def exec_commands(name, given):
-    """The shell text a Codex tool call ran, all of it, or None when it ran
-    a shell but the command cannot be read."""
+CMD_VALUE = re.compile(r"""\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`)""")
+AFTER_VALUE = re.compile(r"\s*(?:/\*.*?\*/\s*|//[^\n]*\n\s*)*", re.S)
+
+
+def exec_steps(given):
+    """A Codex code-mode script's tool calls in order: ("exec", command or
+    None) for each exec_command, None when its cmd is not a plain literal
+    (a variable, interpolated, or joined with +, comments allowed between);
+    ("poll", session id or None) for each write_stdin."""
+    steps = []
+    for call in re.finditer(r"\b(exec_command|write_stdin)\s*\(", given):
+        kind = "poll" if call.group(1) == "write_stdin" else "exec"
+        opening = re.match(r"\s*\{", given[call.end():])
+        if not opening:
+            steps.append((kind, None))      # its argument is not a literal object: unknown
+            continue
+        rest = given[call.end() + opening.end():]
+        if kind == "poll":
+            session = re.match(r"""[^}]*?["']?\bsession_id["']?\s*:\s*(\d+)""", rest)
+            # the number must be the whole value, as a cmd literal must
+            whole = session and rest[AFTER_VALUE.match(rest, session.end()).end():][:1] in (",", "}")
+            steps.append(("poll", int(session.group(1)) if whole else None))
+            continue
+        key = re.match(r"[^}]*?\bcmd[\"']?\s*:", rest)
+        value = CMD_VALUE.match(rest, key.end()) if key else None
+        if not value:
+            steps.append(("exec", None))
+            continue
+        double, single, template = value.groups()
+        # a literal only when it is the whole value: next comes , or }
+        whole = rest[AFTER_VALUE.match(rest, value.end()).end():][:1] in (",", "}")
+        if not whole or (template is not None and "${" in template):
+            steps.append(("exec", None))
+        else:
+            steps.append(("exec", js_string(double, '"') if double is not None else js_string(single, "'")
+                          if single is not None else js_string(template, "`")))
+    return steps
+
+
+def exec_parse(name, given):
+    """A Codex shell call's commands in order (None for one that cannot be
+    read), or None when it ran a shell but no command can be found."""
     if name not in SHELLS or not isinstance(given, str):
-        return ""
-    if name == "exec" and "exec_command" not in given:
-        return ""                   # only polls a running session: runs no command
-    texts = []
-    for double, single, template in CMD_LITERAL.findall(given):
-        if template and "${" in template:
-            return None             # an interpolated command cannot be read
-        texts.append(js_string(double, '"') if double else js_string(single, "'") if single else js_string(template, "`"))
-    if not texts:
-        try:
-            parsed = json.loads(given)
-            command = parsed.get("cmd") or parsed.get("command") if isinstance(parsed, dict) else None
-            texts = [" ".join(command) if isinstance(command, list) else command] if command else []
-        except ValueError:
-            pass
-    if not texts:
+        return []
+    if name == "exec":
+        if "exec_command" not in given:
+            return []               # only polls a running session: runs no command
+        return [c for kind, c in exec_steps(given) if kind == "exec"] or None
+    found = CMD_LITERAL.search(given)
+    if found:
+        double, single, template = found.groups()
+        return [js_string(double, '"') if double is not None else js_string(single, "'")
+                if single is not None else js_string(template, "`")]
+    try:
+        parsed = json.loads(given)
+        command = parsed.get("cmd") or parsed.get("command") if isinstance(parsed, dict) else None
+        if isinstance(command, list):
+            command = " ".join(command) if all(isinstance(w, str) for w in command) else None
+        return [command] if isinstance(command, str) and command else None
+    except (ValueError, RecursionError):
         return None
-    return "\n".join(t for t in texts if isinstance(t, str))
+
+
+def result_objects(blocks):
+    """The result objects a code-mode call printed, in order, decoded with
+    string-aware JSON boundaries."""
+    decoder, found = json.JSONDecoder(), []
+    for block in blocks:
+        k = block.find("{")
+        while k >= 0:
+            try:
+                value, end = decoder.raw_decode(block, k)
+            except (ValueError, RecursionError):
+                k = block.find("{", k + 1)
+                continue
+            if isinstance(value, dict) and ("session_id" in value or "exit_code" in value):
+                found.append(value)
+            k = block.find("{", end)
+    return found
+
+
+def verdict_lines(text):
+    """The check's verdict lines in text, in order: True for a failure."""
+    return [line.strip().startswith(("invalid:", "usage:")) for line in text.splitlines()
+            if line.strip() == "valid" or line.strip().startswith(("invalid:", "usage:"))]
+
+
+def exec_commands(name, given):
+    """The readable shell text a Codex tool call ran, or None when it ran a
+    shell but none of its commands can be read."""
+    parsed = exec_parse(name, given)
+    if parsed is None:
+        return None
+    readable = [c for c in parsed if isinstance(c, str)]
+    if parsed and not readable:
+        return None
+    return "\n".join(readable)
+
+
+def exec_unreadable(name, given):
+    parsed = exec_parse(name, given)
+    return 1 if parsed is None else sum(1 for c in parsed if c is None)
 
 
 def exec_label(name, given):
@@ -497,7 +607,7 @@ def exec_label(name, given):
     command = exec_commands(name, given)
     if not command:
         return "Bash:?"
-    many = isinstance(given, str) and len(CMD_LITERAL.findall(given)) > 1
+    many = len(exec_parse(name, given) or []) > 1
     return label(command.split("\n")[0]) + ("+" if many else "")
 
 
@@ -509,10 +619,10 @@ def codex(threads):
     out["subagents"] = None                  # child sessions are not linked yet
     by_id, rises, calls, damaged, compacting = {}, [], {}, [0], set()
     for paths in threads:
-        order, previous = [], None           # this thread's usage events
+        order, previous, sessions = [], None, {}      # this thread's usage events and running commands
         for path in paths:
             out["sources"].append(str(path))
-            previous = parse_rollout(path, out, by_id, rises, calls, damaged, order, previous)
+            previous = parse_rollout(path, out, by_id, rises, calls, damaged, order, previous, sessions)
         # a compaction request is the response record whose next usage event
         # is the compaction itself: the total does not include it. Every
         # record keeps its own position, repeats included.
@@ -540,9 +650,10 @@ def codex(threads):
     return out
 
 
-def parse_rollout(path, out, by_id, rises, calls, damaged, order, previous):
+def parse_rollout(path, out, by_id, rises, calls, damaged, order, previous, sessions=None):
     """One rollout's records into the running measurement; returns the last
     cumulative total, for the thread's next rollout."""
+    sessions = {} if sessions is None else sessions
     for row in lines(path, damaged):
         payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
         kind = payload.get("type")
@@ -554,7 +665,7 @@ def parse_rollout(path, out, by_id, rises, calls, damaged, order, previous):
             order.append(("C", None))
         if row.get("type") == "token_usage_record":
             usage = payload.get("usage")
-            ident = payload.get("response_id")
+            ident = payload.get("response_id") if isinstance(payload.get("response_id"), str) else None
             if not isinstance(usage, dict):
                 damaged[0] += 1
                 continue
@@ -581,27 +692,87 @@ def parse_rollout(path, out, by_id, rises, calls, damaged, order, previous):
                 rises.append(last)
                 order.append(("T", None))
             previous = total
-        elif kind in ("custom_tool_call", "function_call"):
-            given = payload.get("input") or payload.get("arguments")
-            command = exec_commands(payload.get("name"), given)
-            if command is None:
-                out["signals"]["unreadable_commands"] += 1      # its signals cannot be counted
-            calls[payload.get("call_id")] = (exec_label(payload.get("name"), given), command or "")
-        elif kind in ("custom_tool_call_output", "function_call_output"):
-            body = payload.get("output")
-            if isinstance(body, list):
-                blocks = [x["text"] for x in body if isinstance(x, dict) and isinstance(x.get("text"), str)]
-            else:
-                blocks = [body if isinstance(body, str) else json.dumps(body)]
-            text = "".join(blocks)
-            if payload.get("call_id") in calls:
-                label, command = calls.pop(payload.get("call_id"))
-                add_tool(out, label, len(text))
-                # each block decoded on its own: a code-mode preamble or
-                # several JSON results must not hide what the command printed
-                signal(out, label, None, command, "\n".join(output_text(b) for b in blocks))
+        elif kind in ("custom_tool_call", "function_call", "custom_tool_call_output", "function_call_output"):
+            try:
+                codex_tool_record(out, kind, payload, calls, sessions)
+            except Exception:               # a malformed record costs its signals, not the usage
+                out["signals"]["signal_errors"] += 1
     return previous
 
+
+def codex_tool_record(out, kind, payload, calls, sessions):
+    """One Codex tool call or output record into the measurement."""
+    if kind in ("custom_tool_call", "function_call"):
+        name, given = payload.get("name"), payload.get("input") or payload.get("arguments")
+        if name == "exec" and isinstance(given, str):
+            steps = exec_steps(given)
+        elif name in SHELLS:
+            steps = [("exec", c) for c in (exec_parse(name, given) or [None])]
+        else:
+            steps = []
+        tool = exec_label(name, given)
+        out["signals"]["unreadable_commands"] += sum(1 for k, c in steps if k == "exec" and c is None)
+        calls[payload.get("call_id")] = (tool, steps)
+        return
+    body = payload.get("output")
+    if isinstance(body, list):
+        blocks = [x["text"] for x in body if isinstance(x, dict) and isinstance(x.get("text"), str)]
+    else:
+        blocks = [body if isinstance(body, str) else json.dumps(body)]
+    text = "".join(blocks)
+    if payload.get("call_id") in calls:
+        tool, steps = calls.pop(payload.get("call_id"))
+        add_tool(out, tool, len(text))
+        command = "\n".join(c for k, c in steps if k == "exec" and isinstance(c, str))
+        signal(out, tool, None, command, "\n".join(output_text(b) for b in blocks),
+               verdicts=codex_verdicts(out, steps, blocks, sessions))
+
+
+def checks_of(command):
+    return sum(1 for words in commands(command or "") if words and checks_in(words))
+
+
+def codex_verdicts(out, steps, blocks, sessions):
+    """The schema-check verdicts one Codex call produced. Attributed only
+    when the call ran a single command or polled a single session: a batch
+    can print its results in completion order, so whose output is whose
+    cannot be told, and its checks are counted as unattributed. A running
+    command's session keeps its command and the verdicts already counted,
+    so a verdict printed mid-run is counted once, whichever chunk has it."""
+    if len(steps) != 1:
+        unattributed = sum(checks_of(c) for k, c in steps if k == "exec")
+        # a session polled ambiguously is attributed no more: its checks not
+        # yet counted are unattributed, once
+        # and a poll whose session cannot be read could be any of them
+        polled = list(sessions) if any(k == "poll" and c is None for k, c in steps) else \
+            list(dict.fromkeys(c for k, c in steps if k == "poll" and c in sessions))
+        for c in polled:
+            state = sessions.pop(c)
+            unattributed += max(0, checks_of(state["command"]) - state["counted"])
+        out["signals"]["unattributed_checks"] += unattributed
+        return []
+    kind, value = steps[0]
+    results = result_objects(blocks)
+    if kind == "exec":
+        if not value:
+            return []
+        state = {"command": value, "counted": 0}
+        if results and isinstance(results[0].get("session_id"), int) and "exit_code" not in results[0]:
+            sessions[results[0]["session_id"]] = state
+    else:
+        state = sessions.get(value)
+        if not state:
+            return []
+    expected = checks_of(state["command"])
+    if not expected:
+        return []
+    if results:
+        output = results[0].get("output") if isinstance(results[0].get("output"), str) else ""
+    else:
+        output = output_text("".join(blocks))
+    fresh = verdict_lines(output)[:expected - state["counted"]]
+    state["counted"] += len(fresh)
+    return fresh
 
 def agree(records, rises):
     """Whether the response records (compaction requests excluded) and the

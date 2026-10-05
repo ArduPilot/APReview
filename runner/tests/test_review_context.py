@@ -99,7 +99,8 @@ class Claude(unittest.TestCase):
         self.assertEqual(m["signals"], dict(schema_source_reads=1, schema_checks=4, schema_check_failures=2,
                                             schema_repairs=3, orienting_calls=1, orienting_commands=3,
                                             unreadable_commands=0, job_json_reads=0, job_json_read_chars=0,
-                                            inputs_reads=0, inputs_read_chars=0))
+                                            inputs_reads=0, inputs_read_chars=0, review_env_sources=0,
+                                            unattributed_checks=0, signal_errors=0))
         self.assertEqual(m["result_status"], "invalid")
 
     def test_only_a_real_check_invocation_counts(self):
@@ -173,6 +174,18 @@ class Claude(unittest.TestCase):
         signals = rc.measure(self.dir, {"provider": "claude"})["signals"]
         self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["schema_repairs"]),
                          (2, 1, 1))
+
+    def test_malformed_tool_records_cost_their_signals_not_the_usage(self):
+        rows = [{"type": "assistant", "message": {"id": "m1", "usage": usage(5, 0, 0), "content": 1}},
+                {"type": "assistant", "message": {"id": [], "usage": usage(3, 0, 0), "content": []}},
+                {"type": "assistant", "message": {"id": {}, "usage": usage(2, 0, 0), "content": []}},
+                {"type": "assistant", "message": {"id": "m2", "usage": usage(7, 0, 0), "content": [
+                    {"type": "tool_use", "id": [], "name": "Bash", "input": {"command": "ls"}}]}},
+                {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": [], "content": "x"}]}}]
+        write(self.dir / "payload.log", rows)
+        m = rc.measure(self.dir, {"provider": "claude"})
+        self.assertEqual((m["error"], m["requests"], m["sum_input"]), (None, 4, 17))
+        self.assertGreater(m["signals"]["signal_errors"], 0)
 
     def test_a_missing_or_empty_log_is_unknown_not_zero(self):
         m = rc.measure(self.dir, {"provider": "claude"})
@@ -330,20 +343,27 @@ class Codex(unittest.TestCase):
 
     def test_code_mode_output_blocks_are_each_decoded(self):
         check = "python3 /x/review_schema.py check r.json"
-        cases = [  # (output blocks, checks, failures, repairs)
-            (["Script completed\nOutput:\n", json.dumps({"exit_code": 1, "output": "invalid: verdict\n"})], 1, 1, 0),
-            (["Script completed\n" + json.dumps({"output": "invalid: verdict\n"}) + "\n"
-              + json.dumps({"output": "valid\n"})], 2, 1, 1),
-            (["Script completed\nOutput:\n", "invalid: verdict\nvalid\n"], 2, 1, 1)]
-        for blocks, checks, failures, repairs in cases:
+        one = 'await tools.exec_command({cmd:"%s"})' % check
+        two = one + "; " + one
+        cases = [  # (script, output blocks, checks, failures, repairs, unattributed)
+            (one, ["Script completed\nOutput:\n", json.dumps({"exit_code": 1, "output": "invalid: verdict\n"})],
+             1, 1, 0, 0),
+            # a batch may print in completion order: its checks are unattributed
+            (two, ["Script completed\n" + json.dumps({"exit_code": 1, "output": "invalid: verdict\n"}) + "\n"
+                   + json.dumps({"exit_code": 0, "output": "checking {} braces\nvalid\n"})], 0, 0, 0, 2),
+            (one, ["Script completed\n" + json.dumps({"exit_code": 0, "output": "checking {} braces\nvalid\n"})],
+             1, 0, 0, 0),
+            # two checks, plain output: whose verdict is whose cannot be told
+            (two, ["Script completed\nOutput:\n", "invalid: verdict\nvalid\n"], 0, 0, 0, 2)]
+        for script, blocks, checks, failures, repairs, unattributed in cases:
             calls = [{"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "k", "name": "exec",
-                       "input": 'await tools.exec_command({cmd:"%s"}); await tools.exec_command({cmd:"%s"})' % (check, check)}},
+                       "input": script}},
                      {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "k",
                        "output": [{"type": "input_text", "text": b} for b in blocks]}}]
             write(self.rollout, codex_rows([tur("r1", 10, 0)] + calls))
             signals = rc.measure(self.dir, self.job)["signals"]
-            self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["schema_repairs"]),
-                             (checks, failures, repairs), blocks)
+            self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["schema_repairs"],
+                              signals["unattributed_checks"]), (checks, failures, repairs, unattributed), blocks)
 
     def test_every_javascript_string_form_of_a_command_is_read(self):
         for literal in ("'python3 /x/review_schema.py check r.json'", '"python3 /x/review_schema.py check r.json"',
@@ -366,6 +386,204 @@ class Codex(unittest.TestCase):
                    "input": 'text(await tools.write_stdin({session_id:9,chars:""}))'}}]
         write(self.rollout, codex_rows([tur("r1", 10, 0)] + calls))
         self.assertEqual(rc.measure(self.dir, self.job)["signals"]["unreadable_commands"], 0)
+
+    def exec_call(self, ident, script, *outputs):
+        return [{"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": ident, "name": "exec",
+                 "input": script}},
+                {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": ident,
+                 "output": [{"type": "input_text", "text": t} for t in outputs]}}]
+
+    def test_a_check_finishing_during_a_poll_keeps_its_verdict(self):
+        check = 'text(await tools.exec_command({cmd:"python3 /x/review_schema.py check r.json"}))'
+        rows = (self.exec_call("a", check, "Script completed\nOutput:\n",
+                               json.dumps({"session_id": 81846, "output": ""})) +
+                self.exec_call("b", 'text(await tools.write_stdin({session_id:81846,chars:""}))',
+                               "Script completed\nOutput:\n",
+                               json.dumps({"exit_code": 1, "output": "invalid: verdict\n"})) +
+                self.exec_call("c", check, json.dumps({"exit_code": 0, "output": "valid\n"})))
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + rows))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["schema_repairs"]),
+                         (2, 1, 1))
+
+    def test_partly_readable_batches_count_what_cannot_be_read(self):
+        mixed = 'text(await tools.exec_command({cmd:"pwd"})); text(await tools.exec_command({cmd:checkCommand}))'
+        joined = 'text(await tools.exec_command({cmd:"pwd" + suffix}))'
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + self.exec_call("a", mixed, "/j")
+                                       + self.exec_call("b", joined, "/j")))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual(signals["unreadable_commands"], 2)
+
+    def test_polls_recount_nothing_and_sessions_keep_their_own_command(self):
+        running = 'text(await tools.exec_command({cmd:"source ~/review/bin/review-env.sh && make"}))'
+        poll = 'text(await tools.write_stdin({session_id:5,chars:""}))'
+        rows = (self.exec_call("a", running, json.dumps({"session_id": 5, "output": ""})) +
+                self.exec_call("b", poll, json.dumps({"session_id": 5, "output": "building"})) +
+                self.exec_call("c", poll, json.dumps({"exit_code": 0, "output": "done"})))
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + rows))
+        self.assertEqual(rc.measure(self.dir, self.job)["signals"]["review_env_sources"], 1)
+        # a finished schema check and a still-running test in one batch: the
+        # test's later failure is not the check's
+        batch = ('text(await tools.exec_command({cmd:"python3 /x/review_schema.py check r.json"})); '
+                 'text(await tools.exec_command({cmd:"pytest -q"}))')
+        rows = (self.exec_call("d", batch, json.dumps({"exit_code": 0, "output": "valid\n"}),
+                               json.dumps({"session_id": 6, "output": ""})) +
+                self.exec_call("e", 'text(await tools.write_stdin({session_id:6,chars:""}))',
+                               json.dumps({"exit_code": 1, "output": "invalid: test data\n"})))
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + rows))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["unattributed_checks"]),
+                         (0, 0, 1))
+
+    def test_a_verdict_printed_mid_run_counts_once(self):
+        check = 'text(await tools.exec_command({cmd:"python3 /x/review_schema.py check r.json; sleep 2"}))'
+        poll = 'text(await tools.write_stdin({session_id:9,chars:""}))'
+        rows = (self.exec_call("a", check, json.dumps({"session_id": 9, "output": "valid\n"})) +
+                self.exec_call("b", poll, json.dumps({"session_id": 9, "output": ""})) +
+                self.exec_call("c", poll, json.dumps({"exit_code": 0, "output": "valid\n"})))
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + rows))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["schema_checks"], signals["schema_check_failures"]), (1, 0))
+
+    def test_calls_without_literal_objects_still_count_as_steps(self):
+        batch = 'await tools.exec_command(opts); await tools.exec_command({cmd:"python3 /x/review_schema.py check r"})'
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + self.exec_call(
+            "a", batch, json.dumps({"exit_code": 1, "output": "invalid: unrelated\n"}),
+            json.dumps({"exit_code": 0, "output": "valid\n"}))))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["schema_checks"], signals["unattributed_checks"]), (0, 1))
+        self.assertEqual([k for k, v in rc.exec_steps(batch)], ["exec", "exec"])
+
+    def test_a_session_polled_in_a_batch_is_attributed_no_more(self):
+        check = 'text(await tools.exec_command({cmd:"python3 /x/review_schema.py check r.json"}))'
+        batch = 'await tools.write_stdin({session_id:3}); await tools.exec_command({cmd:"ls"})'
+        solo = 'await tools.write_stdin({session_id:3})'
+        rows = (self.exec_call("a", check, json.dumps({"session_id": 3, "output": ""})) +
+                self.exec_call("b", batch, json.dumps({"session_id": 3, "output": "valid\n"}),
+                               json.dumps({"exit_code": 0, "output": "x"})) +
+                self.exec_call("c", batch, json.dumps({"session_id": 3, "output": ""}),
+                               json.dumps({"exit_code": 0, "output": "x"})) +
+                self.exec_call("d", solo, json.dumps({"exit_code": 1, "output": "invalid: unrelated\n"})))
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + rows))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["unattributed_checks"]),
+                         (0, 0, 1))
+
+    def test_quoted_or_unreadable_session_keys_in_a_batch_end_attribution_too(self):
+        check = 'text(await tools.exec_command({cmd:"python3 /x/review_schema.py check r.json"}))'
+        for batch in ('await tools.write_stdin({"session_id":3}); await tools.exec_command({cmd:"ls"})',
+                      'await tools.write_stdin({session_id:n}); await tools.exec_command({cmd:"ls"})'):
+            rows = (self.exec_call("a", check, json.dumps({"session_id": 3, "output": ""})) +
+                    self.exec_call("b", batch, json.dumps({"session_id": 3, "output": "valid\n"}),
+                                   json.dumps({"exit_code": 0, "output": "x"})) +
+                    self.exec_call("d", 'await tools.write_stdin({session_id:3})',
+                                   json.dumps({"exit_code": 1, "output": "invalid: x\n"})))
+            write(self.rollout, codex_rows([tur("r1", 10, 0)] + rows))
+            signals = rc.measure(self.dir, self.job)["signals"]
+            self.assertEqual((signals["schema_checks"], signals["unattributed_checks"]), (0, 1), batch)
+        self.assertEqual(rc.exec_steps('write_stdin({"session_id": 4})'), [("poll", 4)])
+        # the same session polled twice in one batch: counted once, no crash
+        twice = 'await tools.write_stdin({session_id:3}); await tools.write_stdin({session_id:3})'
+        rows = (self.exec_call("a", check, json.dumps({"session_id": 3, "output": ""})) +
+                self.exec_call("b", twice, json.dumps({"session_id": 3, "output": ""}),
+                               json.dumps({"exit_code": 0, "output": "valid\n"})))
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + rows))
+        m = rc.measure(self.dir, self.job)
+        self.assertIsNone(m["error"])
+        self.assertEqual(m["signals"]["unattributed_checks"], 1)
+
+    def test_output_that_cannot_be_read_costs_its_signals_not_the_usage(self):
+        nested = "result: " + '{"value":' + "[" * 1100 + "]" * 1100 + "}"
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + self.exec_call(
+            "a", 'await tools.exec_command({cmd:"echo"})', nested)))
+        m = rc.measure(self.dir, self.job)
+        self.assertIsNone(m["error"])
+        self.assertEqual((m["requests"], m["sum_input"]), (1, 10))
+        # malformed shell arguments cost that call's signals, not the usage
+        odd = [{"type": "response_item", "payload": {"type": "function_call", "call_id": "z", "name": "shell",
+                 "arguments": json.dumps({"command": [[]]})}},
+               {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "z", "output": "x"}}]
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + odd))
+        m = rc.measure(self.dir, self.job)
+        self.assertEqual((m["error"], m["requests"]), (None, 1))
+        self.assertEqual(m["signals"]["unreadable_commands"], 1)        # read as unknown, not raised
+        # a response id of the wrong type is no id: the record counts alone
+        for bad in ([], {}):
+            write(self.rollout, codex_rows([tur("r1", 10, 0), {"type": "token_usage_record", "payload": {
+                "response_id": bad, "usage": {"input_tokens": 20, "cached_input_tokens": 0, "output_tokens": 5}}}]))
+            m = rc.measure(self.dir, self.job)
+            self.assertEqual((m["error"], m["requests"], m["sum_input"]), (None, 2, 30), bad)
+        # other malformed shapes in either provider: usage survives every one
+        for args in ({"command": 1}, {"command": True}, {"command": {"x": 1}}):
+            odd = [{"type": "response_item", "payload": {"type": "function_call", "call_id": "z", "name": "shell",
+                     "arguments": json.dumps(args)}},
+                   {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "z", "output": "x"}},
+                   {"type": "response_item", "payload": {"type": "function_call", "call_id": ["bad"], "name": "shell",
+                     "arguments": "{}"}}]
+            write(self.rollout, codex_rows([tur("r1", 10, 0)] + odd))
+            m = rc.measure(self.dir, self.job)
+            self.assertEqual((m["error"], m["requests"]), (None, 1), args)
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + self.exec_call(
+            "a", 'await tools.exec_command({cmd:"echo"})', nested)))
+        from unittest.mock import patch
+        with patch.object(rc, "signal", side_effect=RuntimeError("bad output")):
+            m = rc.measure(self.dir, self.job)
+        self.assertEqual((m["requests"], m["signals"]["signal_errors"]), (1, 1))
+
+    def test_a_session_id_must_be_the_whole_value(self):
+        self.assertEqual(rc.exec_steps("write_stdin({session_id:7 + 1})"), [("poll", None)])
+        self.assertEqual(rc.exec_steps("write_stdin({session_id:7, chars:''})"), [("poll", 7)])
+        self.assertEqual(rc.exec_steps("write_stdin({chars:'', session_id: 7 })"), [("poll", 7)])
+
+    def test_a_literal_with_anything_after_it_is_not_the_command(self):
+        replaced = 'text(await tools.exec_command({cmd:"python3 /x/review_schema.py check r".replace("review_schema", "x")}))'
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + self.exec_call("a", replaced, "invalid: other\n")))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["schema_checks"], signals["unreadable_commands"]), (0, 1))
+
+    def test_unreadable_commands_do_not_hide_or_fake_readable_ones(self):
+        joined = 'text(await tools.exec_command({cmd:"pwd" + suffix}))'
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + self.exec_call("a", joined, "/j")))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["unreadable_commands"], signals["orienting_commands"]), (1, 0))
+        mixed = ('text(await tools.exec_command({cmd:"source ~/review/bin/review-env.sh"})); '
+                 'text(await tools.exec_command({cmd:`cat ${f}`})); text(await tools.exec_command({cmd:c}))')
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + self.exec_call("b", mixed, "x")))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["review_env_sources"], signals["unreadable_commands"]), (1, 2))
+
+    def test_attribution_follows_real_positions_and_own_outputs(self):
+        check = "python3 /x/review_schema.py check r.json"
+        # a batch's checks are unattributed, and the sessions it starts are not
+        # followed, so a later poll attributes nothing
+        batch = 'await tools.exec_command({cmd:dynamic}); await tools.exec_command({cmd:"%s"})' % check
+        rows = (self.exec_call("a", batch, json.dumps({"session_id": 5, "output": ""}),
+                               json.dumps({"exit_code": 0, "output": "valid\n"})) +
+                self.exec_call("b", 'await tools.write_stdin({session_id:5,chars:""})',
+                               json.dumps({"exit_code": 1, "output": "invalid: unrelated\n"})))
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + rows))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["unattributed_checks"]),
+                         (0, 0, 1))
+        # a lone check's session polled inside a batch: unattributed, not guessed
+        rows = (self.exec_call("c", 'await tools.exec_command({cmd:"%s"})' % check, json.dumps({"session_id": 7, "output": ""})) +
+                self.exec_call("d", 'await tools.exec_command({cmd:"false"}); await tools.write_stdin({session_id:7})',
+                               json.dumps({"exit_code": 1, "output": "invalid: unrelated\n"}),
+                               json.dumps({"exit_code": 0, "output": "checking {}\nvalid\n"})))
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + rows))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["unattributed_checks"]),
+                         (0, 0, 1))
+        # a join hidden behind a comment is still unreadable
+        commented = 'await tools.exec_command({cmd:"pwd" /* note */ + suffix})'
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + self.exec_call("e", commented, "/j")))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["unreadable_commands"], signals["orienting_commands"]), (1, 0))
+
+    def test_sourcing_review_env_is_counted(self):
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + self.exec_call(
+            "a", 'text(await tools.exec_command({cmd:"source ~/review/bin/review-env.sh && make"}))', "ok")))
+        self.assertEqual(rc.measure(self.dir, self.job)["signals"]["review_env_sources"], 1)
 
     def test_disagreeing_request_sources_make_the_measurement_unknown(self):
         write(self.rollout, codex_rows([tur("r1", 10, 0), count(15, 10, 0), count(40, 20, 0)]))
