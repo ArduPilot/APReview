@@ -223,6 +223,53 @@ class Codex(unittest.TestCase):
         self.assertIn("disagree", m["error"])
         self.assertFalse(rc.known(m))
 
+    def test_a_compaction_request_missing_from_the_totals_is_not_disagreement(self):
+        # as the CLI writes it: the compaction request has a usage record, then
+        # the total stays put with zero last usage
+        rows = [tur("r1", 100, 0), count(105, 100, 0), tur("r2", 246, 0), {"type": "compacted"},
+                {"type": "event_msg", "payload": {"type": "token_count", "info": {
+                    "total_token_usage": {"total_tokens": 105},
+                    "last_token_usage": {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}}}},
+                tur("r3", 20, 0), count(130, 20, 0)]
+        write(self.rollout, codex_rows(rows))
+        m = rc.measure(self.dir, self.job)
+        self.assertIsNone(m["error"])
+        self.assertEqual((m["requests"], m["sum_input"], m["compactions"]), (3, 366, 1))
+        self.assertTrue(m["warnings"])
+        # without the compaction, the same gap is disagreement
+        write(self.rollout, codex_rows([r for r in rows if r != {"type": "compacted"}]))
+        self.assertIn("disagree", rc.measure(self.dir, self.job)["error"])
+        # a compaction elsewhere does not excuse an ordinary request the totals describe wrongly
+        wrong = [tur("a", 100, 0), count(105, 100, 0), tur("c", 20, 0), {"type": "compacted"},
+                 tur("b", 999, 0), count(130, 20, 0)]
+        write(self.rollout, codex_rows(wrong))
+        self.assertIn("disagree", rc.measure(self.dir, self.job)["error"])
+
+    def test_a_repeated_record_keeps_its_place_before_a_compaction(self):
+        # b is followed by a repeat of a, not by the compaction: b is not excused
+        rows = [tur("a", 100, 0), count(105, 100, 0), tur("b", 50, 0), tur("a", 100, 0), {"type": "compacted"}]
+        write(self.rollout, codex_rows(rows))
+        self.assertIn("disagree", rc.measure(self.dir, self.job)["error"])
+
+    def test_another_threads_compaction_excuses_nothing(self):
+        write(self.dir / "payload.log", [{"type": "thread.started", "thread_id": "T1"},
+                                         {"type": "thread.started", "thread_id": "T2"}])
+        write(self.rollout, codex_rows([tur("a", 100, 0), count(105, 100, 0), tur("b", 50, 0)]))
+        write(self.home / "sessions/2026/10/05/rollout-2026-10-05T08-00-00-T2.jsonl",
+              codex_rows([{"type": "compacted"}, tur("d", 30, 0), count(40, 30, 0)]))
+        self.assertIn("disagree", rc.measure(self.dir, self.job)["error"])
+
+    def test_a_resumed_rollout_carries_the_running_total(self):
+        zero = {"type": "event_msg", "payload": {"type": "token_count", "info": {
+            "total_token_usage": {"total_tokens": 105},
+            "last_token_usage": {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}}}}
+        write(self.rollout, codex_rows([tur("a", 100, 0), count(105, 100, 0)]))
+        write(self.home / "sessions/2026/10/06/rollout-2026-10-06T01-00-00-T1.jsonl",
+              codex_rows([tur("c", 246, 0), {"type": "compacted"}, zero, tur("b", 20, 0), count(130, 20, 0)]))
+        m = rc.measure(self.dir, self.job)
+        self.assertIsNone(m["error"])
+        self.assertEqual(m["requests"], 3)
+
     def test_null_usage_or_payload_damage_is_not_a_zero(self):
         write(self.rollout, codex_rows([{"type": "token_usage_record", "payload": {
             "response_id": "r1", "usage": {"input_tokens": None, "cached_input_tokens": 0}}}]))

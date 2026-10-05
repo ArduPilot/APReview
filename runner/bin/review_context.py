@@ -11,7 +11,7 @@ import json
 import os
 import re
 
-PARSER = "review_context/2"
+PARSER = "review_context/3"
 MAX_BYTES = 256 << 20           # a log larger than this is not parsed
 SAVED = re.compile(r"Full output saved to:?\s*(\S+?\.txt)")
 SHELLS = ("exec", "exec_command", "shell", "local_shell", "container.exec")
@@ -299,59 +299,23 @@ def exec_label(name, given):
     return label(first) + ("+" if len(commands) > 1 else "")
 
 
-def codex(paths):
+def codex(threads):
+    """threads: each thread's rollouts, oldest first. The running total and
+    the order of usage events carry across one thread's rollouts (a resume)
+    and start again for the next thread."""
     out = empty("codex")
     out["subagents"] = None                  # child sessions are not linked yet
-    by_id, rises, calls, damaged = {}, [], {}, [0]
-    for path in paths:
-        out["sources"].append(str(path))
-        previous = None
-        for row in lines(path, damaged):
-            payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
-            kind = payload.get("type")
-            if row.get("type") == "session_meta":
-                out["session_id"] = out["session_id"] or payload.get("id")
-                out["cli_version"] = out["cli_version"] or payload.get("cli_version")
-            if kind in ("compacted", "context_compacted") or row.get("type") == "compacted":
-                out["compactions"] += 1
-            if row.get("type") == "token_usage_record":
-                usage = payload.get("usage")
-                ident = payload.get("response_id")
-                if not isinstance(usage, dict):
-                    damaged[0] += 1
-                    continue
-                check_usage(usage, damaged)     # every record, kept or not
-                if ident is None:
-                    ident = "unidentified-%d" % len(by_id)
-                    out["warnings"].append("usage record without response id")
-                by_id.setdefault(ident, usage)
-            elif kind == "token_count" and isinstance(payload.get("info"), dict):
-                # a request shows as a change in the cumulative total; a fall
-                # is a reset (a resume), still a request; the same total again
-                # is a repeated record
-                info = payload["info"]
-                totals = info.get("total_token_usage")
-                last = info.get("last_token_usage")
-                if totals is None and last is None:
-                    continue                # a rate-limit-only record
-                total = totals.get("total_tokens") if isinstance(totals, dict) else None
-                if not count_ok(total) or not isinstance(last, dict):
-                    damaged[0] += 1
-                    continue
-                check_usage(last, damaged)
-                if total != previous:
-                    rises.append(last)
-                previous = total
-            elif kind in ("custom_tool_call", "function_call"):
-                calls[payload.get("call_id")] = exec_label(payload.get("name"), payload.get("input") or payload.get("arguments"))
-            elif kind in ("custom_tool_call_output", "function_call_output"):
-                body = payload.get("output")
-                if isinstance(body, list):
-                    text = "".join(x.get("text", "") for x in body if isinstance(x, dict) and isinstance(x.get("text"), str))
-                else:
-                    text = body if isinstance(body, str) else json.dumps(body)
-                if payload.get("call_id") in calls:
-                    add_tool(out, calls.pop(payload.get("call_id")), len(text))
+    by_id, rises, calls, damaged, compacting = {}, [], {}, [0], set()
+    for paths in threads:
+        order, previous = [], None           # this thread's usage events
+        for path in paths:
+            out["sources"].append(str(path))
+            previous = parse_rollout(path, out, by_id, rises, calls, damaged, order, previous)
+        # a compaction request is the response record whose next usage event
+        # is the compaction itself: the total does not include it. Every
+        # record keeps its own position, repeats included.
+        compacting |= {ident for (what, ident), (after, _) in zip(order, order[1:])
+                       if what == "U" and after == "C"}
     requests = list(by_id.values()) or rises
     if not requests:
         raise ValueError("no usage records")
@@ -363,15 +327,78 @@ def codex(paths):
     if damaged[0]:
         raise Damaged("%d damaged records" % damaged[0], out)
     if by_id and rises:
-        # both sources describe the same requests in the same order; where
-        # they differ, which is right cannot be told: the figures stay as
-        # found, but nothing reports them as known
-        pairs = zip(by_id.values(), rises)
-        if len(rises) != len(by_id) or any(
-                a.get(k) != b.get(k) for a, b in pairs for k in ("input_tokens", "cached_input_tokens", "output_tokens")):
-            raise Damaged("request sources disagree: %d usage records, %d total changes"
-                          % (len(by_id), len(rises)), out)
+        ordinary = [usage for ident, usage in by_id.items() if ident not in compacting]
+        if not agree(ordinary, rises):
+            # which source is right cannot be told: the figures stay as
+            # found, but nothing reports them as known
+            raise Damaged("request sources disagree: %d usage records (%d compacting), %d total changes"
+                          % (len(by_id), len(compacting), len(rises)), out)
+        if compacting:
+            out["warnings"].append("%d compaction requests missing from totals" % len(compacting))
     return out
+
+
+def parse_rollout(path, out, by_id, rises, calls, damaged, order, previous):
+    """One rollout's records into the running measurement; returns the last
+    cumulative total, for the thread's next rollout."""
+    for row in lines(path, damaged):
+        payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+        kind = payload.get("type")
+        if row.get("type") == "session_meta":
+            out["session_id"] = out["session_id"] or payload.get("id")
+            out["cli_version"] = out["cli_version"] or payload.get("cli_version")
+        if kind in ("compacted", "context_compacted") or row.get("type") == "compacted":
+            out["compactions"] += 1
+            order.append(("C", None))
+        if row.get("type") == "token_usage_record":
+            usage = payload.get("usage")
+            ident = payload.get("response_id")
+            if not isinstance(usage, dict):
+                damaged[0] += 1
+                continue
+            check_usage(usage, damaged)     # every record, kept or not
+            if ident is None:
+                ident = "unidentified-%d" % len(by_id)
+                out["warnings"].append("usage record without response id")
+            order.append(("U", ident))
+            by_id.setdefault(ident, usage)
+        elif kind == "token_count" and isinstance(payload.get("info"), dict):
+            # a request shows as a change in the cumulative total; a fall is
+            # a reset, still a request; the same total again is a repeat
+            info = payload["info"]
+            totals = info.get("total_token_usage")
+            last = info.get("last_token_usage")
+            if totals is None and last is None:
+                continue                    # a rate-limit-only record
+            total = totals.get("total_tokens") if isinstance(totals, dict) else None
+            if not count_ok(total) or not isinstance(last, dict):
+                damaged[0] += 1
+                continue
+            check_usage(last, damaged)
+            if total != previous:
+                rises.append(last)
+                order.append(("T", None))
+            previous = total
+        elif kind in ("custom_tool_call", "function_call"):
+            calls[payload.get("call_id")] = exec_label(payload.get("name"), payload.get("input") or payload.get("arguments"))
+        elif kind in ("custom_tool_call_output", "function_call_output"):
+            body = payload.get("output")
+            if isinstance(body, list):
+                text = "".join(x.get("text", "") for x in body if isinstance(x, dict) and isinstance(x.get("text"), str))
+            else:
+                text = body if isinstance(body, str) else json.dumps(body)
+            if payload.get("call_id") in calls:
+                add_tool(out, calls.pop(payload.get("call_id")), len(text))
+    return previous
+
+
+def agree(records, rises):
+    """Whether the response records (compaction requests excluded) and the
+    cumulative total changes describe the same requests, one for one, in
+    order, with the same figures."""
+    keys = ("input_tokens", "cached_input_tokens", "output_tokens")
+    return len(records) == len(rises) and all(
+        a.get(k) == b.get(k) for a, b in zip(records, rises) for k in keys)
 
 
 def failed(provider, error, retry, partial=None):
@@ -403,7 +430,7 @@ def measure(attempt, job):
             if missing:
                 # every thread the pass ran must be read, or it is undercounted
                 return failed(provider, "no rollout for %s" % ",".join(missing), True)
-            return codex([p for t in threads for p in found[t]])
+            return codex([found[t] for t in threads])
         return failed(provider, "unknown provider %r" % provider, False)
     except Damaged as error:
         return failed(provider, "Damaged: %s" % error.args[0], False, error.args[1])
