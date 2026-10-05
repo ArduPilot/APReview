@@ -3,21 +3,23 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 
 IDENTITY = ("run", "job", "attempt", "generation", "repository", "node_id",
             "number", "head", "base", "merge_base", "kind")
 FILES = {"primary": "review.json", "cold": "cold.json", "validation": "validate.json",
          "reconciliation": "final.json"}
 MAX_BYTES = 4 * 1024 * 1024
+MAX_DEPTH, MAX_STRING, MAX_ITEMS = 20, 131072, 4096
 
 
 def bounded(value, depth=0):
-    if depth > 20:
+    if depth > MAX_DEPTH:
         raise ValueError("result nesting")
-    if isinstance(value, str) and len(value) > 131072:
+    if isinstance(value, str) and len(value) > MAX_STRING:
         raise ValueError("result string too long")
     if isinstance(value, (list, dict)):
-        if len(value) > 4096:
+        if len(value) > MAX_ITEMS:
             raise ValueError("result collection too long")
         for item in (value.values() if isinstance(value, dict) else value):
             bounded(item, depth + 1)
@@ -186,3 +188,119 @@ def canned(job):
             for ident in job.get("finding_ids", [])], section_md="Stub review.",
                       comment_md="Stub review.", summary="Stub complete")
     return result
+
+
+# What a result looks like, as data, for passes to read (describe()) and
+# start from (skeleton()). validate() above stays the authority; tests check
+# the two agree.
+TEXT, NONEMPTY, INT, BOOL = "string", "non-empty string", "integer", "true or false"
+SHAPES = {
+    "evidence": {"commands": "list of command",
+                 "artifacts": "list of non-empty paths relative to the job directory, without ..",
+                 "configuration": TEXT},
+    "command": {"command": TEXT, "exit": INT, "observed": TEXT},
+    "location": {"file": NONEMPTY, "line": "integer, 1 or more", "side": ("old", "new"), "revision": NONEMPTY},
+    "finding": {"id": "<pass>:<name>, e.g. primary:F1", "kind": ("BUG", "ISSUE", "NOTE"), "severity": NONEMPTY,
+                "claim": NONEMPTY, "location": 'location, or {"non_line_specific": true}',
+                "status": ("VERIFIED", "UNCONFIRMED"), "evidence": "evidence"},
+    "previous": {"id": "a previous_ids entry", "disposition": ("RESOLVED", "STILL OPEN", "DISPUTED"),
+                 "rationale": NONEMPTY},
+    "validation outcome": {"id": "a primary_ids entry", "outcome": ("CONFIRM", "ADJUST", "REFUTE"),
+                           "evidence": "evidence"},
+    "final outcome": {"id": "a finding_ids entry", "blocking": BOOL, "actionable": BOOL,
+                      "disposition": ("retained", "adjusted", "refuted", "merged"),
+                      "rationale": "string; non-empty unless retained", "evidence": "evidence",
+                      "target": "optional; required when merged: the surviving finding's id"},
+}
+COMMON = {"schema": "1", **{k: "copied exactly from job.json, same JSON type" for k in IDENTITY},
+          "status": ("complete", "incomplete"), "gaps": "list of non-empty strings",
+          "heavy": BOOL}
+VERDICTS = ("ACCEPT", "COMMENT", "REQUEST CHANGES")     # APPROVE is read as ACCEPT
+RESULTS = {
+    "primary": {"verdict": VERDICTS, "findings": "list of finding",
+                "clean": "list of strings", "previous": "list of previous, one per previous_ids entry"},
+    "validation": {"outcomes": "list of validation outcome, one per primary_ids entry",
+                   "new": "list of finding (ids validation:...)"},
+    "reconciliation": {"verdict": VERDICTS,
+                       "outcomes": "list of final outcome, one per finding_ids entry",
+                       "section_md": NONEMPTY, "comment_md": NONEMPTY, "summary": NONEMPTY},
+}
+RESULTS["cold"] = RESULTS["primary"]
+LIMITS = ("No other fields: unknown fields are rejected, in nested objects too.",
+          "Finding and outcome ids are unique within their list.",
+          "Strings at most %d characters, lists and objects at most %d entries, nesting at most %d deep, "
+          "and the whole file at most %d bytes." % (MAX_STRING, MAX_ITEMS, MAX_DEPTH, MAX_BYTES),
+          "status incomplete needs at least one gap saying why.")
+RULES = {
+    "primary": [*LIMITS, "Every previous_ids entry gets exactly one previous disposition."],
+    "validation": [*LIMITS, "Every primary_ids entry gets exactly one outcome."],
+    "reconciliation": [*LIMITS,
+                       "Only a complete reconciliation is accepted: incomplete passes the check but is never used.",
+                       "Every finding_ids entry gets exactly one outcome; merged ones name a target, without cycles.",
+                       "verdict follows from the outcomes not refuted or merged: any blocking gives "
+                       "REQUEST CHANGES, else any actionable gives COMMENT, else ACCEPT."],
+}
+for kind in ("primary", "reconciliation"):
+    RULES[kind].append('verdict "APPROVE" is read as "ACCEPT".')
+RULES["cold"] = RULES["primary"]
+
+
+def describe(kind):
+    """schema.md for one pass kind: its fields, then the shapes they use."""
+    def line(name, spec):
+        if isinstance(spec, tuple):
+            spec = "one of " + ", ".join('"%s"' % v for v in spec)
+        return "- `%s`: %s" % (name, spec)
+    out = ["# The %s result (%s)" % (kind, FILES[kind]), "",
+           "Fields, all required unless marked optional:", ""]
+    out += [line(k, v) for k, v in {**COMMON, **RESULTS[kind]}.items()]
+    out += ["", "Rules:", ""] + ["- " + rule for rule in RULES[kind]]
+    review = ("finding", "previous", "location", "evidence", "command")
+    used = {"primary": review, "cold": review,
+            "validation": ("validation outcome", "finding", "location", "evidence", "command"),
+            "reconciliation": ("final outcome", "evidence", "command")}[kind]
+    for shape in used:
+        out += ["", "## " + shape, ""] + [line(k, v) for k, v in SHAPES[shape].items()]
+    return "\n".join(out) + "\n"
+
+
+def skeleton(job):
+    """A result to start from: identity filled in, one entry per id the pass
+    must cover, and every decision left null or empty, so it fails validation
+    until the pass has made them all."""
+    result = {k: job[k] for k in IDENTITY}
+    result.update(schema=1, status=None, gaps=[], heavy=None)
+    kind = job["kind"]
+    if kind in ("primary", "cold"):
+        result.update(verdict=None, findings=[], clean=[],
+                      previous=[{"id": i, "disposition": None, "rationale": ""} for i in job.get("previous_ids", [])])
+    elif kind == "validation":
+        result.update(outcomes=[{"id": i, "outcome": None, "evidence": None} for i in job.get("primary_ids", [])],
+                      new=[])
+    else:
+        result.update(verdict=None, section_md="", comment_md="", summary="",
+                      outcomes=[{"id": i, "blocking": None, "actionable": None, "disposition": None,
+                                 "rationale": "", "evidence": None} for i in job.get("finding_ids", [])])
+    return result
+
+
+def main(argv):
+    """review_schema.py check RESULT [JOB]: validate a result file against its
+    job (job.json in the result's directory unless given)."""
+    if len(argv) not in (2, 3) or argv[0] != "check":
+        print("usage: review_schema.py check RESULT [JOB]", file=sys.stderr)
+        return 2
+    result = Path(argv[1])
+    job_path = Path(argv[2]) if len(argv) == 3 else result.parent / "job.json"
+    try:
+        job = json.loads(job_path.read_text())
+        read_result(result, job)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        print("invalid: %s" % error)
+        return 1
+    print("valid")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
