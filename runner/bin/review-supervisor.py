@@ -94,16 +94,13 @@ class Supervisor:
 
             now = datetime.now(ZoneInfo("Australia/Canberra"))
             import repos
-            from review_inference import COMMANDS, PROMPTS
+            import review_presentation
 
             self.configuration.setdefault("repos", repos.load())
-            self.configuration.setdefault(
-                "prompts",
-                {
-                    kind: (COMMANDS / ("review-" + name + ".md")).read_text()
-                    for kind, name in PROMPTS.items()
-                },
-            )
+            # the presentation and the prompt texts of its variant are frozen together
+            presentation = review_presentation.normalise(self.configuration.get("presentation"))
+            self.configuration["presentation"] = presentation
+            self.configuration.setdefault("prompts", review_presentation.prompts(presentation["prompts"]))
             self.configuration.setdefault("date", now.date().isoformat())
             self.configuration.setdefault("stamp", now.strftime("%Y-%m-%d_%H-%M-%S"))
         self.last_save = 0
@@ -128,10 +125,16 @@ class Supervisor:
         self.adapter = None
         self.discovery = None
 
+    def presentation(self):
+        """This run's frozen presentation; legacy for a run that predates them."""
+        import review_presentation
+        return review_presentation.normalise((self.config.get("configuration") or {}).get("presentation"))
+
     def initialize(self):
         if self.config is not None:
             if self.config.get("schema") != 1 or self.config.get("data") != str(self.store.root):
                 raise ValueError("resume configuration uses a different store or schema")
+            self.presentation()             # a presentation this code cannot run is refused
             return
         candidates, admission, wall, request, mode, pool, permit_timeout = self.initial
         if candidates is None:
@@ -177,6 +180,7 @@ class Supervisor:
             "plain_guardians": os.environ.get("REVIEW_GUARDIAN_PLAIN") == "1",
             "observation": self.store.ticket(),
         }
+        self.presentation()
         atomic(self.directory / "run.json", self.config)
 
     def phase_name(self, phase):
@@ -413,7 +417,14 @@ class Supervisor:
         )
 
     def inputs(self, candidate):
-        return {k: v for k, v in candidate.items() if k not in ("live", "stub")}
+        import review_presentation
+        inputs = {k: v for k, v in candidate.items() if k not in ("live", "stub", "presentation")}
+        # recorded only when not legacy, so legacy claims are unchanged; a
+        # recorded presentation is fenced by the input digest and reuse key
+        presentation = review_presentation.recorded(self.presentation())
+        if presentation:
+            inputs["presentation"] = presentation
+        return inputs
 
     def closing(self):
         return (self.directory / "abort.json").exists() or time.time() >= self.config["admission_deadline"]

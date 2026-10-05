@@ -363,6 +363,31 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.owned, supervisor.next_claim, supervisor.backoff = {}, {}, {}
         return supervisor
 
+    def test_a_legacy_run_claims_unchanged_inputs(self):
+        supervisor = self._bare_supervisor(time.time() + 3600)
+        self.assertNotIn("presentation", supervisor.inputs(dict(candidate(), pr=PR, stub={})))
+        supervisor.config["configuration"]["presentation"] = {"inputs": "json", "prompts": "v1", "renderer": None}
+        self.assertNotIn("presentation", supervisor.inputs(dict(candidate(), pr=PR)))
+
+    def test_a_new_presentation_is_carried_in_claim_inputs(self):
+        import review_presentation
+        files = {"inputs": "files", "prompts": "v1", "renderer": 1}
+        supervisor = self._bare_supervisor(time.time() + 3600)
+        supervisor.config["configuration"]["presentation"] = files
+        with patch.dict(review_presentation.KNOWN, inputs=("json", "files"), renderer=(None, 1)):
+            self.assertEqual(supervisor.inputs(dict(candidate(), pr=PR))["presentation"], files)
+
+    def test_a_run_with_a_presentation_this_code_cannot_run_is_refused(self):
+        supervisor = self._bare_supervisor(time.time() + 3600)
+        supervisor.config.update(schema=1, data=str(self.store.root))
+        supervisor.config["configuration"]["presentation"] = {"inputs": "files", "prompts": "v9", "renderer": 7}
+        with self.assertRaises(ValueError):
+            supervisor.initialize()             # resuming it
+        with self.assertRaises(ValueError):
+            SUPERVISOR.Supervisor(self.store.root, self.root / "new-run",
+                                  configuration={"presentation": {"inputs": "nope", "prompts": "v1", "renderer": None},
+                                                 "repos": {}})
+
     def test_damage_found_during_admission_defers_only_that_pr(self):
         supervisor = self._bare_supervisor(time.time() + 3600)
         supervisor.claim_candidate = Mock(side_effect=KeyError("request"))
