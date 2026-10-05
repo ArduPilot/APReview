@@ -94,6 +94,10 @@ def _prepare(store, path, job, config):
     env["CLAUDE_CONFIG_DIR" if job["provider"] == "claude" else "CODEX_HOME"] = provider["home"]
     prompt = config.get("prompts", {}).get(job["kind"])
     if prompt is None:
+        import review_presentation
+        # only a legacy run may fall back to the live prompt files
+        if not review_presentation.legacy(config.get("presentation")):
+            raise KeyError("prompt for %s not frozen in the run" % job["kind"])
         prompt = (COMMANDS / ("review-" + PROMPTS[job["kind"]] + ".md")).read_text()
     prompt += (
         "\nRead "

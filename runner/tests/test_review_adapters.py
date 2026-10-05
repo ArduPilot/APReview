@@ -1454,6 +1454,17 @@ class RealInference(unittest.TestCase):
                 granted_directories=[str(self.root / "granted")],
             )
 
+    def test_only_a_legacy_run_falls_back_to_the_live_prompt_files(self):
+        import review_presentation
+        config = dict(self.config, prompts={}, presentation={"inputs": "files", "prompts": "v1", "renderer": 1})
+        path = self.root / "noprompt"
+        path.mkdir()
+        job = dict(candidate(), run="run", job="job", attempt="noprompt", generation=1, kind="primary",
+                   provider="claude", head=self.head, env={}, rules="")
+        with patch.dict(review_presentation.KNOWN, inputs=("json", "files"), renderer=(None, 1)):
+            with self.assertRaises(OSError):
+                prepare(self.store, path, job, config)
+
     def test_fake_clis_use_pinned_worktree_frozen_options_and_environment(self):
         from review_schema import read_result, FILES
 
