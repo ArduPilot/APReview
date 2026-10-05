@@ -95,17 +95,20 @@ def _prepare(store, path, job, config):
     import review_presentation
     presentation = review_presentation.normalise(config.get("presentation"))
     result_file = path / __import__("review_schema").FILES[job["kind"]]
-    if presentation["renderer"] == 1:
+    if presentation["renderer"]:
         mkdir(path / "evidence")
-        render_inputs(path, job, result_file)
+        render_inputs(path, job, result_file, presentation["renderer"])
     prompt = config.get("prompts", {}).get(job["kind"])
     if prompt is None:
         # only a legacy run may fall back to the live prompt files
         if presentation != review_presentation.LEGACY:
             raise KeyError("prompt for %s not frozen in the run" % job["kind"])
         prompt = (COMMANDS / ("review-" + PROMPTS[job["kind"]] + ".md")).read_text()
-    prompt += "\nRead " + str(path / "job.json") + ". Write " + str(result_file) + ".\n"
-    if presentation["renderer"] == 1:
+    if presentation["inputs"] == "files":
+        prompt += "\nRead " + str(path / "inputs" / "README.md") + ". Write " + str(result_file) + ".\n"
+    else:
+        prompt += "\nRead " + str(path / "job.json") + ". Write " + str(result_file) + ".\n"
+    if presentation["renderer"]:
         prompt += "Check your result: " + check_command(result_file) + "\n"
     else:
         prompt += "Schema validator: " + str(BIN / "review_schema.py") + "\n"
@@ -171,7 +174,8 @@ JOB_INPUTS = {"title": "the PR title", "diff": "the PR diff at the pinned head",
 RUNNER_FIELDS = {"schema", "run", "job", "attempt", "generation", "kind", "provider", "account",
                  "exclusive_account", "account_slots", "input_digest", "abort_path", "registered", "env",
                  "wall_timeout", "pool_size", "permit_timeout", "command", "cli_command", "stub",
-                 "configuration", "worktree", "reference_clone", "refused_before", "fallback", "presentation"}
+                 "configuration", "worktree", "reference_clone", "refused_before", "fallback", "presentation",
+                 "result_sources"}
 
 
 def size(value):
@@ -188,14 +192,11 @@ def size(value):
     return out
 
 
-def render_inputs(path, job, result_file):
-    """inputs/: a README of where everything is, the result format, and a
-    result skeleton, written whole into a staging directory and renamed into
-    place, with a manifest of their digests."""
-    import hashlib
+def schema_inputs(path, job, result_file):
+    """Renderer 1: a README of where everything is, the result format and a
+    result skeleton, beside job.json."""
     import json
     import review_schema
-    from review_store import fsync_dir
     kind = job["kind"]
     lines = ["# Inputs for this %s pass" % kind, "",
              "Paths:", "",
@@ -220,19 +221,71 @@ def render_inputs(path, job, result_file):
               "- inputs/manifest.json: digests of these files, for the runner",
               "", "Check your result: " + check_command(result_file), ""]
     files["README.md"] = "\n".join(lines)
+    return files
+
+
+def render_inputs(path, job, result_file, renderer):
+    """inputs/, whole: written into a staging directory with a manifest of
+    every file's digest, each file and directory fsynced, then renamed into
+    place, all before the supervisor publishes job.json."""
+    import hashlib
+    import json
+    from review_store import fsync_dir
+    if renderer == 1:
+        files = schema_inputs(path, job, result_file)
+    else:
+        import review_inputs
+        import review_schema
+        files = review_inputs.render(path, job, result_file, RUNNER_FIELDS, check_command,
+                                     review_schema.describe, review_schema.skeleton)
+    files["manifest.json"] = json.dumps(dict(renderer=renderer, files={
+        name: hashlib.sha256(text.encode()).hexdigest() for name, text in sorted(files.items())}), indent=1) + "\n"
     staging = path / ("inputs.tmp-%d" % os.getpid())
     shutil.rmtree(staging, ignore_errors=True)
     mkdir(staging)
-    files["manifest.json"] = json.dumps(dict(renderer=1, files={
-        name: hashlib.sha256(text.encode()).hexdigest() for name, text in files.items()}), indent=1) + "\n"
+    directories = {staging}
     for name, text in files.items():
-        with open(staging / name, "w") as stream:
+        target = staging / name
+        if target.parent != staging:
+            mkdir(target.parent)
+            directories.add(target.parent)
+        with open(target, "w") as stream:
             stream.write(text)
             stream.flush()
             os.fsync(stream.fileno())
-    fsync_dir(staging)
+    for directory in sorted(directories, key=lambda d: -len(d.parts)):
+        fsync_dir(directory)
     os.rename(staging, path / "inputs")
     fsync_dir(path)
+
+
+# files every inputs/ of a renderer must hold, whatever the pass
+REQUIRED = {1: {"README.md", "schema.md", "result-skeleton.json"},
+            2: {"README.md", "schema.md", "result-skeleton.json", "facts.md", "previous.md"}}
+
+
+def verify_inputs(path, renderer=None):
+    """Whether inputs/ is exactly what its manifest says, made by this
+    renderer, and holds what that renderer always writes: every listed file
+    present with its digest, no other file. None when there is no inputs/
+    and none was expected."""
+    import hashlib
+    import json
+    inputs = path / "inputs"
+    if not inputs.exists():
+        return None if not renderer else False
+    try:
+        manifest = json.loads((inputs / "manifest.json").read_text())
+        listed = manifest["files"]
+        if renderer and manifest.get("renderer") != renderer:
+            return False
+        if renderer and not REQUIRED.get(renderer, set()) <= set(listed):
+            return False
+        present = {str(p.relative_to(inputs)) for p in inputs.rglob("*") if p.is_file()} - {"manifest.json"}
+        return present == set(listed) and all(
+            hashlib.sha256((inputs / name).read_bytes()).hexdigest() == digest for name, digest in listed.items())
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
 
 
 def cleanup(store, job):
@@ -262,7 +315,18 @@ def cleanup(store, job):
 def main():
     import json
 
-    job = json.loads((Path(os.environ["REVIEW_JOB_DIR"]) / "job.json").read_text())
+    directory = Path(os.environ["REVIEW_JOB_DIR"])
+    job = json.loads((directory / "job.json").read_text())
+    # a pass never runs on inputs that are not exactly what was rendered,
+    # nor without the inputs its presentation needs
+    import review_presentation
+    try:
+        renderer = review_presentation.normalise(job.get("presentation"))["renderer"]
+    except ValueError:
+        renderer = -1                   # a presentation this code cannot run
+    if verify_inputs(directory, renderer) is False or renderer == -1:
+        print("inputs/ does not match its manifest", file=sys.stderr)
+        sys.exit(2)
     os.chdir(job["worktree"])
     # Prefetch dependencies before any test enters an isolated network namespace.
     init_submodules(job["worktree"], job["repository"] == "ardupilot/ardupilot", job.get("reference_clone"))

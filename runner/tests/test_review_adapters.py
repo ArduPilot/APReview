@@ -5,6 +5,7 @@ import base64
 import http.client
 import copy
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -1456,7 +1457,6 @@ class RealInference(unittest.TestCase):
 
     def test_the_schema_presentation_writes_its_inputs_and_points_the_prompt_at_them(self):
         import hashlib
-        import json
         import review_presentation
         from review_schema import FILES, read_result, skeleton
         config = dict(self.config, presentation=review_presentation.normalise("v2-schema"),
@@ -1496,6 +1496,60 @@ class RealInference(unittest.TestCase):
         (path / "review.json").write_text(json.dumps(skeleton_file))
         with self.assertRaises(ValueError):
             read_result(path / "review.json", job)
+
+    def test_the_files_presentation_writes_verified_inputs_and_reads_them(self):
+        import review_presentation
+        from review_inference import verify_inputs
+        config = dict(self.config, presentation=review_presentation.normalise("v3-files"),
+                      prompts=review_presentation.prompts("v3-files"))
+        path = self.root / "files"
+        path.mkdir()
+        job = dict(candidate(), run="run", job="job", attempt="files", generation=1, kind="primary",
+                   provider="claude", head=self.head, env={}, rules="injected", previous_ids=[],
+                   title="T", diff="diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
+                   thread=[{"kind": "comment", "id": 1, "login": "u", "at": "t", "body": "hi", "url": "x"}])
+        prepare(self.store, path, job, config)
+        inputs = path / "inputs"
+        for name in ("README.md", "facts.md", "thread.md", "previous.md", "diff.patch", "diff/index.md",
+                     "diff/0001.patch", "schema.md", "result-skeleton.json", "manifest.json"):
+            self.assertTrue((inputs / name).is_file(), name)
+        self.assertTrue(verify_inputs(path))
+        self.assertTrue(verify_inputs(path, renderer=2))
+        self.assertFalse(verify_inputs(path, renderer=1))           # not the renderer the presentation names
+        prompt = job["cli_command"][2]
+        self.assertIn("Read " + str(inputs / "README.md"), prompt)
+        self.assertNotIn("Read " + str(path / "job.json"), prompt)
+        # damaged, missing or extra input: the manifest no longer holds
+        (inputs / "thread.md").write_text("changed")
+        self.assertFalse(verify_inputs(path))
+        (inputs / "thread.md").unlink()
+        self.assertFalse(verify_inputs(path))
+        self.assertIsNone(verify_inputs(self.root / "nowhere"))
+        self.assertFalse(verify_inputs(self.root / "nowhere", renderer=2))      # expected but missing
+
+    def test_the_launcher_refuses_inputs_that_do_not_match_their_manifest(self):
+        import review_presentation
+        config = dict(self.config, presentation=review_presentation.normalise("v3-files"),
+                      prompts=review_presentation.prompts("v3-files"))
+        path = self.root / "tampered"
+        path.mkdir()
+        job = dict(candidate(), run="run", job="job", attempt="tampered", generation=1, kind="primary",
+                   provider="claude", head=self.head, env={}, rules="", previous_ids=[], diff="", title="T")
+        prepare(self.store, path, job, config)
+        (path / "job.json").write_text(json.dumps(job))
+        (path / "inputs" / "facts.md").write_text("tampered")
+        result = subprocess.run([sys.executable, str(BIN / "review_inference.py")], capture_output=True, text=True,
+                                env=dict(os.environ, REVIEW_JOB_DIR=str(path)))
+        self.assertEqual(result.returncode, 2, result.stderr)
+        self.assertIn("manifest", result.stderr)
+        self.assertFalse((path / "observed.json").exists())          # the CLI never started
+        # a files-mode job with no inputs at all is refused too
+        import shutil
+        shutil.rmtree(path / "inputs")
+        (path / "job.json").write_text(json.dumps(dict(job, presentation=config["presentation"])))
+        result = subprocess.run([sys.executable, str(BIN / "review_inference.py")], capture_output=True, text=True,
+                                env=dict(os.environ, REVIEW_JOB_DIR=str(path)))
+        self.assertEqual(result.returncode, 2, result.stderr)
 
     def test_a_legacy_run_writes_no_inputs(self):
         path = self.root / "legacy"
