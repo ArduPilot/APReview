@@ -14,7 +14,10 @@ LEGACY = {"inputs": "json", "prompts": "v1", "renderer": None}
 # v3-files: inputs as files (renderer 2), prompts that read them
 PRESETS = {"legacy": LEGACY,
            "v2-schema": {"inputs": "json", "prompts": "v2-schema", "renderer": 1},
-           "v3-files": {"inputs": "files", "prompts": "v3-files", "renderer": 2}}
+           "v3-files": {"inputs": "files", "prompts": "v3-files", "renderer": 2},
+           # v4-paging: v3-files plus guidance on reading in pieces, apart so
+           # its effect on the number of calls is measured on its own
+           "v4-paging": {"inputs": "files", "prompts": "v4-paging", "renderer": 2}}
 # v3-files prompts: the v1 text with every pointer into job.json replaced
 FILE_POINTERS = {
     "all": [("Read job.json for pinned PR facts, diff, thread, previous findings and injected repository rules.",
@@ -54,19 +57,22 @@ def legacy(value):
 
 def prompts(variant):
     """The prompt texts of a variant, to freeze into a run."""
+    if variant not in ("v1", "v2-schema", "v3-files", "v4-paging"):
+        raise ValueError("unknown prompt variant %r" % variant)
     texts = {kind: (COMMANDS / name).read_text() for kind, name in PROMPT_FILES["v1"].items()}
-    if variant == "v3-files":
+    if variant in ("v3-files", "v4-paging"):
         for kind in texts:
             for old, new in FILE_POINTERS["all"] + FILE_POINTERS.get(kind, []):
                 if old not in texts[kind]:
                     # a v1 prompt changed: v3 must not silently keep a job.json pointer
                     raise ValueError("v3-files prompt for %s cannot replace %r" % (kind, old))
                 texts[kind] = texts[kind].replace(old, new)
-    if variant in ("v2-schema", "v3-files"):
+    if variant in ("v2-schema", "v3-files", "v4-paging"):
         addendum = (COMMANDS / "review-schema-addendum.md").read_text()
         texts = {kind: text.rstrip("\n") + "\n\n" + addendum for kind, text in texts.items()}
-    elif variant != "v1":
-        raise ValueError("unknown prompt variant %r" % variant)
+    if variant == "v4-paging":
+        paging = (COMMANDS / "review-paging-addendum.md").read_text()
+        texts = {kind: text.rstrip("\n") + "\n\n" + paging for kind, text in texts.items()}
     return texts
 
 

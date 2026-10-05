@@ -37,6 +37,26 @@ class Presentation(unittest.TestCase):
         self.assertIn("inputs/results/primary.md", v3["validation"])
         self.assertIn("inputs/fresh.md", v3["reconciliation"])
 
+    def test_every_variant_carries_the_environment_and_contradiction_fixes(self):
+        for variant in ("v1", "v2-schema", "v3-files", "v4-paging"):
+            texts = rp.prompts(variant)
+            for kind, text in texts.items():
+                self.assertIn("never source review-env.sh", text, (variant, kind))
+            for kind in ("cold", "validation"):          # the sandbox forbids namespaces; nothing prescribes them
+                self.assertNotIn("--netns, which uses", texts[kind], (variant, kind))
+                self.assertNotIn("Fetch dependencies before namespace entry", texts[kind], (variant, kind))
+            self.assertNotIn("RESOLVED, STILL OPEN or DISPUTED disposition", texts["validation"], variant)
+            self.assertIn("write no dispositions", texts["validation"], variant)
+            self.assertIn("settle each with an outcome", texts["reconciliation"], variant)
+            self.assertIn("RESOLVED, STILL OPEN or DISPUTED", texts["primary"], variant)
+            self.assertEqual("25,000 characters" in texts["primary"], variant == "v4-paging", variant)
+
+    def test_paging_is_its_own_presentation(self):
+        self.assertEqual(rp.normalise("v4-paging"), {"inputs": "files", "prompts": "v4-paging", "renderer": 2})
+        v3, v4 = rp.prompts("v3-files"), rp.prompts("v4-paging")
+        for kind in v3:
+            self.assertTrue(v4[kind].startswith(v3[kind].rstrip("\n")))
+
     def test_a_drifted_v1_prompt_cannot_build_v3(self):
         from unittest.mock import patch
         drifted = dict(rp.FILE_POINTERS, all=[("a sentence no prompt has", "x")])
