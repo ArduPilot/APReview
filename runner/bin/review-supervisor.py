@@ -839,10 +839,15 @@ class Supervisor:
             "input_digest": digest(claim["inputs"]),
             "abort_path": str(self.directory / "abort.json"),
             "registered": time.time(),
+            # what a pass needs from the review environment, so it never has
+            # to source review-env.sh (which would point TMPDIR at shared
+            # scratch and put the base checkout's tools first): under systemd
+            # the guardian has only the user manager's environment and this
             "env": {
                 k: v
                 for k, v in os.environ.items()
-                if k.startswith("REVIEW_") or k in ("PATH", "HOME", "LANG", "PYTHONPATH")
+                if k.startswith("REVIEW_") or k in ("PATH", "HOME", "LANG", "PYTHONPATH", "GIT_CONFIG_GLOBAL",
+                                                    "NODE_PATH")
             },
             "wall_timeout": self.config["wall"] or scaled_wall(
                 self.config.get("wall_timeouts", WALL)[kind], claim["inputs"].get("diff")),

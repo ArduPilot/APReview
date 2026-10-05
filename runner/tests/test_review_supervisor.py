@@ -392,9 +392,13 @@ class ReviewSupervisor(unittest.TestCase):
             self.addCleanup(lock.close)
             supervisor.owned[PR] = lock
             claim = complete_claim(self.store, lock)
-            with patch.object(SUPERVISOR, "launch", Mock(return_value=None)):
+            with patch.object(SUPERVISOR, "launch", Mock(return_value=None)), \
+                    patch.dict(os.environ, GIT_CONFIG_GLOBAL="/etc/review-gitconfig", NODE_PATH="/npm/lib"):
                 supervisor.start_attempt(dict(candidate(), pr=PR), "validation", claim)
             job = read(Path(claim["attempts"][-1]) / "job.json")
+            # what a pass needs from the review environment travels in the job
+            self.assertEqual((job["env"]["GIT_CONFIG_GLOBAL"], job["env"]["NODE_PATH"]),
+                             ("/etc/review-gitconfig", "/npm/lib"))
             if expected:
                 self.assertEqual(job["result_sources"], {"primary": claim["selected"]["primary"]})
             else:
