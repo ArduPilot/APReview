@@ -693,6 +693,10 @@ class Delivery:
         selected = self.selected(entry)
         if selected is not self:
             return selected.deliver(entry, deadline)
+        if self.config.get("frozen_inputs"):
+            # a quality pilot's work: never published, posted or synced,
+            # whichever process is draining it
+            raise OSError("frozen inputs: no outward delivery")
         if entry["kind"] in ("publish", "annotation"):
             return self.publication.deliver(entry, deadline)
         if entry["kind"] in ("comment", "note"):
@@ -725,6 +729,8 @@ class Delivery:
         selected = self.selected(entry)
         if selected is not self:
             return selected.reconcile(entry, deadline)
+        if self.config.get("frozen_inputs"):
+            raise OSError("frozen inputs: no outward delivery")
         if entry["kind"] in ("comment", "note"):
             return self.posting.reconcile(entry, deadline)
         return self.deliver(entry, deadline)
