@@ -21,6 +21,17 @@ def main():
         print('{"type":"error","message":"This content was flagged for possible cybersecurity risk."}', flush=True)
         return 1
     result = canned(job)
+    if behavior.get("findings") and job["kind"] in ("primary", "cold"):
+        result["findings"] = [dict(f, id="%s:%s" % (job["kind"], f["id"])) for f in behavior["findings"]]
+    if job["kind"] == "validation" and job.get("primary_ids"):
+        result["outcomes"] = [{"id": i, "outcome": "CONFIRM",
+                               "evidence": {"commands": [], "artifacts": [], "configuration": "stub"}}
+                              for i in job["primary_ids"]]
+    if behavior.get("retain") and job["kind"] == "reconciliation":
+        for outcome in result["outcomes"]:
+            outcome.update(disposition="retained", actionable=True, rationale="")
+        if result["outcomes"]:
+            result["verdict"] = "COMMENT"
     if behavior.get("invalid"):
         result["unexpected"] = True
     if behavior.get("incomplete"):
