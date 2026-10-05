@@ -74,6 +74,67 @@ class Claude(unittest.TestCase):
         self.assertEqual(m["saved_outputs"]["readback_reads"], 1)
         self.assertGreater(m["saved_outputs"]["readback_chars"], 5000)
 
+    def test_schema_and_orientation_signals(self):
+        def call(ident, command, output):
+            return [{"type": "assistant", "message": {"id": "m" + ident, "usage": usage(1, 1, 1), "content": [
+                        {"type": "tool_use", "id": ident, "name": "Bash", "input": {"command": command}}]}},
+                    {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": ident,
+                                                              "content": output}]}}]
+        rows = (call("a", "cat /x/runner/bin/review_schema.py | head -400", "def validate") +
+                call("b", "python3 /x/review_schema.py check /j/review.json", "invalid: verdict") +
+                # two checks in one call, after a failure: both are repairs
+                call("c", "cd /j && python3 /x/review_schema.py check a.json; python3 /x/review_schema.py check b.json",
+                     "valid\ninvalid: gaps") +
+                call("d", "pwd; ls -la", "/j") +
+                call("e", "pwd; python3 -c 1", "x") +
+                # mentioning the check is not running it; env running a command is not looking around
+                call("f", "echo review_schema.py check", "review_schema.py check") +
+                call("g", "env python3 /x/review_schema.py check r.json", "valid") +
+                # neither runs the check
+                call("h", "env echo review_schema.py check r.json", "") +
+                call("i", "python3 other.py review_schema.py check r.json", ""))
+        write(self.dir / "payload.log", rows)
+        (self.dir / "status.json").write_text(json.dumps({"result_status": "invalid"}))
+        m = rc.measure(self.dir, {"provider": "claude"})
+        self.assertEqual(m["signals"], dict(schema_source_reads=1, schema_checks=4, schema_check_failures=2,
+                                            schema_repairs=3, orienting_calls=1, orienting_commands=3,
+                                            unreadable_commands=0))
+        self.assertEqual(m["result_status"], "invalid")
+
+    def test_only_a_real_check_invocation_counts(self):
+        yes = ["python3 /x/review_schema.py check r.json", "/x/review_schema.py check r.json",
+               "env -u PYTHONPATH python3 /x/review_schema.py check r.json", "A=1 python3 -u /x/review_schema.py check r",
+               "python3 -W ignore /x/review_schema.py check r", "env python3 -X dev /x/review_schema.py check r"]
+        no = ["python3 -c 'review_schema.py' check r.json", "python3 -m review_schema.py check r.json",
+              "python3 -Bc x /x/review_schema.py check r", "env echo review_schema.py check r.json",
+              "python3 other.py review_schema.py check r.json", "env -S 'python3 /x/review_schema.py check r'"]
+        for command in yes:
+            self.assertTrue(rc.checks_in(rc.commands(command)[0]), command)
+        for command in no:
+            self.assertFalse(rc.checks_in(rc.commands(command)[0]), command)
+
+    def test_a_check_skipped_after_a_failure_is_not_counted(self):
+        rows = [{"type": "assistant", "message": {"id": "m1", "usage": usage(1, 1, 1), "content": [
+                    {"type": "tool_use", "id": "a", "name": "Bash", "input": {"command":
+                     "python3 /x/review_schema.py check a.json && python3 /x/review_schema.py check b.json"}}]}},
+                {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "a",
+                                                          "content": "invalid: verdict"}]}}]
+        write(self.dir / "payload.log", rows)
+        signals = rc.measure(self.dir, {"provider": "claude"})["signals"]
+        self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["schema_repairs"]),
+                         (1, 1, 0))
+
+    def test_a_failure_then_a_check_in_one_call_is_a_repair(self):
+        rows = [{"type": "assistant", "message": {"id": "m1", "usage": usage(1, 1, 1), "content": [
+                    {"type": "tool_use", "id": "a", "name": "Bash", "input": {"command":
+                     "python3 /x/review_schema.py check r.json; python3 /x/review_schema.py check r.json"}}]}},
+                {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "a",
+                                                          "content": "invalid: verdict\nvalid"}]}}]
+        write(self.dir / "payload.log", rows)
+        signals = rc.measure(self.dir, {"provider": "claude"})["signals"]
+        self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["schema_repairs"]),
+                         (2, 1, 1))
+
     def test_a_missing_or_empty_log_is_unknown_not_zero(self):
         m = rc.measure(self.dir, {"provider": "claude"})
         self.assertIsNone(m["requests"])
@@ -207,6 +268,8 @@ class Codex(unittest.TestCase):
         self.assertEqual(m["input"], (20740 - 12288) + (31514 - 20608))
         self.assertEqual(m["first_request"], dict(input=8452, cached=12288, cache_creation=0))
         self.assertEqual(m["tools"]["Bash:env"]["chars"], len("Script completed\n") + 4000)
+        self.assertEqual(m["signals"]["orienting_calls"], 1)              # pwd; printenv; env
+        self.assertEqual(m["signals"]["orienting_commands"], 3)
         self.assertEqual(m["tools"]["Bash:sed"]["chars"], 300)
 
     def test_older_records_count_a_change_in_the_total_not_a_repeat(self):
@@ -216,6 +279,54 @@ class Codex(unittest.TestCase):
         m = rc.measure(self.dir, self.job)
         self.assertEqual(m["requests"], 3)
         self.assertEqual(m["sum_input"], 90 + 140 + 20)
+
+    def test_a_check_failure_inside_codex_json_output_is_seen(self):
+        calls = [{"type": "response_item", "payload": {"type": "function_call", "call_id": "k", "name": "shell",
+                   "arguments": json.dumps({"cmd": "python3 /x/review_schema.py check r.json"})}},
+                 {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "k",
+                   "output": json.dumps({"exit_code": 1, "output": "invalid: verdict\n"})}}]
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + calls))
+        signals = rc.measure(self.dir, self.job)["signals"]
+        self.assertEqual((signals["schema_checks"], signals["schema_check_failures"]), (1, 1))
+
+    def test_code_mode_output_blocks_are_each_decoded(self):
+        check = "python3 /x/review_schema.py check r.json"
+        cases = [  # (output blocks, checks, failures, repairs)
+            (["Script completed\nOutput:\n", json.dumps({"exit_code": 1, "output": "invalid: verdict\n"})], 1, 1, 0),
+            (["Script completed\n" + json.dumps({"output": "invalid: verdict\n"}) + "\n"
+              + json.dumps({"output": "valid\n"})], 2, 1, 1),
+            (["Script completed\nOutput:\n", "invalid: verdict\nvalid\n"], 2, 1, 1)]
+        for blocks, checks, failures, repairs in cases:
+            calls = [{"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "k", "name": "exec",
+                       "input": 'await tools.exec_command({cmd:"%s"}); await tools.exec_command({cmd:"%s"})' % (check, check)}},
+                     {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "k",
+                       "output": [{"type": "input_text", "text": b} for b in blocks]}}]
+            write(self.rollout, codex_rows([tur("r1", 10, 0)] + calls))
+            signals = rc.measure(self.dir, self.job)["signals"]
+            self.assertEqual((signals["schema_checks"], signals["schema_check_failures"], signals["schema_repairs"]),
+                             (checks, failures, repairs), blocks)
+
+    def test_every_javascript_string_form_of_a_command_is_read(self):
+        for literal in ("'python3 /x/review_schema.py check r.json'", '"python3 /x/review_schema.py check r.json"',
+                        "`python3 /x/review_schema.py check r.json`"):
+            calls = [{"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "k", "name": "exec",
+                       "input": "await tools.exec_command({cmd: %s})" % literal}},
+                     {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "k",
+                       "output": [{"type": "input_text", "text": "invalid: verdict\n"}]}}]
+            write(self.rollout, codex_rows([tur("r1", 10, 0)] + calls))
+            m = rc.measure(self.dir, self.job)
+            self.assertEqual((m["signals"]["schema_checks"], m["signals"]["schema_check_failures"]), (1, 1), literal)
+            self.assertEqual(set(m["tools"]), {"Bash:python3"}, literal)
+        # one that cannot be read is counted as such, not as nothing
+        calls = [{"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "k", "name": "exec",
+                   "input": "await tools.exec_command({cmd: `cat ${file}`})"}}]
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + calls))
+        self.assertEqual(rc.measure(self.dir, self.job)["signals"]["unreadable_commands"], 1)
+        # polling a running session runs no command at all
+        calls = [{"type": "response_item", "payload": {"type": "custom_tool_call", "call_id": "k", "name": "exec",
+                   "input": 'text(await tools.write_stdin({session_id:9,chars:""}))'}}]
+        write(self.rollout, codex_rows([tur("r1", 10, 0)] + calls))
+        self.assertEqual(rc.measure(self.dir, self.job)["signals"]["unreadable_commands"], 0)
 
     def test_disagreeing_request_sources_make_the_measurement_unknown(self):
         write(self.rollout, codex_rows([tur("r1", 10, 0), count(15, 10, 0), count(40, 20, 0)]))
@@ -327,6 +438,7 @@ class Codex(unittest.TestCase):
         write(self.rollout, codex_rows([tur("r1", 10, 0)] + calls))
         m = rc.measure(self.dir, self.job)
         self.assertEqual(set(m["tools"]), {"web_search", "Bash:cat+"})
+        self.assertEqual(m["signals"]["orienting_calls"], 0)
         self.assertIsNone(m["subagents"])                     # not measured for Codex
 
     def test_a_missing_rollout_or_home_is_unknown(self):

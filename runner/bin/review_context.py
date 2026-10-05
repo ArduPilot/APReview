@@ -11,11 +11,12 @@ import json
 import os
 import re
 
-PARSER = "review_context/3"
+PARSER = "review_context/4"
 MAX_BYTES = 256 << 20           # a log larger than this is not parsed
 SAVED = re.compile(r"Full output saved to:?\s*(\S+?\.txt)")
 SHELLS = ("exec", "exec_command", "shell", "local_shell", "container.exec")
 READERS = ("cat", "head", "tail", "sed", "less", "nl", "grep", "rg", "wc", "awk")
+ORIENTING = ("pwd", "printenv", "env", "ls", "whoami", "id", "hostname", "uname")
 FIELDS = ("requests", "peak_input", "sum_input", "input", "cached_input", "cache_creation",
           "output", "reasoning", "tool_output_chars")
 
@@ -79,6 +80,8 @@ def empty(provider):
                 sources=[], session_id=None, cli_version=None, first_request=None, tools={},
                 retries=None,           # not recorded by either CLI
                 compactions=0, saved_outputs=dict(count=0, preview_chars=0, readback_reads=0, readback_chars=0),
+                signals=dict(schema_source_reads=0, schema_checks=0, schema_check_failures=0, schema_repairs=0,
+                             orienting_calls=0, orienting_commands=0, unreadable_commands=0),
                 subagents=dict(requests=0, sum_input=0, output=0, tool_output_chars=0),
                 **{k: 0 for k in FIELDS})
 
@@ -167,6 +170,7 @@ def claude(path):
                     out["subagents"]["tool_output_chars"] += len(text)
                     continue
                 add_tool(out, name, len(text))
+                signal(out, name, path, command, text)
                 # a read of a saved output, and a new saved output, can be the same call
                 if reads_saved(name, path, command, saved):
                     out["saved_outputs"]["readback_reads"] += 1
@@ -259,6 +263,108 @@ def commands(text):
     return out
 
 
+def checks_in(words):
+    """Whether one command runs review_schema.py's check: the script run
+    directly, or as the script argument of a Python interpreter, with only
+    env, VAR=value and option words before it."""
+    rest = list(words)
+    while rest and "=" in rest[0] and not rest[0].startswith("-"):
+        rest.pop(0)                         # shell assignments
+    if rest and os.path.basename(rest[0]) == "env":
+        rest.pop(0)
+        while rest:
+            word = rest[0]
+            if word in ("-u", "--unset", "-C", "--chdir"):
+                rest = rest[2:]             # options taking an argument
+            elif word.startswith("-S") or word.startswith("--split-string"):
+                return False                # a command split from one string: not followed
+            elif word.startswith("-") and word != "-":
+                rest.pop(0)
+            elif "=" in word:
+                rest.pop(0)
+            else:
+                break
+    if rest and os.path.basename(rest[0]).startswith("python"):
+        rest.pop(0)
+        while rest and rest[0].startswith("-") and rest[0] != "-":
+            option = rest.pop(0)
+            if option.startswith("--"):
+                continue
+            letters = option[1:]
+            for k, letter in enumerate(letters):
+                if letter in "cm":
+                    return False            # -c code or -m module: no script runs
+                if letter in "WX":          # take an argument, attached or next
+                    if k == len(letters) - 1 and rest:
+                        rest.pop(0)
+                    break
+    return len(rest) >= 2 and rest[0].endswith("review_schema.py") and rest[1] == "check"
+
+
+def output_text(text):
+    """A tool's output as the command printed it: Codex can wrap it as JSON
+    with an output field, alone or after a preamble line."""
+    out = []
+    for line in text.splitlines() or [text]:
+        stripped = line.strip()
+        if stripped.startswith("{"):
+            try:
+                value = json.loads(stripped)
+            except ValueError:
+                value = None
+            if isinstance(value, dict) and isinstance(value.get("output"), str):
+                out.append(value["output"])
+                continue
+        out.append(line)
+    whole = text.strip()
+    if whole.startswith("{") and "\n" in whole:
+        try:
+            value = json.loads(whole)
+            if isinstance(value, dict) and isinstance(value.get("output"), str):
+                return value["output"]
+        except ValueError:
+            pass
+    return "\n".join(out)
+
+
+def orienting(words):
+    """A command that only looks around. env and printenv print the
+    environment; env followed by a command runs that command instead."""
+    first = os.path.basename(words[0])
+    if first == "env":
+        return all(w.startswith("-") or "=" in w for w in words[1:])
+    return first in ORIENTING
+
+
+def signal(out, name, path, command, text):
+    """Counts step 3 of the plan watches: reading the schema validator's
+    source; running its check, failing it, and checking again after a
+    failure (a repair); and looking around (pwd, ls, env, ...), in calls
+    that did nothing else and as commands within any call."""
+    signals = out["signals"]
+    parts = [words for words in (commands(command) if command else []) if words]
+    if (name == "Read" and (path or "").endswith("review_schema.py")) or any(
+            os.path.basename(words[0]) in READERS and any(w.endswith("review_schema.py") for w in words[1:])
+            for words in parts):
+        signals["schema_source_reads"] += 1
+    invoked = sum(1 for words in parts if checks_in(words))
+    if invoked:
+        # each check that ran printed one verdict line, valid or invalid:/
+        # usage:, in order; a check that printed none (skipped by &&, or
+        # crashed) is not counted, and one after any failure is a repair
+        verdicts = [line.strip().startswith(("invalid:", "usage:")) for line in output_text(text).splitlines()
+                    if line.strip() == "valid" or line.strip().startswith(("invalid:", "usage:"))]
+        for failed in verdicts[:invoked]:
+            if signals["schema_check_failures"]:
+                signals["schema_repairs"] += 1
+            signals["schema_checks"] += 1
+            signals["schema_check_failures"] += failed
+    looking = [words for words in parts if orienting(words)]
+    signals["orienting_commands"] += len(looking)
+    if parts and len(looking) == len(parts):
+        signals["orienting_calls"] += 1
+
+
 def thread_ids(payload):
     """Thread ids payload.log names, whether or not a turn completed;
     damage in it is damage in the measurement."""
@@ -276,27 +382,56 @@ def rollouts(home, thread):
     return sorted(glob.glob(os.path.join(home, "sessions", "*", "*", "*", "rollout-*-%s.jsonl" % thread)))
 
 
+CMD_LITERAL = re.compile(r"""cmd["']?\s*:\s*(?:"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`)""")
+
+
+def js_string(body, quote):
+    """A JavaScript string literal's text: its escapes as JSON reads them."""
+    if quote == '"':
+        try:
+            return json.loads('"%s"' % body)
+        except ValueError:
+            return body
+    body = body.replace("\\" + quote, quote)
+    try:
+        return json.loads('"%s"' % body.replace('"', '\\"'))
+    except ValueError:
+        return body
+
+
+def exec_commands(name, given):
+    """The shell text a Codex tool call ran, all of it, or None when it ran
+    a shell but the command cannot be read."""
+    if name not in SHELLS or not isinstance(given, str):
+        return ""
+    if name == "exec" and "exec_command" not in given:
+        return ""                   # only polls a running session: runs no command
+    texts = []
+    for double, single, template in CMD_LITERAL.findall(given):
+        if template and "${" in template:
+            return None             # an interpolated command cannot be read
+        texts.append(js_string(double, '"') if double else js_string(single, "'") if single else js_string(template, "`"))
+    if not texts:
+        try:
+            parsed = json.loads(given)
+            command = parsed.get("cmd") or parsed.get("command") if isinstance(parsed, dict) else None
+            texts = [" ".join(command) if isinstance(command, list) else command] if command else []
+        except ValueError:
+            pass
+    if not texts:
+        return None
+    return "\n".join(t for t in texts if isinstance(t, str))
+
+
 def exec_label(name, given):
     """A Codex tool call's label: the shell command it ran, or the tool."""
     if name not in SHELLS:
         return name or "?"
-    if not isinstance(given, str):
+    command = exec_commands(name, given)
+    if not command:
         return "Bash:?"
-    commands = re.findall(r'cmd["\']?\s*:\s*"((?:[^"\\]|\\.)*)"', given)
-    if not commands:
-        try:
-            parsed = json.loads(given)
-            command = parsed.get("cmd") or parsed.get("command") if isinstance(parsed, dict) else None
-            commands = [" ".join(command) if isinstance(command, list) else command] if command else []
-        except ValueError:
-            commands = []
-    if not commands:
-        return "Bash:?"
-    try:
-        first = json.loads('"%s"' % commands[0])
-    except ValueError:
-        first = commands[0]
-    return label(first) + ("+" if len(commands) > 1 else "")
+    many = isinstance(given, str) and len(CMD_LITERAL.findall(given)) > 1
+    return label(command.split("\n")[0]) + ("+" if many else "")
 
 
 def codex(threads):
@@ -380,15 +515,24 @@ def parse_rollout(path, out, by_id, rises, calls, damaged, order, previous):
                 order.append(("T", None))
             previous = total
         elif kind in ("custom_tool_call", "function_call"):
-            calls[payload.get("call_id")] = exec_label(payload.get("name"), payload.get("input") or payload.get("arguments"))
+            given = payload.get("input") or payload.get("arguments")
+            command = exec_commands(payload.get("name"), given)
+            if command is None:
+                out["signals"]["unreadable_commands"] += 1      # its signals cannot be counted
+            calls[payload.get("call_id")] = (exec_label(payload.get("name"), given), command or "")
         elif kind in ("custom_tool_call_output", "function_call_output"):
             body = payload.get("output")
             if isinstance(body, list):
-                text = "".join(x.get("text", "") for x in body if isinstance(x, dict) and isinstance(x.get("text"), str))
+                blocks = [x["text"] for x in body if isinstance(x, dict) and isinstance(x.get("text"), str)]
             else:
-                text = body if isinstance(body, str) else json.dumps(body)
+                blocks = [body if isinstance(body, str) else json.dumps(body)]
+            text = "".join(blocks)
             if payload.get("call_id") in calls:
-                add_tool(out, calls.pop(payload.get("call_id")), len(text))
+                label, command = calls.pop(payload.get("call_id"))
+                add_tool(out, label, len(text))
+                # each block decoded on its own: a code-mode preamble or
+                # several JSON results must not hide what the command printed
+                signal(out, label, None, command, "\n".join(output_text(b) for b in blocks))
     return previous
 
 
@@ -415,8 +559,15 @@ def measure(attempt, job):
     there), so backfill does not re-read a log that will never change."""
     provider = job.get("provider", "?") if isinstance(job, dict) else "?"
     result = _measure(attempt, job, provider)
-    # which presentation the pass had, so modes are compared apart
+    # which presentation the pass had, so modes are compared apart, and
+    # whether the guardian found its result valid (invalid: a rejection)
     result["presentation"] = (job.get("presentation") if isinstance(job, dict) else None) or "legacy"
+    try:
+        with open(os.path.join(attempt, "status.json")) as stream:
+            status = json.load(stream)
+        result["result_status"] = status.get("result_status") if isinstance(status, dict) else None
+    except (OSError, ValueError):
+        result["result_status"] = None
     return result
 
 
