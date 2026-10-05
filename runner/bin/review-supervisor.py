@@ -855,6 +855,9 @@ class Supervisor:
             index = len(state["attempts"].get(kind, []))
             behavior = behavior[min(index, len(behavior) - 1)] if behavior else {}
         job["stub"] = behavior
+        # where each upstream result's evidence paths resolve, for inputs as
+        # files; a legacy job is unchanged
+        sources = self.presentation()["inputs"] == "files"
         if kind == "validation":
             result = read_result(
                 Path(claim["selected"]["primary"]) / "review.json",
@@ -862,6 +865,8 @@ class Supervisor:
             )
             job["primary_ids"] = [x["id"] for x in result["findings"]]
             job["primary_result"] = result
+            if sources:
+                job["result_sources"] = {"primary": str(claim["selected"]["primary"])}
         if kind == "reconciliation":
             if self.discovery:
                 repo, number = candidate["repository"], candidate["number"]
@@ -875,6 +880,8 @@ class Supervisor:
                 job["fresh_snapshot"] = reconciliation_snapshot(refresh(candidate))
             job["finding_ids"] = []
             job["results"] = {}
+            if sources:
+                job["result_sources"] = {k: str(claim["selected"][k]) for k in ("primary", "cold", "validation")}
             for previous in ("primary", "cold", "validation"):
                 source = Path(claim["selected"][previous])
                 result = read_result(source / FILES[previous], read(source / "job.json"))

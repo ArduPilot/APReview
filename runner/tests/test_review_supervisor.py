@@ -375,6 +375,32 @@ class ReviewSupervisor(unittest.TestCase):
         supervisor.config["configuration"]["presentation"] = schema
         self.assertEqual(supervisor.inputs(dict(candidate(), pr=PR))["presentation"], schema)
 
+    def test_files_jobs_name_where_upstream_results_live(self):
+        from review_fixtures import complete_claim
+        from review_lock import try_lock
+        for preset, expected in (("v3-files", True), ("legacy", False)):
+            supervisor = self._bare_supervisor(time.time() + 3600)
+            supervisor.config.update(stub=True, wall=60, pool_size=2, permit_timeout=1,
+                                     wall_timeouts=dict(SUPERVISOR.WALL))
+            supervisor.config["configuration"]["presentation"] = preset
+            supervisor.states[PR]["attempts"] = {}
+            supervisor.save = Mock()
+            supervisor.children = []
+            supervisor.run_id = str(supervisor.directory)
+            supervisor.discovery = None
+            lock = try_lock(self.store.locks, PR)
+            self.addCleanup(lock.close)
+            supervisor.owned[PR] = lock
+            claim = complete_claim(self.store, lock)
+            with patch.object(SUPERVISOR, "launch", Mock(return_value=None)):
+                supervisor.start_attempt(dict(candidate(), pr=PR), "validation", claim)
+            job = read(Path(claim["attempts"][-1]) / "job.json")
+            if expected:
+                self.assertEqual(job["result_sources"], {"primary": claim["selected"]["primary"]})
+            else:
+                self.assertNotIn("result_sources", job)               # a legacy job is unchanged
+            lock.close()
+
     def test_a_run_with_a_presentation_this_code_cannot_run_is_refused(self):
         supervisor = self._bare_supervisor(time.time() + 3600)
         supervisor.config.update(schema=1, data=str(self.store.root))
