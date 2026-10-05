@@ -212,7 +212,8 @@ SHAPES = {
                       "rationale": "string; non-empty unless retained", "evidence": "evidence",
                       "target": "optional; required when merged: the surviving finding's id"},
 }
-COMMON = {"schema": "1", **{k: "copied exactly from job.json, same JSON type" for k in IDENTITY},
+COMMON = {"schema": "1", **{k: "copied exactly from the job, same JSON type (result-skeleton.json has them)"
+                             for k in IDENTITY},
           "status": ("complete", "incomplete"), "gaps": "list of non-empty strings",
           "heavy": BOOL}
 VERDICTS = ("ACCEPT", "COMMENT", "REQUEST CHANGES")     # APPROVE is read as ACCEPT
