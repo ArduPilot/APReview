@@ -414,6 +414,13 @@ def measure(attempt, job):
     whether measuring again later could succeed (a log or rollout not yet
     there), so backfill does not re-read a log that will never change."""
     provider = job.get("provider", "?") if isinstance(job, dict) else "?"
+    result = _measure(attempt, job, provider)
+    # which presentation the pass had, so modes are compared apart
+    result["presentation"] = (job.get("presentation") if isinstance(job, dict) else None) or "legacy"
+    return result
+
+
+def _measure(attempt, job, provider):
     try:
         payload = os.path.join(attempt, "payload.log")
         if provider == "claude":
