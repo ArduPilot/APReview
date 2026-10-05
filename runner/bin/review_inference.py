@@ -92,21 +92,23 @@ def _prepare(store, path, job, config):
     env["REVIEW_HEAVY_SIZE"] = str(config.get("heavy_size", 4))
     env["REVIEW_HEAVY_WAIT"] = str(config.get("permit_timeout", 120))
     env["CLAUDE_CONFIG_DIR" if job["provider"] == "claude" else "CODEX_HOME"] = provider["home"]
+    import review_presentation
+    presentation = review_presentation.normalise(config.get("presentation"))
+    result_file = path / __import__("review_schema").FILES[job["kind"]]
+    if presentation["renderer"] == 1:
+        mkdir(path / "evidence")
+        render_inputs(path, job, result_file)
     prompt = config.get("prompts", {}).get(job["kind"])
     if prompt is None:
-        import review_presentation
         # only a legacy run may fall back to the live prompt files
-        if not review_presentation.legacy(config.get("presentation")):
+        if presentation != review_presentation.LEGACY:
             raise KeyError("prompt for %s not frozen in the run" % job["kind"])
         prompt = (COMMANDS / ("review-" + PROMPTS[job["kind"]] + ".md")).read_text()
-    prompt += (
-        "\nRead "
-        + str(path / "job.json")
-        + ". Write "
-        + str(path / __import__("review_schema").FILES[job["kind"]])
-        + ".\n"
-    )
-    prompt += "Schema validator: " + str(BIN / "review_schema.py") + "\n"
+    prompt += "\nRead " + str(path / "job.json") + ". Write " + str(result_file) + ".\n"
+    if presentation["renderer"] == 1:
+        prompt += "Check your result: " + check_command(result_file) + "\n"
+    else:
+        prompt += "Schema validator: " + str(BIN / "review_schema.py") + "\n"
     prompt += "Repository house rules:\n" + job.get("rules", "")
     grants = list(dict.fromkeys([str(path), *provider.get("granted_directories", [])]))
     if job["provider"] == "claude":
@@ -150,6 +152,87 @@ def _prepare(store, path, job, config):
         command += [prompt]
     job["cli_command"] = command
     job["command"] = [sys.executable, str(BIN / "review_inference.py")]
+
+
+def check_command(result_file):
+    return "python3 %s check %s" % (BIN / "review_schema.py", result_file)
+
+
+# what the main review inputs in job.json hold
+JOB_INPUTS = {"title": "the PR title", "diff": "the PR diff at the pinned head",
+              "thread": "the PR conversation", "rules": "the repository's house rules",
+              "previous_comment": "our previous comment and its findings",
+              "previous_section": "our previous report section",
+              "previous_ids": "previous findings, each needing a disposition",
+              "primary_result": "the primary review to challenge", "primary_ids": "its finding ids",
+              "results": "the primary, cold and validation results", "finding_ids": "every id to settle",
+              "fresh_snapshot": "the PR as it is now: title, head, thread", "ci": "CI state"}
+# fields that only run the pass; every other field is a fact about the review
+RUNNER_FIELDS = {"schema", "run", "job", "attempt", "generation", "kind", "provider", "account",
+                 "exclusive_account", "account_slots", "input_digest", "abort_path", "registered", "env",
+                 "wall_timeout", "pool_size", "permit_timeout", "command", "cli_command", "stub",
+                 "configuration", "worktree", "reference_clone", "refused_before", "fallback", "presentation"}
+
+
+def size(value):
+    """A field as the README describes it: a short plain value itself, else
+    its size as JSON text, with lines too for text."""
+    import json
+    if isinstance(value, (int, str)) and not isinstance(value, bool) and len(str(value)) <= 80 and "\n" not in str(value):
+        return json.dumps(value)
+    chars = len(json.dumps(value))
+    out = "%d %s" % (chars, "char" if chars == 1 else "chars")
+    if isinstance(value, str) and "\n" in value:
+        lines = len(value.splitlines())
+        out += ", %d %s" % (lines, "line" if lines == 1 else "lines")
+    return out
+
+
+def render_inputs(path, job, result_file):
+    """inputs/: a README of where everything is, the result format, and a
+    result skeleton, written whole into a staging directory and renamed into
+    place, with a manifest of their digests."""
+    import hashlib
+    import json
+    import review_schema
+    from review_store import fsync_dir
+    kind = job["kind"]
+    lines = ["# Inputs for this %s pass" % kind, "",
+             "Paths:", "",
+             "- job directory (REVIEW_JOB_DIR): %s" % path,
+             "- the PR at its pinned head %s: %s" % (job.get("head", "?")[:12], job.get("worktree", path / "wt")),
+             "- scratch for builds and temporary files (REVIEW_SCRATCH): %s" % (path / "scratch"),
+             "- your retained evidence: %s; cite it as evidence/<name>, relative to the job directory"
+             % (path / "evidence"),
+             "- the result to write: %s" % result_file, "",
+             "Review inputs, all in %s (sizes as the JSON text):" % (path / "job.json"), ""]
+    facts = [k for k in job if k not in RUNNER_FIELDS and k not in JOB_INPUTS]
+    for key in [k for k in JOB_INPUTS if k in job] + facts:
+        what = JOB_INPUTS.get(key)
+        lines.append("- `%s`: %s%s" % (key, (what + ", ") if what else "", size(job[key])))
+    lines += ["", "Its other fields (%s) only run this pass." % ", ".join(sorted(RUNNER_FIELDS)),
+              "", "This directory, inputs/, describes your result and repeats nothing from job.json:", ""]
+    files = {"schema.md": review_schema.describe(kind),
+             "result-skeleton.json": json.dumps(review_schema.skeleton(job), indent=1) + "\n"}
+    lines += ["- inputs/schema.md (%d chars): the result format" % len(files["schema.md"]),
+              "- inputs/result-skeleton.json (%d chars): your result, to copy and fill in"
+              % len(files["result-skeleton.json"]),
+              "- inputs/manifest.json: digests of these files, for the runner",
+              "", "Check your result: " + check_command(result_file), ""]
+    files["README.md"] = "\n".join(lines)
+    staging = path / ("inputs.tmp-%d" % os.getpid())
+    shutil.rmtree(staging, ignore_errors=True)
+    mkdir(staging)
+    files["manifest.json"] = json.dumps(dict(renderer=1, files={
+        name: hashlib.sha256(text.encode()).hexdigest() for name, text in files.items()}), indent=1) + "\n"
+    for name, text in files.items():
+        with open(staging / name, "w") as stream:
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+    fsync_dir(staging)
+    os.rename(staging, path / "inputs")
+    fsync_dir(path)
 
 
 def cleanup(store, job):

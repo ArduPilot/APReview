@@ -1454,16 +1454,67 @@ class RealInference(unittest.TestCase):
                 granted_directories=[str(self.root / "granted")],
             )
 
-    def test_only_a_legacy_run_falls_back_to_the_live_prompt_files(self):
+    def test_the_schema_presentation_writes_its_inputs_and_points_the_prompt_at_them(self):
+        import hashlib
+        import json
         import review_presentation
-        config = dict(self.config, prompts={}, presentation={"inputs": "files", "prompts": "v1", "renderer": 1})
+        from review_schema import FILES, read_result, skeleton
+        config = dict(self.config, presentation=review_presentation.normalise("v2-schema"),
+                      prompts=review_presentation.prompts("v2-schema"))
+        path = self.root / "schema"
+        path.mkdir()
+        job = dict(candidate(), run="run", job="job", attempt="schema", generation=1, kind="primary",
+                   provider="claude", head=self.head, env={}, rules="injected", previous_ids=["previous:1"],
+                   title="Fix a thing", diff="diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n")
+        prepare(self.store, path, job, config)
+        inputs = path / "inputs"
+        self.assertEqual(sorted(p.name for p in inputs.iterdir()),
+                         ["README.md", "manifest.json", "result-skeleton.json", "schema.md"])
+        self.assertTrue((path / "evidence").is_dir())
+        self.assertFalse(list(path.glob("inputs.tmp-*")))
+        manifest = json.loads((inputs / "manifest.json").read_text())
+        self.assertEqual(manifest["renderer"], 1)
+        for name, digest in manifest["files"].items():
+            self.assertEqual(hashlib.sha256((inputs / name).read_bytes()).hexdigest(), digest)
+        skeleton_file = json.loads((inputs / "result-skeleton.json").read_text())
+        self.assertEqual(skeleton_file, skeleton(job))
+        self.assertEqual([x["id"] for x in skeleton_file["previous"]], ["previous:1"])
+        readme = (inputs / "README.md").read_text()
+        for needle in (str(path / "evidence"), str(path / "wt"), "`diff`: the PR diff at the pinned head, ",
+                       "6 lines", "`rules`: the repository's house rules, ", "check " + str(path / FILES["primary"]),
+                       "inputs/manifest.json", "inputs/result-skeleton.json ("):
+            self.assertIn(needle, readme)
+        # facts outside the main list are review input, never dismissed as runner fields
+        for fact in ("`repository`", "`head`", "`merge_base`", "`node_id`"):
+            self.assertIn(fact, readme)
+        self.assertNotIn("`cli_command`", readme)
+        prompt = job["cli_command"][2]
+        self.assertIn("inputs/result-skeleton.json", prompt)
+        self.assertIn("review_schema.py check " + str(path / "review.json"), prompt)
+        self.assertNotIn("Schema validator:", prompt)
+        # the skeleton is not a result until the pass completes it
+        (path / "review.json").write_text(json.dumps(skeleton_file))
+        with self.assertRaises(ValueError):
+            read_result(path / "review.json", job)
+
+    def test_a_legacy_run_writes_no_inputs(self):
+        path = self.root / "legacy"
+        path.mkdir()
+        job = dict(candidate(), run="run", job="job", attempt="legacy", generation=1, kind="primary",
+                   provider="claude", head=self.head, env={}, rules="")
+        prepare(self.store, path, job, self.config)
+        self.assertFalse((path / "inputs").exists())
+        self.assertFalse((path / "evidence").exists())
+        self.assertIn("Schema validator:", job["cli_command"][2])
+
+    def test_only_a_legacy_run_falls_back_to_the_live_prompt_files(self):
+        config = dict(self.config, prompts={}, presentation={"inputs": "json", "prompts": "v2-schema", "renderer": 1})
         path = self.root / "noprompt"
         path.mkdir()
         job = dict(candidate(), run="run", job="job", attempt="noprompt", generation=1, kind="primary",
                    provider="claude", head=self.head, env={}, rules="")
-        with patch.dict(review_presentation.KNOWN, inputs=("json", "files"), renderer=(None, 1)):
-            with self.assertRaises(OSError):
-                prepare(self.store, path, job, config)
+        with self.assertRaises(OSError):
+            prepare(self.store, path, job, config)
 
     def test_fake_clis_use_pinned_worktree_frozen_options_and_environment(self):
         from review_schema import read_result, FILES
