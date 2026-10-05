@@ -11,8 +11,22 @@ from pathlib import Path
 LEGACY = {"inputs": "json", "prompts": "v1", "renderer": None}
 # v2-schema: still job.json, plus a schema reference, a result skeleton and
 # a check command written by renderer 1, and prompts that point at them
+# v3-files: inputs as files (renderer 2), prompts that read them
 PRESETS = {"legacy": LEGACY,
-           "v2-schema": {"inputs": "json", "prompts": "v2-schema", "renderer": 1}}
+           "v2-schema": {"inputs": "json", "prompts": "v2-schema", "renderer": 1},
+           "v3-files": {"inputs": "files", "prompts": "v3-files", "renderer": 2}}
+# v3-files prompts: the v1 text with every pointer into job.json replaced
+FILE_POINTERS = {
+    "all": [("Read job.json for pinned PR facts, diff, thread, previous findings and injected repository rules.",
+             "Read inputs/README.md first, then the files it lists, for pinned PR facts, diff, thread, previous "
+             "findings and repository rules; do not read job.json."),
+            ("(including all identity fields from job.json)",
+             "(the identity fields are filled in in inputs/result-skeleton.json)")],
+    "validation": [("Challenge every primary_result finding",
+                    "Challenge every finding of the primary result (inputs/results/primary.md)")],
+    "reconciliation": [("fresh_snapshot title/head/thread",
+                        "the PR as it is now (inputs/fresh.md and inputs/fresh-thread.md)")],
+}
 # every presentation this code can run, as whole combinations
 KNOWN = list(PRESETS.values())
 COMMANDS = Path(__file__).resolve().parents[2] / "commands"
@@ -41,7 +55,14 @@ def legacy(value):
 def prompts(variant):
     """The prompt texts of a variant, to freeze into a run."""
     texts = {kind: (COMMANDS / name).read_text() for kind, name in PROMPT_FILES["v1"].items()}
-    if variant == "v2-schema":
+    if variant == "v3-files":
+        for kind in texts:
+            for old, new in FILE_POINTERS["all"] + FILE_POINTERS.get(kind, []):
+                if old not in texts[kind]:
+                    # a v1 prompt changed: v3 must not silently keep a job.json pointer
+                    raise ValueError("v3-files prompt for %s cannot replace %r" % (kind, old))
+                texts[kind] = texts[kind].replace(old, new)
+    if variant in ("v2-schema", "v3-files"):
         addendum = (COMMANDS / "review-schema-addendum.md").read_text()
         texts = {kind: text.rstrip("\n") + "\n\n" + addendum for kind, text in texts.items()}
     elif variant != "v1":

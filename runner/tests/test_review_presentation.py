@@ -27,6 +27,23 @@ class Presentation(unittest.TestCase):
         self.assertEqual(rp.recorded(schema), schema)
         self.assertFalse(rp.legacy(schema))
 
+    def test_the_files_variant_points_nowhere_into_job_json(self):
+        v3 = rp.prompts("v3-files")
+        self.assertEqual(rp.normalise("v3-files"), {"inputs": "files", "prompts": "v3-files", "renderer": 2})
+        for kind, text in v3.items():
+            self.assertEqual(text.count("job.json"), 1, kind)            # only "do not read job.json"
+            self.assertIn("do not read job.json", text)
+            self.assertIn("inputs/README.md", text)
+        self.assertIn("inputs/results/primary.md", v3["validation"])
+        self.assertIn("inputs/fresh.md", v3["reconciliation"])
+
+    def test_a_drifted_v1_prompt_cannot_build_v3(self):
+        from unittest.mock import patch
+        drifted = dict(rp.FILE_POINTERS, all=[("a sentence no prompt has", "x")])
+        with patch.object(rp, "FILE_POINTERS", drifted):
+            with self.assertRaises(ValueError):
+                rp.prompts("v3-files")
+
     def test_the_schema_variant_adds_its_guidance_to_every_prompt(self):
         v1, v2 = rp.prompts("v1"), rp.prompts("v2-schema")
         for kind in v1:
