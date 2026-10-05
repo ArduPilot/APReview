@@ -1130,12 +1130,16 @@ class Supervisor:
             writes=cfg.get("github_writes", False),
             http_cache=(self.store.root / "http-cache") if cfg.get("github_http") else None,
         )
+        # frozen inputs (a quality pilot): candidates are reviewed exactly as
+        # supplied, never read again from GitHub, and delivery stays in the
+        # store, so nothing is published, posted or synced
+        frozen = bool(cfg.get("frozen_inputs"))
         self.adapter = (
             StubAdapter(self.store.root)
-            if self.config["stub"]
+            if self.config["stub"] or frozen
             else Delivery(self.store, github, cfg)
         )
-        self.discovery = Discovery(github, cfg, self.store) if cfg else None
+        self.discovery = Discovery(github, cfg, self.store) if cfg and not frozen else None
 
     def phase_summaries(self, phase):
         summaries = {}
