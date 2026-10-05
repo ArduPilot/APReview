@@ -41,6 +41,7 @@ class GC(unittest.TestCase):
             for keep in ("job.json", "launch.json", "review.json", "payload.log"):
                 write(a / keep, {})
             write(a / "status.json", {"state": "terminal"})
+            write(a / "context.json", {})
             write(a / "cold-evidence" / "build" / "big.o")
         (run / "attempts" / "worktree" / "wt").mkdir()
         write(run / "attempts" / "stray.txt")
@@ -86,7 +87,7 @@ class GC(unittest.TestCase):
         attempts = self.data / "runs" / "followup-1" / "attempts"
         # an unpinned quiet attempt keeps its records and loses its evidence
         self.assertEqual(sorted(p.name for p in (attempts / "free").iterdir()),
-                         ["job.json", "launch.json", "payload.log", "review.json", "status.json"])
+                         ["context.json", "job.json", "launch.json", "payload.log", "review.json", "status.json"])
         # a claim may carry this pass forward; promotion copies its evidence
         self.assertTrue((attempts / "claimed" / "cold-evidence").exists())
         self.assertTrue((attempts / "fresh" / "cold-evidence").exists())
@@ -153,7 +154,7 @@ class GC(unittest.TestCase):
         age_tree(self.data / "runs" / "followup-1")
         self.gc("--apply")
         self.assertEqual(sorted(p.name for p in attempt.iterdir()),
-                         ["empty.json", "job.json", "launch.json", "manager.json", "status.json"])
+                         ["context.json", "empty.json", "job.json", "launch.json", "manager.json", "status.json"])
 
     def test_a_controller_holding_maintenance_stops_all_deletion(self):
         sys.path.insert(0, str(BIN))

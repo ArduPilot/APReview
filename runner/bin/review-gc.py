@@ -44,7 +44,9 @@ OWNED = {
 LEGACY = ("fu_", "allrun", "aireview-", "aireview_", "followup-", "allruns-")
 # records the dashboard reads, and the guardian's proofs that cleanup needs
 PROOFS = {"job.json", "status.json", "launch.json", "manager.json", "empty.json"}
-KEEP = PROOFS | {"payload.log", *FILES.values()}
+# small records kept as long as the attempt itself, in old runs too
+METRICS = {"context.json"}
+KEEP = PROOFS | METRICS | {"payload.log", *FILES.values()}
 EVIDENCE_DAYS = 2
 LITTER_DAYS = 2
 SCRATCH_DAYS = 7
@@ -335,7 +337,7 @@ class GC:
                 if why:
                     self.skip("attempt evidence", why)
                     continue
-                keep = PROOFS if old else KEEP
+                keep = PROOFS | METRICS if old else KEEP
                 for entry in attempt.iterdir():
                     if entry.name not in keep:
                         self.remove("old run" if old else "attempt evidence", entry)
