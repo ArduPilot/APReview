@@ -52,7 +52,7 @@ for d in /proc/[0-9]*; do
     grep -q "review-attempt-" "$d/cgroup" 2>/dev/null && continue
     [ -r "$d/environ" ] && tr '\0' '\n' < "$d/environ" | grep -q '^REVIEW_JOB_DIR=' && continue
     case "$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)" in
-        *review-supervisor.py*|*review-guardian.py*|*review-drain.py*|*review_board_sweep.py*|*review-resume.py*) continue ;;
+        *review-supervisor.py*|*review-guardian.py*|*review-drain.py*|*review_board_sweep.py*|*review-resume.py*|*review-pilot.py*) continue ;;
     esac
     hit=0
     cwd=$(readlink "$d/cwd" 2>/dev/null); case "$cwd" in "$REVIEW_DATA"*) hit=1;; esac
