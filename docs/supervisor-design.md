@@ -678,9 +678,14 @@ Each intent specifies its execution gate: PR for generation deliveries;
 page for standalone render/membership operations, which never mutate PR
 claim/current state or acquire a PR. Hold that gate through its receipt.
 Contention consumes no retry. A failed request
-gets exponential backoff from one minute to one hour; after five failures,
-stop automatic retries and name the debt in both dashboard and run summary.
-A human retry resets that budget, not its identity or payload.
+gets exponential backoff from one minute to one hour. Deliveries that redo
+their whole effect from current state (page publication and annotation,
+board sync) keep retrying at most hourly without end: a full publishing disk
+on 2026-10-07 parked 195 entries, and 25 comments behind them, under a
+give-up nobody reset. GitHub writes (comment, note, deprecate) stop after
+five failures, as does a comment reconciliation finds ambiguous, and name
+the debt in both dashboard and run summary; a human retry resets that
+budget, not its identity or payload.
 
 For a comment, first reconcile any earlier ambiguous write. Then fetch live
 head and thread under the PR lock. If head moved, include the exact reviewed
