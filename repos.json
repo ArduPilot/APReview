@@ -180,6 +180,17 @@
    "notes": "Crash dump analysis tool. Small C++ tree, no submodules; judge it as ArduPilot C++ where the flight-code rules apply. Added because the author page carries a review of its PR #1 and the cutover import refuses a key no repository claims."
   },
   {
+   "repo": "am32-firmware/AM32",
+   "key": "AM32",
+   "discovery": "explicit",
+   "post_comments": true,
+   "house_rules": "none",
+   "default_branch": "main",
+   "ci": true,
+   "added": "2026-10-08",
+   "notes": "AM32 brushless ESC firmware in C, for many MCU families (STM32 F0/F4/G0/G4/L4, GD32, AT32, WCH), each with its own makefile, plus a SITL build with its own tests. Not an ArduPilot repo: judge it against AM32's own conventions, not ArduPilot house rules. Default branch is main. Flash and RAM are tight on the small MCUs, timing and interrupt paths are critical, and the EEPROM layout has a schema checked in CI - a change to it affects existing configurations."
+  },
+  {
    "repo": "RsyncProject/rsync",
    "key": "rsync",
    "discovery": "rsync-mode",
