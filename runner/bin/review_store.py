@@ -838,6 +838,16 @@ class Store:
     # Dependencies first, so a bounded pass over a large outbox is not a
     # window of publishes all waiting on projections outside it.
     KIND_ORDER = {"projection": 0, "publish": 1, "comment": 2, "note": 2, "annotation": 3, "deprecate": 3, "board": 4}
+    # Deliveries that redo the whole effect from current state (a page
+    # re-rendered and replaced, a board row re-read and verified) retry
+    # hourly without end, so a remote outage clears by itself. GitHub writes
+    # stop after five failures for a human: reconciliation also parks an
+    # ambiguous comment there (duplicate marker, changed body).
+    RETRY_WITHOUT_END = frozenset({"publish", "annotation", "board"})
+
+    @classmethod
+    def given_up(cls, entry):
+        return entry.get("failures", 0) >= 5 and entry.get("kind") not in cls.RETRY_WITHOUT_END
 
     def delivery_snapshot(self, limit=100):
         # another drain may receipt and remove an entry between glob and read;
@@ -899,7 +909,7 @@ class Store:
 
         def ready(x):
             try:
-                return (x.get("next_attempt", 0) <= now and x.get("failures", 0) < 5
+                return (x.get("next_attempt", 0) <= now and not self.given_up(x)
                         and all(map(ok, x.get("dependencies", []))))
             except Exception:
                 return False
@@ -1129,7 +1139,7 @@ class Store:
             if not entry or self.has_receipt(entry["id"]):
                 unlink(path)
                 return
-            if entry["failures"] >= 5 or entry["next_attempt"] > time.time():
+            if self.given_up(entry) or entry["next_attempt"] > time.time():
                 return
             dependencies = [self.receipt_of(dep) for dep in entry.get("dependencies", [])]
             if any(not dep or dep["state"] not in self.SETTLED for dep in dependencies):

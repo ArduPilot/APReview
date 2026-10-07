@@ -97,13 +97,67 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(read(self.root / "receipts" / (old + ".json"))["state"], "superseded")
         self.assertEqual(len(list((self.root / "outbox").glob("*.json"))), 5)
 
+    def test_a_publish_failed_five_times_is_retried_once_its_backoff_passes(self):
+        # a full publishing disk failed every upload for hours; nothing reset
+        # them by hand, and the comments waiting on them never went out
+        self.accept()
+        outbox = self.root / "outbox"
+        comment = delivery_id(PR, 1, "comment", PR)
+        ident = delivery_id(PR, 1, "publish", "page:end/a")
+        entry = read(outbox / (ident + ".json"))
+        entry.update(state="uncertain", failures=7, next_attempt=time.time() + 3600,
+                     payload_digest=digest(entry.get("payload", {})),
+                     error="rsync failed: No space left on device (28)")
+        atomic(outbox / (ident + ".json"), entry)
+        waiting = read(outbox / (comment + ".json"))
+        waiting["dependencies"] = [ident]
+        atomic(outbox / (comment + ".json"), waiting)
+        self.lock.close()
+        self.store.drain(StubAdapter(self.root))
+        self.assertTrue((outbox / (ident + ".json")).exists())          # still backing off
+        entry = read(outbox / (ident + ".json"))
+        entry["next_attempt"] = time.time() - 1                           # the hour has passed
+        atomic(outbox / (ident + ".json"), entry)
+        self.store.drain(StubAdapter(self.root))
+        self.store.drain(StubAdapter(self.root))
+        self.assertFalse((outbox / (ident + ".json")).exists())
+        self.assertFalse((outbox / (comment + ".json")).exists())         # and the comment went out
+        self.assertTrue(self.store.has_receipt(comment))
+
+    def test_only_page_and_board_deliveries_retry_past_five_failures(self):
+        expected = dict(publish=False, annotation=False, board=False, comment=True, note=True, deprecate=True)
+        for kind, stopped in expected.items():
+            self.assertEqual(Store.given_up(dict(kind=kind, failures=5)), stopped, kind)
+            self.assertFalse(Store.given_up(dict(kind=kind, failures=4)), kind)
+
+    def test_an_ambiguous_comment_stays_stopped_for_a_human(self):
+        self.accept()
+        outbox = self.root / "outbox"
+        comment = delivery_id(PR, 1, "comment", PR)
+        for path in outbox.glob("*.json"):
+            if path.stem != comment:
+                path.unlink()
+        entry = read(outbox / (comment + ".json"))
+        # as Posting.reconcile leaves a duplicated marker or changed body
+        entry.update(state="uncertain", failures=5, next_attempt=0, payload_digest=digest(entry.get("payload", {})),
+                     error="delivery marker duplicated or body changed; inspect thread")
+        atomic(outbox / (comment + ".json"), entry)
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        for _ in range(3):
+            self.store.drain(adapter)
+        self.assertEqual(read(outbox / (comment + ".json")), entry)       # never touched again
+        self.assertFalse(list(adapter.root.glob("*.json")))
+
     def test_retiring_a_page_supersedes_its_debts_and_frees_the_comment(self):
         self.accept()
         outbox = self.root / "outbox"
         comment = delivery_id(PR, 1, "comment", PR)
         ident = delivery_id(PR, 1, "publish", "page:end/a")
         entry = read(outbox / (ident + ".json"))
-        entry.update(state="uncertain", failures=5, error="rsync failed: Unknown module")
+        # failing, and backed off: retire is how it ends before the next retry
+        entry.update(state="uncertain", failures=5, next_attempt=time.time() + 3600,
+                     error="rsync failed: Unknown module")
         atomic(outbox / (ident + ".json"), entry)
         # the comment waits on the page, and a run-journal republish of the
         # same page is keyed by operation rather than generation
@@ -939,7 +993,7 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(read(self.root / "receipts" / (old_id + ".json"))["state"], "superseded")
         self.assertFalse((adapter.root / (old_id + ".json")).exists())
 
-    def test_failed_delivery_has_a_finite_retry_budget_and_contention_costs_none(self):
+    def test_failed_delivery_backs_off_to_hourly_without_end_and_contention_costs_none(self):
         self.accept()
         class Failure:
             def deliver(self, entry, deadline):
@@ -955,7 +1009,16 @@ class ReviewStore(unittest.TestCase):
                 entry["next_attempt"] = 0
                 atomic(path, entry)
             self.store.drain(adapter)
-        self.assertTrue(all(read(p)["failures"] == 5 for p in (self.root / "outbox").glob("*.json")))
+        # past five failures pages and board rows are still retried, at most
+        # hourly; GitHub writes stop for a human
+        for path in (self.root / "outbox").glob("*.json"):
+            entry = read(path)
+            if entry["kind"] in Store.RETRY_WITHOUT_END:
+                self.assertEqual(entry["failures"], 6, entry["kind"])
+                self.assertLessEqual(entry["next_attempt"], time.time() + 3600)
+            else:
+                self.assertEqual(entry["failures"], 5, entry["kind"])
+        self.assertTrue({read(p)["kind"] for p in (self.root / "outbox").glob("*.json")} - Store.RETRY_WITHOUT_END)
 
     def test_drain_uses_a_finite_snapshot_and_count_budget(self):
         self.accept()
