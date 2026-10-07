@@ -724,10 +724,12 @@ def queue_rows():
 
     kinds = {}
     for e in entries:
-        k = kinds.setdefault(e.get('kind', '?'), dict(n=0, ready=0, waiting=0, retrying=0, dead=0, oldest=None, error=''))
+        k = kinds.setdefault(e.get('kind', '?'), dict(n=0, ready=0, waiting=0, retrying=0, failing=0, oldest=None, error=''))
         k['n'] += 1
+        # failed five times or more: pages and board rows still retry, at most
+        # hourly; GitHub writes wait for a human
         if e.get('failures', 0) >= 5:
-            k['dead'] += 1
+            k['failing'] += 1
             k['error'] = k['error'] or str(e.get('error') or '')
         elif e.get('next_attempt', 0) > t:
             k['retrying'] += 1
@@ -738,10 +740,10 @@ def queue_rows():
             k['waiting'] += 1
         k['oldest'] = max(k['oldest'] or 0, t - e['_mtime'])
     order = ['projection', 'publish', 'comment', 'note', 'annotation', 'deprecate', 'board']
-    total = dict(n=0, ready=0, waiting=0, retrying=0, dead=0, oldest=None)
+    total = dict(n=0, ready=0, waiting=0, retrying=0, failing=0, oldest=None)
     for name in sorted(kinds, key=lambda x: (order.index(x) if x in order else 99, x)):
         k = kinds[name]
-        for f in ('n', 'ready', 'waiting', 'retrying', 'dead'):
+        for f in ('n', 'ready', 'waiting', 'retrying', 'failing'):
             total[f] += k[f]
         total['oldest'] = max(total['oldest'] or 0, k['oldest'])
         rows.append(('outbox: %s' % name, k, k['error']))
@@ -794,12 +796,12 @@ def queue_rows():
     out = []
     for name, k, note in rows:
         cell = lambda f: ('<td data-sort="%d">%d</td>' % (k[f], k[f])) if f in k else '<td data-sort="-1">&mdash;</td>'
-        bad = k.get('dead') or (k.get('n') and name.startswith('outbox') and (k.get('oldest') or 0) > 3600) \
+        bad = k.get('failing') or (k.get('n') and name.startswith('outbox') and (k.get('oldest') or 0) > 3600) \
             or (name.startswith('store files') and k['n'] > 1000000) \
             or (name.startswith('drainer') and (k.get('oldest') or 0) > 600)
         out.append('<tr%s><td>%s</td>%s%s%s%s%s<td data-sort="%d">%s</td><td class="wrap"><span class="sub">%s</span></td></tr>' % (
             ' class="bad"' if bad else '', html.escape(name), cell('n'), cell('ready'), cell('waiting'),
-            cell('retrying'), cell('dead'), k.get('oldest') or 0,
+            cell('retrying'), cell('failing'), k.get('oldest') or 0,
             _age(k.get('oldest')) if k.get('n') or k.get('oldest') else '&mdash;', html.escape(note[:90])))
     return out
 
@@ -1041,11 +1043,13 @@ a per-model window is shown but does not count towards it.</p>
 <h2>Queues</h2>
 <p class="sub">Work waiting in the review store when this page was built. The outbox
 holds page updates, comments, annotations and board syncs; <em>Waiting</em> entries
-need another delivery first, <em>Retrying</em> ones failed and back off, and after
-five failures an entry is <em>Given up</em> until someone looks at it.</p>
+need another delivery first, <em>Retrying</em> ones failed and back off, and an
+entry that has failed five times or more is <em>Failing</em>: page updates and board
+syncs keep retrying, at most hourly; comments, notes and deprecations stop until
+someone looks at them.</p>
 <div class="scroll"><table class="sortable">
 <thead><tr><th>Queue</th><th>Items</th><th>Ready</th><th>Waiting</th><th>Retrying</th>
-<th>Given up</th><th>Oldest</th><th>Note</th></tr></thead>
+<th>Failing</th><th>Oldest</th><th>Note</th></tr></thead>
 <tbody>__QUEUES__</tbody></table></div>
 
 <h2>Label coverage</h2>

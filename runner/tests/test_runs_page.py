@@ -395,7 +395,7 @@ class Dashboard(unittest.TestCase):
         put("outbox", "p1", kind="publish", failures=0, next_attempt=0, dependencies=["done"])
         put("outbox", "c1", kind="comment", failures=0, next_attempt=0, dependencies=["p9"])
         put("outbox", "c2", kind="comment", failures=2, next_attempt=time.time() + 600, error="GitHub deadline")
-        put("outbox", "b1", kind="board", failures=5, next_attempt=0, error="rate limit exceeded")
+        put("outbox", "b1", kind="board", failures=5, next_attempt=0, error="rate limit exceeded")    # failing
         put("operations", "op1", pr="pr:o/r#1", intents=[{"id": "never-fanned", "kind": "publish", "target": "page:x"}])
         sec = self.queue_section(self.build())
         row = lambda name: re.search(r"<tr[^>]*><td>%s</td>(.*?)</tr>" % re.escape(name), sec).group(1)
