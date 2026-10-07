@@ -77,7 +77,8 @@ def freeze(args):
     from review_github import GitHub
     import review_metrics
     directory = outside_production(args.out)
-    if directory.exists() and any(directory.iterdir()):
+    # a refused freeze leaves only its metrics: that directory may be retried
+    if directory.exists() and any(p.name != "metrics" for p in directory.iterdir()):
         raise SystemExit("%s is not empty: a pilot directory is never reused" % directory)
     directory.mkdir(parents=True, exist_ok=True)
     # discovery's metrics go to the pilot, never production's log

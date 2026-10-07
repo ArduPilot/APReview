@@ -124,6 +124,12 @@ class Pilot(PilotBase):
         r = self.tool("collect", "--dir", str(self.pilot), ok=False)
         self.assertIn("other inputs", r.stderr)
 
+    def test_a_refused_freeze_can_be_retried_into_the_same_directory(self):
+        retry = self.root / "retry"
+        (retry / "metrics").mkdir(parents=True)
+        r = self.tool("freeze", "--out", str(retry), "pr:owner/repo#1", ok=False)
+        self.assertNotIn("is not empty", r.stderr)
+
     def test_a_pilot_inside_the_production_store_is_refused(self):
         inside = self.production / "pilot"
         r = self.tool("run", "--dir", str(inside), "--arm", "legacy", ok=False)
