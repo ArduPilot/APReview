@@ -34,6 +34,15 @@ def pilot_dir(root, production):
     return pilot
 
 
+def load_pilot():
+    sys.path.insert(0, str(BIN))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("pilot", str(BIN / "review-pilot.py"))
+    pilot = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pilot)
+    return pilot
+
+
 class PilotBase(unittest.TestCase):
     def setUp(self):
         self.root = workspace(self)
@@ -84,13 +93,99 @@ class Pilot(PilotBase):
         self.assertEqual({k["arm"] for k in key.values()}, {"legacy", "paging"})
         for finding in pack:
             self.assertNotIn("arm", finding)
-            self.assertNotIn("/attempts/", finding["claim"])          # scrubbed of what could reveal the arm
-            self.assertIn("[path]", finding["claim"])
+            self.assertIn("/attempts/", finding["claim"])             # as written: the pack stays with the key
             self.assertEqual(finding["final"], "retained")
         contexts = read(self.pilot / "contexts.json")
         self.assertEqual(set(contexts["arms"]), {"legacy", "paging"})
         # stub passes leave no usage logs: every attempt is counted as unmeasured, not lost
         self.assertTrue(all(n > 0 for n in contexts["unmeasured"].values()))
+
+    def test_adjudication_packets_are_blind_and_verdicts_merge_into_a_score(self):
+        self.run_arms()
+        self.tool("collect", "--dir", str(self.pilot))
+        for inside in (self.pilot / "adj", self.root):
+            r = self.tool("packets", "--dir", str(self.pilot), "--out", str(inside), ok=False)
+            self.assertIn("outside the pilot directory", r.stderr)
+        out = self.root / "adjudication"
+        self.tool("packets", "--dir", str(self.pilot), "--out", str(out))
+        self.assertFalse((out / "suspects.json").exists())               # originals stay with the key
+        suspects = read(self.pilot / "suspects.json")
+        self.assertTrue(suspects and all(s["original"] != s["blinded"] for s in suspects))
+        packet = read(out / "owner-repo-1" / "packet.json")
+        for finding in packet["findings"]:
+            self.assertNotIn("/attempts/", finding["claim"])
+            self.assertIn("[path]", finding["claim"])
+        self.assertEqual(len(packet["findings"]), 2)
+        for finding in packet["findings"]:
+            self.assertEqual(set(finding), {"id", "claim", "location", "previous", "adjusted", "reviewer_notes"})
+        self.assertFalse(list(out.rglob("adjudication-key.json")))
+        self.assertTrue((out / "owner-repo-1" / "PROMPT.md").read_text().startswith("You are judging"))
+        ids = [f["id"] for f in packet["findings"]]
+        one = out / "owner-repo-1" / "verdicts.json"
+        good = dict(real=True, issues={"overflow": True}, reason="checked x.c:1")
+        # missing PRs, ids, reasons and string booleans are all refused
+        for bad in ({ids[0]: good},
+                    {i: dict(good, reason="") for i in ids},
+                    {i: dict(real="false", reason="r") for i in ids},
+                    {i: dict(real=True, issues={"overflow": "true"}, reason="r") for i in ids},
+                    {ids[0]: good, ids[1]: dict(good, issues={"overflow": False})}):
+            atomic(one, bad)
+            r = self.tool("verdicts", "--dir", str(self.pilot), "--out", str(out), ok=False)
+            self.assertIn("not complete", r.stderr)
+        r = self.tool("spotcheck", "--dir", str(self.pilot), "--packets", str(out), ok=False)
+        self.assertIn("run verdicts first", r.stderr)
+        key = read(self.pilot / "adjudication-key.json")
+        everything = {i: dict(real=True, issues={"overflow": True}, reason="r") for i in key}
+        everything[ids[0]] = dict(real=True, issues={"overflow": False}, reason="r")
+        atomic(self.pilot / "verdicts.json", everything)                  # written by hand, inconsistent
+        r = self.tool("spotcheck", "--dir", str(self.pilot), "--packets", str(out), ok=False)
+        self.assertIn("run verdicts first", r.stderr)
+        # one arm's finding names a second problem too: neither arm misses it
+        atomic(one, {ids[0]: good, ids[1]: dict(good, issues={"overflow": True, "leak": False})})
+        self.tool("verdicts", "--dir", str(self.pilot), "--out", str(out))
+        self.tool("spotcheck", "--dir", str(self.pilot), "--packets", str(out))
+        lone_arm = key[ids[1]]["arm"]
+        result = json.loads(self.tool("score", "--dir", str(self.pilot), "--verdicts",
+                                      str(self.pilot / "verdicts.json")).stdout)
+        self.assertEqual(result["real"][lone_arm], 2)
+        self.assertEqual(result["missed_blockers"], 0)
+        spot = (self.pilot / "spotcheck.md").read_text()
+        self.assertNotIn("/attempts/", spot)                             # from the audited packets, not the pack
+        self.assertNotIn("Real blockers only one arm found (0)\n\n### ", spot)
+
+    def test_text_that_could_tell_an_arm_or_a_severity_is_blinded(self):
+        pilot = load_pilot()
+        blinded = pilot.blind("v4-paging read job.json and result-skeleton.json: primary:F1 retained, blocking. "
+                              "A blocking finding and a merge blocker in the blocking read")
+        for leak in ("paging", "job.json", "skeleton", "primary:F1", "retained, blocking", "blocking finding", "blocker"):
+            self.assertNotIn(leak, blinded)
+        # the code's own sense survives
+        for meaning in ("does not block the main loop", "a high priority interrupt", "the legacy protocol",
+                        "src/inputs/frame.c", "libraries/AP_Param/index.json"):
+            self.assertEqual(pilot.blind(meaning), meaning)
+        self.assertIn("blocking read", blinded)
+
+    def test_a_merged_finding_is_folded_into_the_one_that_survives(self):
+        pilot = load_pilot()
+        a = dict(id="primary:F1", claim="A overflows", location={"non_line_specific": True}, kind="BUG")
+        b = dict(id="cold:F1", claim="A overflows, and B leaks", location={"non_line_specific": True}, kind="BUG")
+        results = dict(primary=dict(findings=[a]), cold=dict(findings=[b]), reconciliation=dict(outcomes=[
+            dict(id="primary:F1", disposition="retained", blocking=True, rationale="A verified"),
+            dict(id="cold:F1", disposition="merged", target="primary:F1", blocking=True, rationale="also B")]))
+        b["location"] = dict(file="libraries/B.cpp", line=7)
+        kept = pilot.kept_findings(results, {})
+        self.assertEqual(len(kept), 1)                                  # one counting unit
+        self.assertIn("B leaks", kept[0]["claim"])
+        self.assertIn("libraries/B.cpp", kept[0]["claim"])              # and where it is
+        self.assertIn("also B", kept[0]["final_rationale"])
+
+    def test_our_own_comments_are_left_out_of_the_thread(self):
+        pilot = load_pilot()
+        self.assertTrue(pilot.ours(dict(body="**Automated review note — AI-generated (Claude+Codex)** ...")))
+        self.assertTrue(pilot.ours(dict(body="text\n<!-- apreview: head=abc -->")))
+        self.assertTrue(pilot.ours(dict(body="> **Deprecated — see below.**\n\n<details><summary>Previous</summary>"
+                                             "\n\n**Automated review note — AI-generated** x\n</details>")))
+        self.assertFalse(pilot.ours(dict(body="> **Automated review note** quoted\n> <!-- apreview: x -->\nI disagree")))
 
     def test_collect_refuses_an_incomplete_pair(self):
         self.tool("run", "--dir", str(self.pilot), "--arm", "legacy")
@@ -287,9 +382,9 @@ class Score(unittest.TestCase):
                             "--verdicts", str(self.dir / "verdicts.json")], capture_output=True, text=True)
         return r, read(self.dir / "score.json") if r.returncode == 0 else None
 
-    BASE = {"a1": dict(real=True, blocking=True, issue="A"), "b1": dict(real=True, blocking=False, issue="B"),
-            "a2": dict(real=True, blocking=True, issue="A"), "c2": dict(real=True, blocking=False, issue="C"),
-            "x2": dict(real=False)}
+    BASE = {"a1": dict(real=True, issues={"A": True}, reason="r"), "b1": dict(real=True, issues={"B": False}, reason="r"),
+            "a2": dict(real=True, issues={"A": True}, reason="r"), "c2": dict(real=True, issues={"C": False}, reason="r"),
+            "x2": dict(real=False, reason="r")}
 
     def test_misses_gains_and_false_blockers(self):
         r, result = self.score(self.BASE)
@@ -297,15 +392,20 @@ class Score(unittest.TestCase):
         # x2 is no problem, and c2 is real but should not block: both are false blockers
         self.assertEqual(result["false_blockers"], {"legacy": 0, "paging": 2})
         self.assertTrue(result["passed"])
-        r, result = self.score(dict(self.BASE, a2=dict(real=False)))
+        r, result = self.score(dict(self.BASE, a2=dict(real=False, reason="r")))
         self.assertEqual(result["missed_blockers"], 1)
         self.assertFalse(result["passed"])
+        # a bundled finding that names B as well: B is no longer missed
+        r, result = self.score(dict(self.BASE, a2=dict(real=True, issues={"A": True, "B": False}, reason="r")))
+        self.assertEqual((result["missed_blockers"], result["missed_other"]), (0, 0))
 
     def test_incomplete_or_inconsistent_verdicts_are_refused(self):
         for verdicts, needle in (({"a1": dict(real=True)}, "verdicts missing"),
                                  (dict(self.BASE, b1={}), "real must be"),
-                                 (dict(self.BASE, b1=dict(real=True)), "needs blocking"),
-                                 (dict(self.BASE, a2=dict(real=True, blocking=False, issue="A")), "both blocking")):
+                                 (dict(self.BASE, b1=dict(real=True, reason="r")), "needs issues"),
+                                 (dict(self.BASE, b1=dict(real=True, issues={"B": False})), "reason is needed"),
+                                 (dict(self.BASE, x2=dict(real=False, issues={"X": True}, reason="r")), "names no issues"),
+                                 (dict(self.BASE, a2=dict(real=True, issues={"A": False}, reason="r")), "both blocking")):
             r, result = self.score(verdicts)
             self.assertNotEqual(r.returncode, 0, needle)
             self.assertIn(needle, r.stderr)

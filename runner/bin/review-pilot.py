@@ -329,20 +329,6 @@ def stop_arms(directory, arms, wait=1500):
         time.sleep(10)
 
 
-def scrub(text):
-    """Text a reviewer wrote, with what could reveal its arm removed: paths
-    into its job directory or rendered inputs."""
-    if not isinstance(text, str):
-        return text
-    return re.sub(r"\S*(?:/attempts/|inputs/|job\.json|REVIEW_JOB_DIR|REVIEW_SCRATCH)\S*", "[path]", text)
-
-
-def scrub_location(location):
-    if isinstance(location, dict) and isinstance(location.get("file"), str):
-        return dict(location, file=scrub(location["file"]))
-    return location
-
-
 def arm_results(directory, arm, frozen):
     """{pr: (bundle results, previous findings)} for every frozen PR, or the
     problems that stop this arm being compared."""
@@ -373,27 +359,48 @@ def arm_results(directory, arm, frozen):
 def kept_findings(results, previous):
     """The findings an arm's review kept: each upstream finding and each
     previous finding its reconciliation did not refute or merge away, with
-    reconciliation's word on it when it adjusted one."""
+    reconciliation's word on it when it adjusted one. A finding merged into
+    another is folded into the one that survives, with its location, so a
+    problem only it described is still there to be judged. Text is kept as
+    written: the pack stays with the key, and packets blinds it."""
     final = results.get("reconciliation") or {}
     outcomes = {o["id"]: o for o in final.get("outcomes") or []}
-    found = []
+    every = {}
     for kind in ("primary", "cold", "validation"):
         r = results.get(kind) or {}
         for f in (r.get("findings") or []) + (r.get("new") or []):
-            o = outcomes.get(f["id"], {})
-            if o.get("disposition") in ("refuted", "merged"):
-                continue
-            found.append(dict(claim=scrub(f.get("claim")), location=scrub_location(f.get("location")), kind=f.get("kind"),
-                              severity=scrub(f.get("severity")), status=f.get("status"),
-                              final=o.get("disposition"), final_rationale=scrub(o.get("rationale")),
-                              claimed_blocking=bool(o.get("blocking"))))
+            every[f["id"]] = dict(f, origin=kind)
     for ident, f in previous.items():
+        every[ident] = dict(f, id=ident, origin="previous")
+    def survivor(ident, seen=()):
         o = outcomes.get(ident, {})
-        if o.get("disposition") in (None, "refuted", "merged"):
+        if o.get("disposition") == "merged" and o.get("target") in every and o["target"] not in seen:
+            return survivor(o["target"], seen + (ident,))
+        return ident
+    found, kept = [], {}
+    for ident, f in every.items():
+        o = outcomes.get(ident, {})
+        if o.get("disposition") in ("refuted", "merged") or (f["origin"] == "previous" and not o.get("disposition")):
             continue
-        found.append(dict(claim=scrub(f.get("claim")), location={"non_line_specific": True}, kind="PREVIOUS",
-                          severity="", status="", final=o.get("disposition"),
-                          final_rationale=scrub(o.get("rationale")), claimed_blocking=bool(o.get("blocking"))))
+        entry = dict(claim=f.get("claim"), kind="PREVIOUS" if f["origin"] == "previous" else f.get("kind"),
+                     location={"non_line_specific": True} if f["origin"] == "previous"
+                     else f.get("location"),
+                     severity=f.get("severity") if f["origin"] != "previous" else "",
+                     status=f.get("status") if f["origin"] != "previous" else "",
+                     final=o.get("disposition"), final_rationale=o.get("rationale"),
+                     claimed_blocking=bool(o.get("blocking")))
+        kept[ident] = entry
+        found.append(entry)
+    for ident, f in every.items():
+        o = outcomes.get(ident, {})
+        target = survivor(ident) if o.get("disposition") == "merged" else None
+        if target in kept and target != ident:
+            where = f.get("location") if f["origin"] != "previous" else None
+            kept[target]["claim"] += "\n\nMerged into this finding%s: %s" % (
+                " (at %s)" % json.dumps(where, sort_keys=True) if where else "", f.get("claim") or "")
+            if o.get("rationale"):
+                kept[target]["final_rationale"] = ((kept[target]["final_rationale"] or "") +
+                                                   "\n\nOn the merged finding: " + o["rationale"]).strip()
     return found
 
 
@@ -451,9 +458,9 @@ def collect(args):
 
 def score(args):
     """Unblind the verdicts and apply the bound. verdicts.json holds, for
-    every pack id: real (true/false); for a real one, blocking (whether it
-    should block) and issue (a name shared by every finding, in either arm,
-    describing the same real problem)."""
+    every pack id: real (true/false), a reason, and for a real one issues:
+    {name: whether it should block}, each name shared by every finding, in
+    either arm, that describes the same real problem."""
     directory = Path(args.dir)
     key, verdicts = read(directory / "adjudication-key.json"), read(Path(args.verdicts))
     pack = {f["id"]: f for f in read(directory / "adjudication-pack.json")}
@@ -466,22 +473,19 @@ def score(args):
         if ident not in key:
             errors.append("%s is not in the pack" % ident)
             continue
-        if not isinstance(verdict, dict) or not isinstance(verdict.get("real"), bool):
-            errors.append("%s: real must be true or false" % ident)
+        problem = check_verdict(verdict)
+        if problem:
+            errors.append("%s: %s" % (ident, problem))
             continue
         arm, pr = key[ident]["arm"], key[ident]["pr"]
-        should_block = verdict["real"] and verdict.get("blocking") is True
-        if verdict["real"]:
-            if not isinstance(verdict.get("blocking"), bool) or not isinstance(verdict.get("issue"), str) \
-                    or not verdict["issue"]:
-                errors.append("%s: a real finding needs blocking (true/false) and an issue name" % ident)
-                continue
-            name = (pr, verdict["issue"])
-            if blocking_of.setdefault(name, verdict["blocking"]) != verdict["blocking"]:
-                errors.append("%s: issue %r judged both blocking and not" % (ident, verdict["issue"]))
-            issues[arm][name] = verdict["blocking"]
-        # a false blocker: raised as blocking, but not a real problem that should block
-        if pack[ident].get("claimed_blocking") and not should_block:
+        named = verdict.get("issues") or {}
+        # a finding may describe several real problems: each counts as found
+        for issue, blocking in named.items():
+            if blocking_of.setdefault((pr, issue), blocking) != blocking:
+                errors.append("%s: issue %r judged both blocking and not" % (ident, issue))
+            issues[arm][(pr, issue)] = blocking
+        # a false blocker: raised as blocking, but describing no real problem that should block
+        if pack[ident].get("claimed_blocking") and not any(named.values()):
             false_blockers[arm] += 1
     if errors:
         raise SystemExit("verdicts not usable: %s" % errors[:10])
@@ -502,6 +506,195 @@ def score(args):
     print(json.dumps(result, indent=1))
 
 
+def slug(pr):
+    return pr.split(":", 1)[-1].replace("/", "-").replace("#", "-")
+
+
+def ours(entry):
+    """One of our own review comments, the deprecated ones included: left
+    out of what the adjudicator reads, so earlier verdicts do not anchor
+    it. Judged by unquoted lines, so an author quoting us is kept."""
+    body = (entry or {}).get("body") or ""
+    unquoted = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith(">"))
+    return "Automated review note" in unquoted or bool(re.search(r"<!--\s*apreview:", unquoted, re.I))
+
+
+# what in a reviewer's text could tell the adjudicator its arm or someone's
+# view of severity; the adjudicator decides severity itself
+BLIND = [
+    # an attempt's own paths; a repository's src/inputs/x.c is left alone
+    (r"\S*(?:/attempts/|REVIEW_JOB_DIR|REVIEW_SCRATCH)\S*|(?<![\w/])(?:\./)?inputs/\S*", "[path]"),
+    (r"(?<![\w/.-])(?:job|manifest|index|result-skeleton|skeleton|diffstat|facts|fresh_snapshot)\.(?:json|md|txt)\b",
+     "[input]"),
+    (r"\b(?:v4-paging|v3-files|v2-schema)\b", "[reviewer]"),
+    (r"\b(?:primary|cold|validation|reconciliation|previous|upstream):[A-Za-z]*\d+\b", "[finding]"),
+    # unmistakable review severity only: words like "block" and "priority"
+    # are often the code's own sense, and are left for the audit below
+    (r"\b(?:non-?blocking|blocking)\s+(?:finding|review finding)s?\b", "[severity] finding"),
+    (r"\b(?:merge[- ])?blockers?\b", "[severity]"),
+    (r"\bblocks? (?:the )?merg(?:e|ing)\b", "[severity]"),
+    (r"\b(?:retained|kept|adjusted|marked)[,;:]?\s+(?:as\s+)?(?:non-?)?blocking\b", "[severity]"),
+    (r"\bblocking\s*[:=]\s*(?:true|false|yes|no)\b", "[severity]"),
+    (r"\b(?:must[- ]fix|should[- ]fix)\b", "[severity]"),
+    (r"\b(?:critical|high|medium|low)[- ]severity\b", "[severity]"),
+    (r"\bseverity\s*[:=]\s*(?:critical|high|medium|low|major|minor)\b", "[severity]"),
+]
+SUSPECT = re.compile(r"(?i)\b(?:block(?:s|ing|er)?|severity|priority|legacy|paging|skeleton|schema|nit|F\d+)\b")
+
+
+def blind(text):
+    if not isinstance(text, str):
+        return text
+    for pattern, replacement in BLIND:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return text
+
+
+def packets(args):
+    """One blinded work directory per PR for the adjudicator: the findings
+    without arm, kind, severity or anyone's blocking view, and the frozen
+    inputs. The key stays in the pilot directory: adjudicate on a machine
+    that does not hold it."""
+    directory = Path(args.dir).resolve()
+    out = Path(args.out).resolve()
+    if out == directory or directory in out.parents or out in directory.parents:
+        raise SystemExit("packets go outside the pilot directory, away from its key")
+    pack = read(directory / "adjudication-pack.json")
+    if pack is None:
+        raise SystemExit("no adjudication-pack.json: collect first")
+    candidates = {c["pr"]: c for c in read(directory / "candidates.json")}
+    prompt = (BIN.parent.parent / "commands" / "pilot-adjudicate.md").read_text()
+    suspects = []
+    for pr, c in candidates.items():
+        work = out / slug(pr)
+        if (work / "verdicts.json").exists():
+            raise SystemExit("%s already has verdicts: not overwriting" % work)
+        work.mkdir(parents=True, exist_ok=True)
+        findings = []
+        for f in (f for f in pack if f["pr"] == pr):
+            location = f["location"]
+            if isinstance(location, dict):
+                location = {k: blind(v) for k, v in location.items()}
+            findings.append(dict(id=f["id"], claim=blind(f["claim"]), location=location,
+                                 previous=f.get("kind") == "PREVIOUS", adjusted=f.get("final") == "adjusted",
+                                 reviewer_notes=blind(f.get("final_rationale") or "")))
+            for field, original, blinded in (("claim", f["claim"], findings[-1]["claim"]),
+                                             ("reviewer_notes", f.get("final_rationale") or "",
+                                              findings[-1]["reviewer_notes"]),
+                                             ("location", f["location"], location)):
+                if blinded != original or SUSPECT.search(json.dumps(blinded)):
+                    suspects.append(dict(pr=pr, id=f["id"], field=field, original=original, blinded=blinded))
+        atomic(work / "packet.json", dict(pr=pr, title=c.get("title"), head=c["head"], base=c.get("base"),
+                                          merge_base=c.get("merge_base"), findings=findings))
+        (work / "diff.patch").write_text(c.get("diff") or "")
+        atomic(work / "thread.json", [t for t in c.get("thread") or [] if not ours(t)])
+        (work / "rules.md").write_text(c.get("rules") or "")
+        (work / "PROMPT.md").write_text(prompt)
+        print("%s: %d findings -> %s (check out %s at %s into %s)"
+              % (pr, len(findings), work, c.get("repository"), c["head"], work / "code"))
+    # read before any packet is judged, by Claude and never by tridge, whose
+    # spot-check must stay blind: what blinding changed, and what may still tell
+    atomic(Path(args.dir) / "suspects.json", suspects)
+    print("%d passages to read (original and blinded) before judging: %s"
+          % (len(suspects), Path(args.dir) / "suspects.json"))
+
+
+def check_verdict(verdict):
+    """What is wrong with one finding's verdict, or None."""
+    if not isinstance(verdict, dict) or not isinstance(verdict.get("real"), bool):
+        return "real must be true or false"
+    if not isinstance(verdict.get("reason"), str) or not verdict["reason"].strip():
+        return "a reason is needed"
+    issues = verdict.get("issues")
+    if verdict["real"]:
+        if not isinstance(issues, dict) or not issues or not all(
+                isinstance(k, str) and k and isinstance(v, bool) for k, v in issues.items()):
+            return "a real finding needs issues: {name: blocking (true/false)}"
+    elif issues:
+        return "a finding that is not real names no issues"
+    return None
+
+
+def inconsistent(verdicts, pr_of):
+    """Issues judged both blocking and not, within a PR."""
+    blocking, errors = {}, []
+    for ident, v in verdicts.items():
+        for name, b in ((v or {}).get("issues") or {}).items():
+            if blocking.setdefault((pr_of(ident), name), b) != b:
+                errors.append("%s: issue %r judged both blocking and not" % (pr_of(ident), name))
+    return errors
+
+
+def verdicts(args):
+    """Merge the adjudicator's per-PR verdicts, checking they cover exactly
+    the pack and are complete and consistent, into one file for score."""
+    directory, out, merged, errors = Path(args.dir), Path(args.out), {}, []
+    pack = read(directory / "adjudication-pack.json")
+    for pr in sorted({f["pr"] for f in pack} | set(read(directory / "frozen.json")["prs"])):
+        ids = {f["id"] for f in pack if f["pr"] == pr}
+        got = read(out / slug(pr) / "verdicts.json")
+        if not isinstance(got, dict):
+            if ids:
+                errors.append("%s: no verdicts.json" % pr)
+            continue
+        if set(got) != ids:
+            errors.append("%s: verdicts for %s, findings %s" % (pr, sorted(set(got) - ids), sorted(ids - set(got))))
+        for ident, v in got.items():
+            problem = check_verdict(v)
+            if problem:
+                errors.append("%s %s: %s" % (pr, ident, problem))
+        if not errors:
+            errors += inconsistent(got, lambda ident: pr)
+        merged.update(got)
+    if errors:
+        raise SystemExit("verdicts not complete: %s" % errors)
+    atomic(directory / "verdicts.json", merged)
+    print("%d verdicts merged into %s" % (len(merged), directory / "verdicts.json"))
+
+
+def spotcheck(args):
+    """tridge's sample, still blind: ten findings at random, and every
+    finding of a real blocker that only one arm found."""
+    directory = Path(args.dir)
+    key, verdict = read(directory / "adjudication-key.json"), read(directory / "verdicts.json")
+    # the audited packets, exactly as the adjudicator saw them: never the pack
+    shown = {}
+    for packet in Path(args.packets).glob("*/packet.json"):
+        p = read(packet)
+        shown.update({f["id"]: dict(f, pr=p["pr"]) for f in p["findings"]})
+    if set(shown) != set(key):
+        raise SystemExit("the packets do not cover the pack: %d of %d findings" % (len(set(shown) & set(key)), len(key)))
+    if not isinstance(verdict, dict) or set(verdict) != set(key) or any(check_verdict(v) for v in verdict.values()) \
+            or inconsistent(verdict, lambda ident: key[ident]["pr"]):
+        raise SystemExit("run verdicts first: verdicts.json is not complete and checked")
+    arms_of = {}
+    for ident, v in verdict.items():
+        for name, b in (v.get("issues") or {}).items():
+            if b is True:
+                arms_of.setdefault((key[ident]["pr"], name), set()).add(key[ident]["arm"])
+    lone = sorted(i for i, v in verdict.items()
+                  if any(b is True and len(arms_of[(key[i]["pr"], name)]) == 1
+                         for name, b in (v.get("issues") or {}).items()))
+    rest = [i for i in sorted(verdict) if i not in lone]
+    sample = random.SystemRandom().sample(rest, min(10, len(rest)))
+    lines = ["# Adjudication spot-check", "",
+             "For each: is the verdict right? Arms stay hidden.", ""]
+    for title, ids in (("Real blockers only one arm found", lone), ("Random sample", sample)):
+        lines += ["## %s (%d)" % (title, len(ids)), ""]
+        for ident in ids:
+            f, v = shown[ident], verdict[ident]
+            lines += ["### %s %s" % (f["pr"], ident), "",
+                      "- claim: %s" % f["claim"],
+                      "- location: %s" % json.dumps(f["location"]),
+                      "- previous: %s; adjusted by the reviewers' last pass: %s"
+                      % ("yes" if f["previous"] else "no", "yes" if f["adjusted"] else "no"),
+                      "- reviewers' notes: %s" % f["reviewer_notes"],
+                      "- verdict: real=%s issues=%s" % (v["real"], json.dumps(v.get("issues") or {})),
+                      "- reason: %s" % v["reason"], ""]
+    (directory / "spotcheck.md").write_text("\n".join(lines))
+    print("%d lone blockers and %d sampled findings in %s" % (len(lone), len(sample), directory / "spotcheck.md"))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     sub = p.add_subparsers(dest="command", required=True)
@@ -519,12 +712,21 @@ def main():
             r.add_argument("--hours", type=float, default=10)
     c = sub.add_parser("collect")
     c.add_argument("--dir", required=True)
+    k = sub.add_parser("packets")
+    k.add_argument("--dir", required=True)
+    k.add_argument("--out", required=True)
+    v = sub.add_parser("verdicts")
+    v.add_argument("--dir", required=True)
+    v.add_argument("--out", required=True)
+    sp = sub.add_parser("spotcheck")
+    sp.add_argument("--dir", required=True)
+    sp.add_argument("--packets", required=True)
     s = sub.add_parser("score")
     s.add_argument("--dir", required=True)
     s.add_argument("--verdicts", required=True)
     args = p.parse_args()
-    return {"freeze": freeze, "run": run, "overnight": overnight, "collect": collect,
-            "score": score}[args.command](args) or 0
+    return {"freeze": freeze, "run": run, "overnight": overnight, "collect": collect, "packets": packets,
+            "verdicts": verdicts, "spotcheck": spotcheck, "score": score}[args.command](args) or 0
 
 
 if __name__ == "__main__":
