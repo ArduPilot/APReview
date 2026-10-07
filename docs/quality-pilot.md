@@ -18,19 +18,23 @@ has reference clones for:
 
 | PR | What |
 | --- | --- |
-| ArduPilot/ardupilot#34626 | ChibiOS: stack overflow in crashdump setup |
+| ArduPilot/ardupilot#34657 | preserve zero-initialised allocations, verify allocator wrapping |
+| ArduPilot/ardupilot#34650 | renode fixes |
 | ArduPilot/ardupilot#34623 | Tools: static stack usage analysis and CI check |
 | ArduPilot/ardupilot#34606 | AP_HAL_ChibiOS: optional STM32H7 USB GDB debugging |
-| ArduPilot/ardupilot#34619 | AP_IOMCU: ChibiOS bootloader for F1 IOMCUs |
-| ArduPilot/ardupilot#34618 | AP_Param: wait for in-flight saves in flush |
 | ArduPilot/ardupilot#34604 | AP_HAL_ChibiOS: enable H7 SRAM before the first stack access |
 | ArduPilot/ardupilot#34597 | BLHeli passthrough interrupt storm lockup |
+| ArduPilot/ardupilot#34519 | GCS_MAVLink: full-width 32-bit parameters |
 | ArduPilot/MAVProxy#1770 | misseditor: survey planning and draft mission maps |
 | ArduPilot/MAVProxy#1769 | wp: fix Draw altitude and add remembered frame selection |
 | mavlink/mavlink#2637 | common: add stream ID and vertical FOV extensions |
 
 (AM32#78 and AM32#417 were first chosen, and replaced before any review
-ran: the system has no AM32 reference clone, so they could not be frozen.)
+ran: the system has no AM32 reference clone, so they could not be frozen.
+ardupilot#34626, #34619 and #34618 were merged or closed before the freeze
+on 2026-10-08; freeze refused them, and they were replaced, before any
+review ran, by the three newest open non-WIP ardupilot PRs by tridge:
+#34657, #34650 and #34519.)
 
 ## Procedure
 
