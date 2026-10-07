@@ -60,23 +60,42 @@ review ran, by the three newest open non-WIP ardupilot PRs by tridge:
    was accepted at its frozen head in both arms, under the arm's
    presentation; otherwise nothing is pooled. It then pools, per PR, every
    finding each arm's reconciliation kept (upstream findings and previous
-   findings not refuted or merged, with reconciliation's rationale where it
-   adjusted one), shuffles them, gives each a random id, and hides the arm
-   behind `adjudication-key.json`. Text that could reveal the arm (paths
-   into the job directory or rendered inputs) is replaced by `[path]`;
-   evidence commands are left out, since the adjudicator checks the code
-   itself. Context figures for every attempt, retries included, go to
+   findings not refuted, with reconciliation's rationale where it adjusted
+   one; a finding merged into another is folded into the survivor, with its
+   location, so a problem only it described is still judged), shuffles
+   them, gives each a random id, and hides the arm behind
+   `adjudication-key.json`. The pack keeps the text as written, since it
+   never leaves the pilot directory; evidence commands are left out, since
+   the adjudicator checks the code itself. Context figures for every attempt, retries included, go to
    `contexts.json`.
-4. **Adjudicate.** Codex judges every finding in `adjudication-pack.json`
-   against the PR's code at the frozen head, without the key: `real`
-   (true/false); for a real one, `blocking` (whether it should block) and
-   `issue` (a name shared by every finding, in either arm, that describes
-   the same problem). tridge then reviews a sample of ten findings chosen
-   at random, and every real blocker found by only one arm.
+4. **Adjudicate.** `review-pilot.py packets` writes one work directory per
+   PR, outside the pilot directory: the PR's findings (claim, location,
+   whether previous or adjusted, and reconciliation's notes; no arm, kind,
+   severity or anyone's blocking view), its diff, its thread without our
+   own review comments (so earlier verdicts do not anchor the judge), the
+   repository's rules, and the prompt (`commands/pilot-adjudicate.md`).
+   Unmistakable review metadata (an attempt's paths, input file names,
+   finding ids, presentation names, review-severity phrasing) is replaced
+   by markers; every claim, note or location blinding changed, or that
+   still looks suspect, is listed original beside blinded in the pilot
+   directory's `suspects.json`. Claude reads it before any packet is
+   judged, and tridge never does, so that his spot-check stays blind. The packets are copied to, and judged on, a
+   machine that does not hold the pilot directory, so the key is out of
+   reach; each gets a fresh checkout of the repository at the frozen head
+   in `code/`. Codex, one session per PR, judges every finding against that
+   code: `real` (true/false), a reason, and for a real one every real
+   problem it describes as `{issue: blocking}`, each issue named the same
+   wherever, in either arm, the same problem is described. `review-pilot.py
+   verdicts` refuses incomplete, malformed or inconsistent answers and
+   merges them. `review-pilot.py spotcheck` then gives tridge, still blind
+   and from the audited packets exactly as the adjudicator saw them, ten
+   findings chosen at random and every finding of a real blocker that only
+   one arm found.
 5. **Score.** `review-pilot.py score` refuses incomplete or inconsistent
-   verdicts, unblinds the rest and applies the bound below. A false
-   blocker is a finding raised as blocking that is not a real problem
-   that should block.
+   verdicts, unblinds the rest and applies the bound below. An arm has
+   found a problem when any of its findings names it. A false blocker is a
+   finding raised as blocking that describes no real problem that should
+   block.
 
 ## Bound (fixed before any pilot review ran)
 
