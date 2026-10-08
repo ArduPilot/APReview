@@ -864,7 +864,12 @@ locks and only then switches routing. Both directions are idempotent and have
 The full cutover is `review-handoff.py new --full --pages <mirror>`, with a
 `--dry-run` first; it needs a reference clone for every repository under
 `$REVIEW_DATA/references` (seed them from the old base clones with
-`git clone --reference <old> --dissociate --recurse-submodules`). Afterwards
+`git clone --reference <old> --dissociate --recurse-submodules`), and one
+under its basename for every ArduPilot-owned submodule of ardupilot, which
+discovery sweeps without a repos.json entry (seed each from the checkout
+inside the ardupilot reference clone: `git clone --reference <its git dir>
+--dissociate <url> <basename>`). A run refuses to start while one is
+missing. Afterwards
 the existing cron lines route to the supervisor by themselves. The new cron
 alternatives are commented out in `runner/etc/crontab.reviewprs`; replace the
 appropriate old line explicitly, never enable both.

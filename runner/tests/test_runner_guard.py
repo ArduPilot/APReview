@@ -46,6 +46,16 @@ class Guard(unittest.TestCase):
             if name.endswith(".py"):
                 shutil.copy(os.path.join(BIN, name), os.path.join(r, "bin"))
         shutil.copy(os.path.join(BIN, "../../repos.json"), self.home)
+        # The reference clones the configuration maps, as bare directories:
+        # every listed repository, the main one with a .gitmodules naming one
+        # ArduPilot-owned submodule, and that submodule's own clone.
+        refs = os.path.join(r, "data", "references")
+        for entry in json.load(open(os.path.join(self.home, "repos.json")))["repos"]:
+            os.makedirs(os.path.join(refs, entry.get("clone_dir") or entry["repo"].split("/")[1]), exist_ok=True)
+        with open(os.path.join(refs, "ardupilot", ".gitmodules"), "w") as f:
+            f.write('[submodule "modules/mavlink"]\n\tpath = modules/mavlink\n'
+                    '\turl = https://github.com/ArduPilot/mavlink\n')
+        os.makedirs(os.path.join(refs, "mavlink"))
 
         # Whole-script refusals run the EXIT trap. None of its helpers may
         # inspect processes, spend quota or publish from the developer's box.
@@ -229,6 +239,7 @@ fi''')
         self.assertEqual(cfg["endpoints"]["review"]["publish"], "host:pages")
         self.assertEqual(cfg["endpoints"]["review"]["rsync_args"], ["--password-file=/outside/password"])
         self.assertIn("/data/references/rsync", cfg["reference_clones"]["rsyncproject/rsync"])
+        self.assertIn("/data/references/mavlink", cfg["reference_clones"]["ardupilot/mavlink"])
         self.assertNotIn(os.path.join(self.home, "review/repositories/ardupilot/Tools/autotest"),
                          cfg["path"].split(os.pathsep))
         self.assertFalse(os.path.exists(os.path.join(self.home, "launched")))
@@ -277,6 +288,16 @@ fi''')
         self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
         self.assertIn("supervisor configuration", out.stdout)
         self.assertFalse(os.path.exists(os.path.join(self.home, "review/data/runs")))
+
+    def test_new_route_refuses_without_a_reference_clone_for_a_swept_submodule(self):
+        self.new_routing()
+        self.supervisor_stub()
+        os.rmdir(os.path.join(self.home, "review/data/references/mavlink"))
+        out = self.whole_run("rsync", REVIEW_COMMENT_ACCOUNTS="bot")
+        self.assertEqual(out.returncode, 1, self.run_log("rsync"))
+        self.assertFalse(os.path.exists(os.path.join(self.home, "supervisor-args")))
+        self.assertIn("no reference clone", self.run_log("rsync"))
+        self.assertIn("ardupilot/mavlink", self.run_log("rsync"))
 
     def test_new_codex_model_must_be_pinned(self):
         self.new_routing()

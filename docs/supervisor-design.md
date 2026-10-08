@@ -991,7 +991,11 @@ generation is authoritative for its row. The dry run lists every manifest key
 that resolves to no configured repository and every entry without a section,
 and the transfer refuses while any remain, because that review would vanish
 from its page on the first republish. It needs a full reference clone under
-`REVIEW_NEW_REPOS` for every repository in repos.json, submodules included.
+`REVIEW_NEW_REPOS` for every repository in repos.json and for every
+ArduPilot-owned submodule of the main repository, each under its basename.
+The run configuration maps the submodules from the main reference clone's
+`.gitmodules` and refuses to start a run while any clone is missing, since a
+swept repository without one has every changed PR deferred, one by one.
 There is no automated reverse: rolling back means restoring routing.json and
 accepting that the old command rebuilds its pages from the new renderer's
 manifests.

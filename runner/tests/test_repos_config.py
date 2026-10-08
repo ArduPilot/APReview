@@ -22,6 +22,26 @@ CFG = json.load(open(os.path.join(ROOT, "repos.json")))
 REPOS = CFG["repos"]
 
 
+class Submodules(unittest.TestCase):
+    MODULES = (
+        '[submodule "modules/mavlink"]\n\tpath = modules/mavlink\n\turl = https://github.com/ArduPilot/mavlink\n'
+        '[submodule "modules/Micro-CDR"]\n\tpath = modules/Micro-CDR\n'
+        '\turl = https://github.com/ardupilot/Micro-CDR.git\n'
+        '[submodule "modules/gtest"]\n\tpath = modules/gtest\n\turl = git@github.com:ArduPilot/googletest.git\n'
+        '[submodule "modules/libcanard"]\n\tpath = modules/libcanard\n\turl = https://github.com/DroneCAN/libcanard\n'
+        '[submodule "modules/again"]\n\tpath = modules/again\n\turl = https://github.com/ArduPilot/mavlink\n'
+    )
+    OURS = ["ArduPilot/mavlink", "ardupilot/Micro-CDR", "ArduPilot/googletest"]
+
+    def test_only_the_swept_owners_submodules_are_listed_once_as_named(self):
+        self.assertEqual(repos_mod.submodules(self.MODULES, CFG), self.OURS)
+
+    def test_the_owners_default_to_ardupilot_and_follow_the_config(self):
+        self.assertEqual(repos_mod.submodules(self.MODULES, {}), self.OURS)
+        self.assertEqual(repos_mod.submodules(self.MODULES, {"submodule_sweep": {"owners": ["DroneCAN"]}}),
+                         ["DroneCAN/libcanard"])
+
+
 class Config(unittest.TestCase):
     def test_every_repo_has_the_fields_a_sweep_needs(self):
         for r in REPOS:

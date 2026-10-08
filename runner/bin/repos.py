@@ -12,8 +12,10 @@ clones to maintain.
   repos.py --notes <repo>     what a reviewer needs to know about one repo
   repos.py --json             the whole file, for a reader that wants it all
 """
+import configparser
 import json
 import os
+import re
 import sys
 
 
@@ -37,6 +39,22 @@ def config_path():
 def load():
     with open(config_path()) as f:
         return json.load(f)
+
+
+def submodules(gitmodules, cfg):
+    """owner/repo of each submodule in a .gitmodules text hosted under an owner
+    submodule_sweep names, in file order; the repositories discovery sweeps
+    without an entry here, and the ones that need a reference clone."""
+    owners = {o.lower() for o in cfg.get("submodule_sweep", {}).get("owners", ["ArduPilot"])}
+    parser = configparser.ConfigParser()
+    parser.read_string(gitmodules)
+    found = []
+    for section in parser.sections():
+        match = re.search(r"github.com[:/]([^/]+/[^/]+?)(?:\.git)?$",
+                          parser.get(section, "url", fallback=""))
+        if match and match[1].split("/")[0].lower() in owners and match[1] not in found:
+            found.append(match[1])
+    return found
 
 
 def main(argv):

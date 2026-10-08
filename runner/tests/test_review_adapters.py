@@ -589,6 +589,24 @@ class DiscoveryContract(unittest.TestCase):
         self.assertIn("page:review/RsyncReviews/PRReviews/owner/repo/1/index.html",
                       self.discover.candidate(PR, "pr")["destinations"])
 
+    def test_a_swept_repository_without_a_reference_clone_is_reported_once(self):
+        import base64
+        import contextlib
+        import io
+        modules = "[submodule \"modules/mavlink\"]\n\turl = https://github.com/ArduPilot/mavlink\n"
+        self.gh.request.side_effect = (
+            lambda endpoint, **kw: {"content": base64.b64encode(modules.encode()).decode()}
+            if endpoint.endswith(".gitmodules") else self.meta if "/pulls/" in endpoint else {"statuses": []}
+        )
+        self.config["reference_clones"] = {"owner/repo": str(self.root)}
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            discovery = Discovery(self.gh, self.config, self.store)
+            discovery.swept()
+            discovery.swept()
+        self.assertEqual(err.getvalue().count("no reference clone for ardupilot/mavlink"), 1)
+        self.assertNotIn("owner/repo", err.getvalue())
+
     def test_failed_diff_defers_instead_of_claiming_coverage(self):
         self.discover.snapshot_diff.side_effect = OSError("no object")
         c = self.discover.candidate(PR, "pr")

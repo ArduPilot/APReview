@@ -25,7 +25,7 @@
    "ardupilot"
   ],
   "key": "<reponame>",
-  "note": "Parse .gitmodules for submodules hosted under an ArduPilot owner and sweep each one with the same command shape. Their PRs are keyed <reponame>#<number>."
+  "note": "Parse .gitmodules for submodules hosted under an ArduPilot owner and sweep each one with the same command shape. Their PRs are keyed <reponame>#<number>. Each needs a reference clone under the references directory, named by its basename; the run configuration maps them from the main reference clone's .gitmodules and refuses to start while one is missing."
  },
  "key_collisions": {
   "note": "mavlink/mavlink and ArduPilot/mavlink share a basename, and the fork is a submodule so it is swept too. Key the upstream repo upstream-mavlink#<n> and the fork mavlink#<n>, and label them [upstream-mavlink] and [mavlink] in the report. Without this two different PRs collide on one manifest key and the incremental skip silently reuses one PR's review for the other - invisible, because the report still looks complete. Apply the same rule to any future non-ArduPilot repo whose basename already exists in the submodule set."

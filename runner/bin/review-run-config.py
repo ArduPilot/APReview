@@ -14,6 +14,31 @@ from review_routing import load, route
 from review_store import atomic
 
 
+def clone_dir(entry):
+    return entry.get("clone_dir") or entry["repo"].split("/")[1]
+
+
+def reference_clones(references, repositories):
+    """Every swept repository's reference clone: the listed ones, plus the
+    main repository's ArduPilot-owned submodules, which discovery sweeps from
+    .gitmodules and which repos.json does not list. Read from the main
+    reference clone's .gitmodules, so no network is needed here. A listed
+    entry wins over a submodule of the same name, as it does in discovery."""
+    main = next(r for r in repositories["repos"] if r.get("discovery") == "main")
+    modules = references / clone_dir(main) / ".gitmodules"
+    clones = {}
+    if modules.is_file():
+        for repo in repos.submodules(modules.read_text(), repositories):
+            clones[repo.lower()] = str(references / repo.split("/")[1])
+    clones.update({r["repo"].lower(): str(references / clone_dir(r)) for r in repositories["repos"]})
+    # A swept repository without a clone has every changed PR deferred, one
+    # by one, with nothing that says why: refuse to start instead.
+    missing = sorted(name for name, path in clones.items() if not Path(path).is_dir())
+    if missing:
+        raise ValueError("no reference clone under %s for %s" % (references, ", ".join(missing)))
+    return clones
+
+
 def freeze(args):
     env = os.environ
     root = Path(env["REVIEW_ROOT"])
@@ -49,15 +74,14 @@ def freeze(args):
     # review-env adds the legacy base clone's Tools/autotest. The adapter only
     # knows its separate new reference clone, so remove both trees here before
     # it prepends the pinned attempt's Tools/autotest.
-    base_tools = {(base / (r.get("clone_dir") or r["repo"].split("/")[1]) / "Tools/autotest").resolve()
+    base_tools = {(base / clone_dir(r) / "Tools/autotest").resolve()
                   for base in (Path(env["REVIEW_REPOS"]), references)
                   for r in repositories["repos"]}
     path = os.pathsep.join(p for p in env["PATH"].split(os.pathsep)
                            if p and Path(p).resolve() not in base_tools)
     config = dict(
         schema=1, routing=routing, routing_root=str(root), providers=providers, repos=repositories,
-        reference_clones={r["repo"].lower(): str(references / (r.get("clone_dir") or r["repo"].split("/")[1]))
-                          for r in repositories["repos"]},
+        reference_clones=reference_clones(references, repositories),
         comment_accounts=json.loads(args.comments), endpoint="review",
         # Where a review's retained page lives under the endpoint. The default
         # needs a PRReviews tree on the publishing host; a site without one

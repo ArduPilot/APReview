@@ -1,7 +1,6 @@
 """Finite discovery snapshots and per-claim refresh, without GitHub mutations."""
 
 import base64
-import configparser
 from datetime import datetime, timedelta
 import importlib.util
 from pathlib import Path
@@ -126,27 +125,27 @@ class Discovery:
             print("discovery: submodule sweep failed, using repos.json only: %s" % str(error)[:200],
                   file=sys.stderr)
             return {k: r for k, r in self.repos.items() if r.get("discovery") in ("main", "explicit")}
-        parser = configparser.ConfigParser()
-        parser.read_string(base64.b64decode(response["content"]).decode())
-        owners = {o.lower() for o in cfg.get("submodule_sweep", {}).get("owners", ["ArduPilot"])}
-        for section in parser.sections():
-            match = re.search(
-                r"github.com[:/]([^/]+/[^/]+?)(?:\.git)?$", parser.get(section, "url", fallback="")
+        for repo in repos.submodules(base64.b64decode(response["content"]).decode(), cfg):
+            self.repos.setdefault(
+                repo.lower(),
+                dict(
+                    repo=repo,
+                    key=repo.split("/")[1],
+                    discovery="explicit",
+                    post_comments=True,
+                    house_rules="ardupilot",
+                    notes="ArduPilot-owned submodule.",
+                ),
             )
-            if match and match[1].split("/")[0].lower() in owners:
-                repo = match[1]
-                self.repos.setdefault(
-                    repo.lower(),
-                    dict(
-                        repo=repo,
-                        key=repo.split("/")[1],
-                        discovery="explicit",
-                        post_comments=True,
-                        house_rules="ardupilot",
-                        notes="ArduPilot-owned submodule.",
-                    ),
-                )
-        return {k: r for k, r in self.repos.items() if r.get("discovery") in ("main", "explicit")}
+        swept = {k: r for k, r in self.repos.items() if r.get("discovery") in ("main", "explicit")}
+        # Without a reference clone every changed PR of a repository is
+        # deferred one by one, which nothing else reports; say so once.
+        clones = self.config.get("reference_clones", {})
+        for name in swept:
+            if not clones.get(name) or not Path(clones[name]).is_dir():
+                print("discovery: no reference clone for %s; its pull requests are deferred "
+                      "until one is seeded under the references directory" % name, file=sys.stderr)
+        return swept
 
     MANIFEST_AGE = 120
 
