@@ -233,6 +233,12 @@ reconcile that name their inputs. New guidance:
   target (about 25k chars for the current Claude Code), but do not page
   so finely that requests multiply. Batch independent tool calls, not
   their outputs into one oversized response.
+- Paging must not narrow the review: when the diff writes state that
+  other code reads, grep for every reader and read it; when it reads
+  shared state, find the writers and check concurrent or interrupted
+  writes; a gap is for what cannot be checked, not for what was not read.
+  Added after the first quality pilot, where `v4-paging` missed two
+  blockers of exactly this shape that legacy found (see quality-pilot.md).
 - The environment is already set: never source review-env.sh. Before
   relying on this, the forwarded environment (`review-supervisor.py:831`,
   guardian merge `review_guardian.py:331`) is checked to carry what passes

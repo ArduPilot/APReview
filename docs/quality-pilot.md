@@ -122,6 +122,31 @@ About 20 full reviews (10 PRs, two arms, four passes each), roughly one
 all-run's quota, over several hours with a pool of 2 per arm, overnight
 while production review runs are paused.
 
+## First run, 2026-10-08
+
+Failed. Both arms found 35 real problems; legacy 18 blockers, `v4-paging`
+17, and neither raised a false blocker. `v4-paging` found 3 real problems
+legacy missed, one of them a blocker, but missed two blockers legacy found:
+
+- mavproxy#1769: `wp draw` with the new AMSL frame writes the shared
+  wpalt setting, which `wp add` reads as a height above home. The paging
+  primary read the frame and dialog code and the draw callback, but never
+  searched for readers of wpalt and never opened `wp add`; nor did its
+  validation or reconciliation. Legacy's primary read that function and
+  probed it.
+- ardupilot#34623: the class cache is written by truncating its final
+  path and read back without recovery. The paging cold reviewer named
+  concurrent writes to the cache as not exercised and left it as a gap
+  without reading the writer; its primary never looked at the cache.
+  Legacy's cold reviewer built a two-thread fixture and found it.
+
+Both misses have one shape: the paging reviewers stayed within the diff
+and a few targeted reads, and did not follow shared state to its readers.
+The paging addendum (`commands/review-paging-addendum.md`) now says to,
+and any rerun uses it. One adjudication verdict was corrected in the
+spot-check before scoring: a lost second mission read in mavproxy#1770,
+from blocking to non-blocking, in all four findings that carried it.
+
 ## Not covered by this phase
 
 Comparing validation and reconciliation alone on identical upstream
