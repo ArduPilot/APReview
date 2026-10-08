@@ -68,6 +68,9 @@ class ReviewSupervisor(unittest.TestCase):
         child, directory, log = self.start("quota", [candidate(2)], extra=["--config", str(cfg)])
         summary = self.finish(child, directory, log)
         self.assertEqual(summary["prs"]["pr:owner/repo#2"].get("reason"), "quota paused")
+        # the dashboard takes both from here rather than from run.json
+        self.assertEqual(summary["mode"], "candidates")
+        self.assertEqual(summary["created"], read(directory / "run.json")["created"])
         self.assertFalse(list((directory / "attempts").glob("*/job.json")))
         self.assertTrue(list((self.root / "receipts").glob("*.json")))
         self.assertFalse(list((self.root / "outbox").glob("*.json")))

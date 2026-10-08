@@ -197,12 +197,24 @@ for path in sorted(glob.glob(os.path.join(glob.escape(LOGS), 'reviewprs-*.log'))
 from review_dashboard import summaries                         # noqa: E402
 DATA = os.environ.get('REVIEW_DATA', os.path.join(HOME, 'review', 'data'))
 SUMMARIES = summaries(DATA)
-for sv in SUMMARIES:
+
+
+def run_meta(sv):
+    """The run's mode and creation time. The summary carries both; one written
+    before it did is read from run.json, which costs loading the phase
+    snapshots: tens of megabytes for a run, and the page reads every run."""
+    if sv.get('created'):
+        return sv.get('mode'), sv['created']
     try:
         cfg = json.load(open(os.path.join(DATA, 'runs', sv['name'], 'run.json')))
     except Exception:
-        cfg = {}
-    created = cfg.get('created')
+        return None, None
+    return cfg.get('mode'), cfg.get('created')
+
+
+RUN_META = {sv['name']: run_meta(sv) for sv in SUMMARIES}
+for sv in SUMMARIES:
+    mode, created = RUN_META[sv['name']]
     if not created:
         continue
     start = datetime.datetime.fromtimestamp(created).astimezone()
@@ -239,7 +251,7 @@ for sv in SUMMARIES:
                         'cache_creation_input_tokens'))
         return total
     runs.append(dict(
-        mode=cfg.get('mode') or sv['name'], start=start, finish=finish,
+        mode=mode or sv['name'], start=start, finish=finish,
         elapsed=int((finish - start).total_seconds() // 60) if finish else None,
         status=status, rc=None, turns=None, passes=len(ran), retried=retried, early=len(early),
         own_claude=spent('claude'), own_codex=spent('codex'),
@@ -933,10 +945,7 @@ def quant(v, q):
 
 passctx = {}
 for sv in SUMMARIES:
-    try:
-        created = json.load(open(os.path.join(DATA, 'runs', sv['name'], 'run.json'))).get('created')
-    except Exception:
-        created = None
+    created = RUN_META[sv['name']][1]
     if not created or datetime.datetime.fromtimestamp(created).astimezone() < cutoff:
         continue
     for a in sv.get('attempts', []):

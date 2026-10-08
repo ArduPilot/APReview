@@ -251,6 +251,22 @@ class Integration(unittest.TestCase):
         self.assertTrue((self.home / "render-held").exists())
         self.assertTrue((self.home / "rsync-held").exists())
 
+    def test_lock_helper_timeout_kills_what_the_command_started(self):
+        # A build the command spawned used to outlive the timeout and finish
+        # writing the page after the lock was gone, with the upload never run.
+        late = self.home / "late"
+        result = subprocess.run(
+            ["python3", str(BIN / "review-lock.py"), "--data", str(self.data), "--wait", "1",
+             "--timeout", "0.5", "hold", "page:review/DevCallReviews/runs.html", "--",
+             "bash", "-c", "(sleep 1.5; touch '%s') & sleep 30" % late],
+            env=self.env, capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 124, result.stderr)
+        self.assertIn("killed after 0.5s", result.stderr)
+        with try_lock(self.store.locks, "page:review/DevCallReviews/runs.html") as lock:
+            self.assertIsNotNone(lock)
+        time.sleep(2)
+        self.assertFalse(late.exists())
+
     def test_pause_holds_both_paths_and_resume_verifies_identity(self):
         result = self.run_cli("review-pause.py", "1")
         self.assertEqual(result.returncode, 0, result.stderr)

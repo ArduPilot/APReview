@@ -3,7 +3,9 @@
 import argparse
 import os
 from pathlib import Path
+import signal
 import subprocess
+import sys
 import time
 
 from review_lock import acquire
@@ -29,9 +31,17 @@ def main():
     if lock is None:
         return 75
     with lock:
+        child = subprocess.Popen(command, pass_fds=(lock.fd,), process_group=0)
         try:
-            return subprocess.run(command, pass_fds=(lock.fd,), timeout=args.timeout).returncode
-        except subprocess.TimeoutExpired:
+            return child.wait(timeout=args.timeout)
+        except BaseException as exc:
+            # Killing the command alone leaves what it started working on the
+            # region after the lock is gone: take its whole process group.
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+            if not isinstance(exc, subprocess.TimeoutExpired):
+                raise
+            print("review-lock: %s: command killed after %gs" % (args.key, args.timeout), file=sys.stderr)
             return 124
 
 

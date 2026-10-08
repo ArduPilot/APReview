@@ -392,6 +392,10 @@ class Supervisor:
                     **identity(),
                     "state": "complete" if self.summary_finished() else "running",
                     "heartbeat": time.time(),
+                    # repeated from run.json so a reader of summaries need not
+                    # load that file, which the phase snapshots make huge
+                    "mode": self.config.get("mode"),
+                    "created": self.config.get("created"),
                     "prs": self.states,
                     "phases": self.config.get("phases", {}),
                     "delivery_deferred": [x["id"] for x in debts if x["pr"] in self.states],
@@ -1347,6 +1351,7 @@ class Supervisor:
             atomic(self.directory / "controller.json", dict(identity(), schema=1, run=self.run_id))
             atomic(self.directory / "summary.json", dict(
                 identity(), schema=1, run=self.run_id, state="recovering", heartbeat=time.time(),
+                mode=self.config.get("mode"), created=self.config.get("created"),
                 prs=self.states, phases=self.config.get("phases", {}),
                 delivery_deferred=[entry["id"] for entry in self.startup_delivery],
                 attempts=[str(p.parent) for p in (self.directory / "attempts").glob("*/job.json")]))

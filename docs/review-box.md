@@ -119,6 +119,8 @@ described below.
 - `bin/claude-usage-probe.sh` — samples the real usage meter, tagged by account.
 - `bin/reap-orphans.sh` — kills processes a run left behind under `$REVIEW_DATA`.
 - `bin/make-runs-page.py`, `bin/publish-runs-page.sh` — the runs dashboard.
+  The publisher never fails its caller; what goes wrong (build, upload, lock
+  busy, killed at the timeout) is in `logs/runs-page.log`.
 - `bin/pause-runs.sh`, `bin/review-now.sh` — hold the lock; run a mode on demand.
 - `bin/fmt-stream.py` — turns `--output-format stream-json` into a readable log.
 

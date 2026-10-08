@@ -96,6 +96,24 @@ class Dashboard(unittest.TestCase):
         self.assertIn('<td data-sort="1" class="wrap">1</td>', page)
         self.assertIn(">all<", page)
 
+    def test_summary_names_its_mode_and_start_without_run_json(self):
+        # run.json holds the phase snapshots, tens of megabytes a run, and the
+        # page reads every run: a summary that carries both is enough
+        from pathlib import Path
+        directory = Path(self.home) / "review/data/runs/supervisor-self"
+        directory.mkdir(parents=True)
+        identity = dict(boot=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                        pid=os.getpid(), start=int(Path('/proc/self/stat').read_text().rsplit(')', 1)[1].split()[19]))
+        (directory / "summary.json").write_text(json.dumps(dict(schema=1, **identity, state="complete",
+            heartbeat=datetime.datetime.now().timestamp(), mode="followup",
+            created=datetime.datetime.now().timestamp() - 600, prs={"pr:owner/repo#1": {"review": "accepted"}})))
+        (directory / "run.json").write_text("{")          # unreadable: must not be consulted
+        page = self.build()
+        rows = [r for r in self.state["runs"] if r.get("supervisor")]
+        self.assertEqual([r["mode"] for r in rows], ["followup"])
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertIn(">followup<", page)
+
     def test_pass_context_is_summarised_per_kind_with_unknowns(self):
         from pathlib import Path
         directory = Path(self.home) / "review/data/runs/supervisor-ctx"

@@ -301,7 +301,8 @@ no new inference starts for that run.
 
 The dashboard reads versioned atomic summaries, `runs/<run>/summary.json`
 written by the controller and `runs/<run>/attempts/<attempt>/status.json`
-written by the guardian, carrying: run, PR, generation, job, attempt,
+written by the guardian, carrying: run, mode, creation time, PR,
+generation, job, attempt,
 provider/account, session id, boot/pid/start time, cgroup, state,
 heartbeat, exit/timeout/result-status, quota observations and usage totals. Guardians heartbeat every 30 seconds; the controller emits
 aggregate summaries. Session ids belong to exactly one attempt and token

@@ -63,8 +63,11 @@ The initializer uses a nonblocking flock only while installing/checking the
 marker. Region ownership always uses OFD byte ranges.
 
 `review-lock.py --data DIR hold KEY -- COMMAND ...` holds a region for a
-bounded command (`--wait` and `--timeout` precede `hold`). PR acquisition is
-always a single nonblocking attempt. A busy lock exits 75. Library callers
+bounded command (`--wait` and `--timeout` precede `hold`). At the timeout it
+kills the command's whole process group and exits 124, so nothing the
+command started goes on working the region after the lock is released. PR
+acquisition is always a single nonblocking attempt. A busy lock exits 75.
+Library callers
 close their `Lock` objects; they never explicitly unlock a shared OFD.
 
 `review_store.py` provides atomic writes, allocation, immutable bundles,
