@@ -692,7 +692,120 @@ def spotcheck(args):
                       "- verdict: real=%s issues=%s" % (v["real"], json.dumps(v.get("issues") or {})),
                       "- reason: %s" % v["reason"], ""]
     (directory / "spotcheck.md").write_text("\n".join(lines))
+    atomic(directory / "spotcheck.json", dict(lone=lone, sample=sample))
     print("%d lone blockers and %d sampled findings in %s" % (len(lone), len(sample), directory / "spotcheck.md"))
+
+
+def spotcheck_html(args):
+    """The spot-check as a page: per PR, the two arms' kept findings side by
+    side as Review A and Review B, assigned at random per PR (the assignment
+    is kept beside the key), each with the adjudicator's verdict; issues are
+    coloured alike across columns and the findings to check are marked."""
+    import html as H
+    directory = Path(args.dir)
+    key, verdict = read(directory / "adjudication-key.json"), read(directory / "verdicts.json")
+    chosen = read(directory / "spotcheck.json")
+    if chosen is None:
+        # a spot-check written before spotcheck.json: its ids are in the headings
+        text = (directory / "spotcheck.md").read_text()
+        part = text.split("## Random sample")
+        ids = lambda t: re.findall(r"^### \S+ ([0-9a-f]{8})$", t, re.M)
+        chosen = dict(lone=ids(part[0]), sample=ids(part[1]) if len(part) > 1 else [])
+    marked = {i: "only one review raised this real blocker" for i in chosen["lone"]}
+    marked.update({i: "random sample" for i in chosen["sample"]})
+    packets = {}
+    for path in Path(args.packets).glob("*/packet.json"):
+        p = read(path)
+        packets[p["pr"]] = p
+    labels = read(directory / "spotcheck-labels.json") or {}
+    rng = random.SystemRandom()
+    for pr in packets:
+        if pr not in labels:
+            arms = list(ARMS)
+            rng.shuffle(arms)
+            labels[pr] = dict(zip("AB", arms))
+    atomic(directory / "spotcheck-labels.json", labels)
+    issues = sorted({n for v in verdict.values() for n in (v.get("issues") or {})})
+    colour = {n: "hsl(%d 60%% 85%%)" % (i * 137 % 360) for i, n in enumerate(issues)}
+    order = []
+    for ident in chosen["lone"] + chosen["sample"]:
+        if key[ident]["pr"] not in order:
+            order.append(key[ident]["pr"])
+    def card(f):
+        v = verdict[f["id"]]
+        chips = "".join('<span class="chip" style="background:%s">%s%s</span>'
+                        % (colour[n], H.escape(n), " &middot; <b>blocking</b>" if b else "")
+                        for n, b in (v.get("issues") or {}).items()) or '<span class="chip notreal">not real</span>'
+        mark = marked.get(f["id"])
+        loc = f["location"] if isinstance(f["location"], dict) else {}
+        where = "%s:%s" % (loc.get("file"), loc.get("line")) if loc.get("file") else "not line-specific"
+        flags = " ".join(x for x, on in (("previous", f["previous"]), ("adjusted", f["adjusted"])) if on)
+        return ('<div class="card%s" id="f%s"><div class="head"><code>%s</code> <span class="where">%s</span> %s%s</div>'
+                '<div class="claim">%s</div>%s<div class="verdict">%s</div><div class="reason">%s</div>%s</div>') % (
+            " check" if mark else "", f["id"], f["id"], H.escape(where),
+            '<span class="flag">%s</span>' % flags if flags else "",
+            '<span class="tag">check: %s</span>' % mark if mark else "",
+            H.escape(f["claim"]),
+            '<details><summary>reviewers\' notes</summary><div class="notes">%s</div></details>' % H.escape(f["reviewer_notes"])
+            if f["reviewer_notes"] else "",
+            chips, H.escape(v.get("reason", "")),
+            ('<div class="answer"><label><input type="radio" name="a%s" value="right"> verdict right</label> '
+             '<label><input type="radio" name="a%s" value="wrong"> wrong</label> '
+             '<input type="text" name="n%s" placeholder="what is wrong"></div>') % (f["id"], f["id"], f["id"])
+            if mark else "")
+    sections = []
+    for pr in order + sorted(set(packets) - set(order)):
+        p = packets[pr]
+        columns = []
+        for label in "AB":
+            arm = labels[pr][label]
+            found = [f for f in p["findings"] if key[f["id"]]["arm"] == arm]
+            found.sort(key=lambda f: (f["id"] not in marked, f["id"]))
+            columns.append('<div class="col"><h3>Review %s <span class="sub">%d findings</span></h3>%s</div>'
+                           % (label, len(found), "".join(card(f) for f in found)))
+        owner, rest = pr[3:].split("/", 1)
+        repo, number = rest.split("#")
+        sections.append('<section%s><h2><a href="https://github.com/%s/%s/pull/%s">%s</a> %s</h2>'
+                        '<div class="sub">frozen head %s</div><div class="cols">%s</div></section>' % (
+            "" if pr in order else ' class="other"', owner, repo, number, H.escape(pr[3:]),
+            H.escape(p.get("title") or ""), p["head"][:10], "".join(columns)))
+    page = """<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Pilot spot-check</title><style>
+:root{--bg:#fff;--fg:#111;--sub:#666;--card:#f7f7f7;--line:#ddd;--check:#c60}
+@media (prefers-color-scheme:dark){:root{--bg:#111;--fg:#eee;--sub:#999;--card:#1c1c1c;--line:#333;--check:#f90}
+ .chip{color:#111}}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 system-ui,sans-serif;margin:0 16px 80px}
+h1{font-size:20px}h2{font-size:16px;margin:28px 0 2px}h3{font-size:14px;margin:8px 0}
+.sub{color:var(--sub);font-weight:normal;font-size:12px}a{color:inherit}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:12px}@media (max-width:800px){.cols{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:8px 10px;margin:0 0 10px}
+.card.check{border:2px solid var(--check)}.tag{color:var(--check);font-weight:600;font-size:12px}
+.head{font-size:12px;color:var(--sub);margin-bottom:4px}.flag{font-size:11px;border:1px solid var(--line);padding:0 4px;border-radius:3px}
+.claim{white-space:pre-wrap}.notes{white-space:pre-wrap;color:var(--sub);font-size:13px}
+.verdict{margin:6px 0 2px}.chip{display:inline-block;border-radius:10px;padding:1px 8px;margin:2px 4px 2px 0;font-size:12px}
+.chip.notreal{background:var(--line);color:var(--fg)}.reason{font-size:13px;color:var(--sub)}
+.answer{margin-top:6px;font-size:13px}.answer input[type=text]{width:60%%}
+section.other{opacity:.85}#bar{position:fixed;bottom:0;left:0;right:0;background:var(--card);border-top:1px solid var(--line);padding:8px 16px}
+textarea{width:100%%;height:5em}
+</style></head><body>
+<h1>Quality pilot spot-check</h1>
+<p class="sub">Per PR, the two reviews' kept findings side by side. Which review is which arm is hidden, and assigned
+at random per PR. Each finding shows the adjudicator's verdict: issue names (same colour = same problem; <b>blocking</b>
+if it should block) or <i>not real</i>, and its reason. Findings outlined in orange are the %d to check; mark each, then
+copy your answers below. PRs without a finding to check follow, for context.</p>
+%s
+<div id="bar"><button onclick="collect()">Copy my answers</button> <span id="done" class="sub"></span>
+<textarea id="out" readonly placeholder="answers appear here"></textarea></div>
+<script>
+function collect(){var out=[],n=0;document.querySelectorAll('.card.check').forEach(function(c){var id=c.id.slice(1);
+ var r=document.querySelector('input[name=a'+id+']:checked');var t=document.querySelector('input[name=n'+id+']').value;
+ if(r)n++;out.push(id+': '+(r?r.value:'unanswered')+(t?' - '+t:''));});
+ var o=document.getElementById('out');o.value=out.join('\\n');o.select();
+ try{navigator.clipboard.writeText(o.value)}catch(e){}
+ document.getElementById('done').textContent=n+' of '+out.length+' answered';}
+</script></body></html>""" % (len(marked), "".join(sections))
+    (directory / "spotcheck.html").write_text(page)
+    print("%s: %d PRs, %d findings to check" % (directory / "spotcheck.html", len(order), len(marked)))
 
 
 def main():
@@ -721,12 +834,15 @@ def main():
     sp = sub.add_parser("spotcheck")
     sp.add_argument("--dir", required=True)
     sp.add_argument("--packets", required=True)
+    sh = sub.add_parser("spotcheck-html")
+    sh.add_argument("--dir", required=True)
+    sh.add_argument("--packets", required=True)
     s = sub.add_parser("score")
     s.add_argument("--dir", required=True)
     s.add_argument("--verdicts", required=True)
     args = p.parse_args()
     return {"freeze": freeze, "run": run, "overnight": overnight, "collect": collect, "packets": packets,
-            "verdicts": verdicts, "spotcheck": spotcheck, "score": score}[args.command](args) or 0
+            "verdicts": verdicts, "spotcheck": spotcheck, "spotcheck-html": spotcheck_html, "score": score}[args.command](args) or 0
 
 
 if __name__ == "__main__":

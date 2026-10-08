@@ -149,6 +149,16 @@ class Pilot(PilotBase):
                                       str(self.pilot / "verdicts.json")).stdout)
         self.assertEqual(result["real"][lone_arm], 2)
         self.assertEqual(result["missed_blockers"], 0)
+        self.tool("spotcheck-html", "--dir", str(self.pilot), "--packets", str(out))
+        page = (self.pilot / "spotcheck.html").read_text()
+        self.assertIn("Review A", page)
+        self.assertIn("Review B", page)
+        for arm in ("legacy", "paging", "v4-paging"):
+            self.assertNotIn(arm, page)
+        self.assertEqual(page.count('class="card check"'), len(read(self.pilot / "spotcheck.json")["sample"]) +
+                         len(read(self.pilot / "spotcheck.json")["lone"]))
+        labels = read(self.pilot / "spotcheck-labels.json")
+        self.assertEqual({tuple(sorted(v.values())) for v in labels.values()}, {("legacy", "paging")})
         spot = (self.pilot / "spotcheck.md").read_text()
         self.assertNotIn("/attempts/", spot)                             # from the audited packets, not the pack
         self.assertNotIn("Real blockers only one arm found (0)\n\n### ", spot)
