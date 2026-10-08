@@ -57,6 +57,13 @@ class Presentation(unittest.TestCase):
         for kind in v3:
             self.assertTrue(v4[kind].startswith(v3[kind].rstrip("\n")))
 
+    def test_paging_follows_shared_state_to_its_readers(self):
+        v3, v4 = rp.prompts("v3-files"), rp.prompts("v4-paging")
+        for kind in v4:
+            self.assertIn("grep for every reader", v4[kind], kind)
+            self.assertIn("never what was not read", v4[kind], kind)
+            self.assertNotIn("grep for every reader", v3[kind], kind)
+
     def test_a_drifted_v1_prompt_cannot_build_v3(self):
         from unittest.mock import patch
         drifted = dict(rp.FILE_POINTERS, all=[("a sentence no prompt has", "x")])
