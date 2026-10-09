@@ -27,6 +27,11 @@ MAILTO=""
 # account contend for its OAuth refresh.
 15 * * * *   . $HOME/review/bin/review-env.sh >/dev/null 2>&1; $HOME/review/bin/accounts.py --record >> $HOME/review/logs/select-probe.log 2>&1
 
+# Mail REVIEW_ALERT_MAIL when an account a role uses cannot run - otherwise the
+# only sign is runs that refuse to start. Reads the :05 probe rather than using
+# an account itself, and keeps clear of the :05/:15/:35 probes and the run slots.
+55 2,5,8,11,14,17,20,23 * * *   . $HOME/review/bin/review-env.sh >/dev/null 2>&1; $HOME/review/bin/check-auth.py >> $HOME/review/logs/auth-check.log 2>&1
+
 # Base clones refreshed nightly, well clear of the review slots.
 30 2 * * *   $HOME/review/bin/refresh-repos.sh
 

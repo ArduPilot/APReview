@@ -27,6 +27,12 @@ REVIEW_PUBLIC_URL="https://reviews.example.org"
 #
 # The rsync role covers the non-ArduPilot target; everything else is default.
 
+# Who check-auth.py mails when a role's account cannot run. Unset, it only logs.
+#REVIEW_ALERT_MAIL="ops@example.org"
+# The sender, as header and envelope: an address the relay signs for, or the
+# recipient's provider may refuse the mail as unauthenticated.
+#REVIEW_ALERT_FROM="runner@example.org"
+
 # Accounts whose AI comments count as ours, space separated, newest first. The
 # account you post as now, plus any it replaced - otherwise comments posted
 # before an account switch stop being recognised and get duplicated.

@@ -117,6 +117,8 @@ described below.
 - `bin/post-comments.py` — posts or updates the AI review comment on each PR in a
   plan, deciding post / edit / deprecate-and-repost. Tested in `runner/tests/`.
 - `bin/claude-usage-probe.sh` — samples the real usage meter, tagged by account.
+- `bin/check-auth.py` — mails `REVIEW_ALERT_MAIL` when a role's account cannot
+  run; see [When an account stops working](#when-an-account-stops-working).
 - `bin/reap-orphans.sh` — kills processes a run left behind under `$REVIEW_DATA`.
 - `bin/make-runs-page.py`, `bin/publish-runs-page.sh` — the runs dashboard.
   The publisher never fails its caller; what goes wrong (build, upload, lock
@@ -347,6 +349,42 @@ Per-model windows are recorded but do not count towards it: a spent model is not
 an account that cannot start. The app-server shuts down when its stdin closes,
 so the query has to hold the pipe open - writing the request and closing it
 loses the reply.
+
+### When an account stops working
+
+A run refuses to start on an account that is signed out, which is safe and
+silent: on 2026-10-09 `~/.claude` lost its login at 18:05, the 18:13 `all` run
+logged `status=wrong-claude-account`, and nothing else said so.
+`bin/check-auth.py` runs from cron every three hours and mails
+`REVIEW_ALERT_MAIL` (set in `etc/local.conf`) when a role cannot run. It reads
+two things, and opens no session of its own - using an account can refresh
+its token, and two refreshes at once can sign it out:
+
+- `review-auth.sh status`, the sign-in checks a run makes before it starts: a
+  row that is not signed in, or that runs will refuse, is a problem.
+- the newest hourly probe in `quota.jsonl` for each account a role uses. The
+  probe really uses the account, so a login the server no longer accepts shows
+  up there while it still looks signed in locally. A busy lease, or a reading
+  older than three hours, is not counted.
+
+The mail names each role, why, and the command that signs its directory in
+again. It is sent on every check that finds a problem, so it repeats until the
+account works. `check-auth.py --dry-run` prints it instead; the log is
+`logs/auth-check.log`.
+
+It goes out through the local `sendmail`, from `REVIEW_ALERT_FROM` when that is
+set. Gmail refuses mail that passes neither SPF nor DKIM (550 5.7.26), which is
+all mail sent straight from a home address, so the box needs a relay that signs
+for the sender's domain. The reference box relays through the site's own mail
+server, which already trusts the LAN and DKIM-signs for its domain:
+
+```
+sudo postconf -e "relayhost = [<mail server>]"
+sudo systemctl reload postfix
+```
+
+with `REVIEW_ALERT_FROM` an address in that domain. Without such a server,
+relay through `smtp.gmail.com:587` with SASL and an app password instead.
 
 ### Choosing an account
 
