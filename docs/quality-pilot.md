@@ -147,6 +147,62 @@ and any rerun uses it. One adjudication verdict was corrected in the
 spot-check before scoring: a lost second mission read in mavproxy#1770,
 from blocking to non-blocking, in all four findings that carried it.
 
+## Second run, 2026-10-08, with the shared-state addendum
+
+Paired with the first: the same ten PRs at the same heads, the same frozen
+inputs, both arms using the prompts as changed after run one. Reviews took
+3.2 hours; Codex adjudicated 142 findings in 20 minutes; the blind
+spot-check covered the 11 lone blockers and 10 random verdicts, and moved
+three verdict groups from blocking to non-blocking: the lockdown
+fail-open in ardupilot#34519 (a documentation gap: the lockdown doc says
+to copy only the script), the nohup disposition in ardupilot#34650 (an
+undocumented use of a development tool, one-line guard), and the lost
+second mission read in mavproxy#1770, the same correction as in run one.
+
+Failed as written, on the other limb. `v4-paging` missed no blocker.
+Legacy found 32 real problems, 13 of them blockers, and raised one false
+blocker; `v4-paging` found 42, 22 of them blockers, and none false. It
+missed three real non-blocking problems legacy found, one over the bound:
+
+- ardupilot#34604: an open request from a reviewer for H750 and H730
+  hardware testing before the change lands. The paging primary wrote
+  exactly this in its gaps list, not as a finding.
+- ardupilot#34657: the new test does not guard the clang side of an
+  allocation elision. The paging primary discussed the elision and raised
+  no test note. Informational.
+- ardupilot#34650: a nohup'd tool overrides the signal disposition it
+  inherited. Paging never considered the inherited disposition; its
+  validation tested direct signal delivery only. A real, minor miss.
+
+Had the nohup verdict stayed blocking, the run would have failed on one
+missed blocker instead, so it fails the bound either way.
+
+`v4-paging` found 13 real problems legacy missed, 9 of them blockers.
+Among them are both blockers it missed in run one, the shared wpalt
+write in mavproxy#1769 and the partial cache write in ardupilot#34623;
+legacy missed both this time. The rest are four wide-sysid problems in
+ardupilot#34519, stale passthrough line coding in ardupilot#34606, and
+two draft-index problems in the mavproxy#1770 map.
+
+## Decision, 2026-10-09: accepted
+
+`v4-paging` is accepted on the second run. The reasons, in order:
+
+- It missed no blocker, and the three misses are two notes a reader could
+  take or leave and one minor point. The bound's non-blocking limb is a
+  guard against a general narrowing, which these do not show.
+- The addendum did what it was for. Both run-one misses had the
+  shared-state shape; both were found in run two.
+- Run-to-run variation is larger than the bound's margin. Legacy itself
+  missed both of run one's blockers in run two, and its count of real
+  problems moved from 35 to 32 between runs while paging's moved from 35
+  to 42. On single samples a strict pass is partly luck, in either arm's
+  favour.
+
+The bound stays as written for the next pilot; this acceptance is a
+judgement over it, recorded here rather than built into it. Both runs'
+pilot directories and adjudication packets are kept on the review box.
+
 ## Not covered by this phase
 
 Comparing validation and reconciliation alone on identical upstream

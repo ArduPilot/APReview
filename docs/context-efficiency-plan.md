@@ -238,7 +238,8 @@ reconcile that name their inputs. New guidance:
   shared state, find the writers and check concurrent or interrupted
   writes; a gap is for what cannot be checked, not for what was not read.
   Added after the first quality pilot, where `v4-paging` missed two
-  blockers of exactly this shape that legacy found (see quality-pilot.md).
+  blockers of exactly this shape that legacy found; the second run, with
+  this in place, found both and missed no blocker (see quality-pilot.md).
 - The environment is already set: never source review-env.sh. Before
   relying on this, the forwarded environment (`review-supervisor.py:831`,
   guardian merge `review_guardian.py:331`) is checked to carry what passes
@@ -281,6 +282,9 @@ rates move little when both modes miss the same bug. So:
   PR. A pilot of about ten PRs finds gross problems only; the bound it
   can give is stated, not assumed.
 - Then a randomized production canary with explicit rollback criteria.
+
+Status: the paired pilot ran twice on 2026-10-08 and `v4-paging` was
+accepted on the second run (quality-pilot.md). The canary is next.
 
 ### 7. Prefix and cache (last)
 
