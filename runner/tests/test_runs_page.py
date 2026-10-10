@@ -97,8 +97,8 @@ class Dashboard(unittest.TestCase):
         self.assertIn(">all<", page)
 
     def test_summary_names_its_mode_and_start_without_run_json(self):
-        # run.json holds the phase snapshots, tens of megabytes a run, and the
-        # page reads every run: a summary that carries both is enough
+        # run.json holds the candidates' review inputs, megabytes a run, and
+        # the page reads every run: a summary that carries both is enough
         from pathlib import Path
         directory = Path(self.home) / "review/data/runs/supervisor-self"
         directory.mkdir(parents=True)

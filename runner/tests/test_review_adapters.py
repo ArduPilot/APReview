@@ -1793,6 +1793,8 @@ class PhaseController(unittest.TestCase):
                         classification="REVIEW",
                         post=False,
                         destinations=["page:stub/" + mode + ".html"],
+                        diff="stub diff",
+                        rules="stub rules",
                     )
                 ]
             summary = read(directory / "summary.json")
@@ -1818,12 +1820,42 @@ class PhaseController(unittest.TestCase):
             self.assertEqual(calls.count("followup"), 1)
             self.assertEqual(set(calls), {"DevCallTopic", "DevCallEU", "AIReview", "followup"})
             self.assertEqual(len(read(directory / "run.json")["phases"]["labels"]["snapshots"]), 3)
+            self.assert_slim_records(directory)
             controller.discover_phase("labels")
             self.assertEqual(len(calls), 4)
             resumed = self.supervisor.Supervisor(self.root, directory)
             self.assertEqual(resumed.run(coordinate=False), 0)
             self.assertEqual(len(calls), 4)
             self.assertEqual(Store(self.root).current(PR)["generation"], 1)
+
+    def assert_slim_records(self, directory):
+        """The review inputs stay with the candidates, not in each mode's
+        snapshot, and a summary carries what the phases came to, not the
+        snapshots: those were tens of megabytes a run, read every ten minutes."""
+        run = read(directory / "run.json")
+        # slimming copies: the review itself still had its inputs
+        self.assertEqual(Store(self.root).bundle(PR)["inputs"]["diff"], "stub diff")
+        for phase in run["phases"].values():
+            for rows in phase["snapshots"].values():
+                for row in rows:
+                    self.assertEqual(row["pr"], PR)
+                    self.assertEqual(row["classification"], "REVIEW")
+                    for field in self.supervisor.SNAPSHOT_INPUTS:
+                        self.assertNotIn(field, row)
+        summary = read(directory / "summary.json")
+        self.assertEqual(set(summary["phases"]), set(run["phases"]))
+        for name, phase in summary["phases"].items():
+            self.assertNotIn("snapshots", phase)
+            self.assertNotIn("outcomes", phase)
+            self.assertEqual(phase["state"], "complete")
+            for mode, outcome in phase["summaries"].items():
+                self.assertEqual(outcome["classification"], run["phases"][name]["summaries"][mode]["classification"])
+                for pr, state in outcome["outcomes"].items():
+                    self.assertNotIn("candidate", state)
+                    self.assertEqual(state["review"], run["phases"][name]["summaries"][mode]["outcomes"][pr]["review"])
+        self.assertIn("candidate", read(directory / "state.json")[PR])
+        self.assertNotIn("candidate", summary["prs"][PR])
+        self.assertEqual(summary["phases"]["labels"]["summaries"]["AIReview"]["classification"]["REVIEW"], 1)
 
     def test_explicit_pr_reference_forces_new_generation_at_same_head(self):
         store = Store(self.root)

@@ -201,8 +201,8 @@ SUMMARIES = summaries(DATA)
 
 def run_meta(sv):
     """The run's mode and creation time. The summary carries both; one written
-    before it did is read from run.json, which costs loading the phase
-    snapshots: tens of megabytes for a run, and the page reads every run."""
+    before it did is read from run.json, which costs loading the candidates'
+    review inputs: megabytes for a run, and the page reads every run."""
     if sv.get('created'):
         return sv.get('mode'), sv['created']
     try:

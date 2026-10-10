@@ -50,8 +50,9 @@ def summaries(data):
                                  sessions=usage, context=context))
             if not identity_readable(status):
                 attempts[-1]["liveness"] = "unknown"
-        # The phase snapshots are most of a summary and no reader of these
-        # rows wants them: over a month of runs they are gigabytes held at once.
+        # A summary written before 2026-10-11 carries the phase snapshots, most
+        # of its size, and no reader of these rows wants them: over a month of
+        # runs they were gigabytes held at once.
         summary.pop("phases", None)
         out.append(dict(summary, name=path.parent.name,
                         liveness="live" if alive(summary) else "dead",

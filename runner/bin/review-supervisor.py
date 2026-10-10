@@ -52,6 +52,38 @@ STARVED = ("account deadline", "permit deadline")
 WALL = {"primary": 5400, "cold": 1800, "validation": 1800, "reconciliation": 2700}
 
 
+# What a phase snapshot keeps of a candidate: which PR, at what head, and how
+# it was classified - not its review inputs, which are in the run's candidates
+# and each claim's bundle. Copied once per discovery mode, the inputs were 22 MB
+# of an empty run's 37 MB run.json and all of its 23 MB summary.json.
+SNAPSHOT_INPUTS = ("configuration", "thread", "diff", "previous_comment", "previous_section", "rules")
+
+
+def snapshot(rows):
+    return [{k: v for k, v in row.items() if k not in SNAPSHOT_INPUTS} for row in rows]
+
+
+def summary_states(states):
+    """PR states as a summary carries them: without the claimed candidate,
+    which is the review inputs again - a megabyte for a PR with a large diff.
+    state.json keeps it for resume."""
+    return {pr: {k: v for k, v in state.items() if k != "candidate"} for pr, state in states.items()}
+
+
+def phase_record(phases):
+    """The phases as a summary carries them: their state and per-mode
+    summaries, without the snapshots and outcomes those are made from."""
+    record = {}
+    for name, phase in phases.items():
+        record[name] = {k: v for k, v in phase.items() if k not in ("snapshots", "outcomes", "summaries")}
+        if "summaries" in phase:
+            record[name]["summaries"] = {
+                mode: dict(summary, outcomes=summary_states(summary.get("outcomes", {})))
+                for mode, summary in phase["summaries"].items()
+            }
+    return record
+
+
 def refresh(candidate):
     """The slice's read-only adapter uses supplied live metadata."""
     if candidate.get("refresh_error"):
@@ -173,7 +205,7 @@ class Supervisor:
             "stub": os.environ.get("REVIEW_AI_STUB") == "1",
             "configuration": self.configuration,
             "phases": (
-                {"initial": {"state": "admitted", "snapshots": {mode: ordered}}}
+                {"initial": {"state": "admitted", "snapshots": {mode: snapshot(ordered)}}}
                 if self.initial[0] is not None
                 else {}
             ),
@@ -393,11 +425,11 @@ class Supervisor:
                     "state": "complete" if self.summary_finished() else "running",
                     "heartbeat": time.time(),
                     # repeated from run.json so a reader of summaries need not
-                    # load that file, which the phase snapshots make huge
+                    # load that file, which the candidates' inputs make large
                     "mode": self.config.get("mode"),
                     "created": self.config.get("created"),
-                    "prs": self.states,
-                    "phases": self.config.get("phases", {}),
+                    "prs": summary_states(self.states),
+                    "phases": phase_record(self.config.get("phases", {})),
                     "delivery_deferred": [x["id"] for x in debts if x["pr"] in self.states],
                     "delivery_damaged": damaged,
                     "attempts": [
@@ -1217,7 +1249,10 @@ class Supervisor:
                 else:
                     merged[row["pr"]] = row
         self.config["active_phase"] = phase
-        self.config["phases"][phase] = {"snapshots": snapshots, "state": "admitted"}
+        self.config["phases"][phase] = {
+            "snapshots": {mode: snapshot(rows) for mode, rows in snapshots.items()},
+            "state": "admitted",
+        }
         self.config["candidates"] = sorted(
             merged.values(), key=lambda row: (row["created_at"], row["pr"])
         )
@@ -1352,7 +1387,7 @@ class Supervisor:
             atomic(self.directory / "summary.json", dict(
                 identity(), schema=1, run=self.run_id, state="recovering", heartbeat=time.time(),
                 mode=self.config.get("mode"), created=self.config.get("created"),
-                prs=self.states, phases=self.config.get("phases", {}),
+                prs=summary_states(self.states), phases=phase_record(self.config.get("phases", {})),
                 delivery_deferred=[entry["id"] for entry in self.startup_delivery],
                 attempts=[str(p.parent) for p in (self.directory / "attempts").glob("*/job.json")]))
             self.setup_adapters()

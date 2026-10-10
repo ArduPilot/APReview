@@ -305,7 +305,10 @@ written by the guardian, carrying: run, mode, creation time, PR,
 generation, job, attempt,
 provider/account, session id, boot/pid/start time, cgroup, state,
 heartbeat, exit/timeout/result-status, quota observations and usage totals. Guardians heartbeat every 30 seconds; the controller emits
-aggregate summaries. Session ids belong to exactly one attempt and token
+aggregate summaries. A summary carries each discovery phase's state and
+per-mode classification and outcomes, not its snapshot, and each PR's
+state without the candidate it was claimed with: the page reads every
+summary every ten minutes. `state.json` keeps the candidates for resume. Session ids belong to exactly one attempt and token
 counts are deduplicated by that identity, never wall-clock overlap or the
 first result line in a combined log. Silence means unknown until process
 identity/cgroup checks prove death. The dashboard has its own page lock.
@@ -317,6 +320,10 @@ set is fixed. A queued candidate may be refreshed under its PR claim before
 admission; after that, job inputs are immutable. Persist the complete phase
 snapshot before admission and reuse it on resume; a failed fetch before
 that commit may be retried, but a committed phase is never rediscovered.
+Resume reuses the candidate list, which holds the review inputs; the
+record of what each mode returned keeps every field but those inputs
+(the thread, diff, previous comment and section, house rules and the run
+configuration), which copied once per mode were most of every run record.
 Output: a candidate list
 with, per PR: repository,
 number, node id, manifest key (the `repos.json` key plus number, so `wiki`
