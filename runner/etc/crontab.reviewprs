@@ -45,9 +45,11 @@ MAILTO=""
 # After a drained transfer, replace the line above (do not run both):
 #47 1,4,7,10,13,16,19,22 * * *   REVIEW_EXPECT_PATH=new $HOME/review/bin/run-reviewprs.sh followup
 
-# The full label sweep, every 6 hours.
-13 0,6,12,18 * * *   $HOME/review/bin/run-reviewprs.sh all
-#13 0,6,12,18 * * *   REVIEW_EXPECT_PATH=new $HOME/review/bin/run-reviewprs.sh all
+# The full label sweep, hourly. A sweep that finds nothing to review starts no
+# model session, and GC drops its record after a day. One that overlaps a long
+# run waits for that run's PRs rather than reviewing them twice.
+13 * * * *   $HOME/review/bin/run-reviewprs.sh all
+#13 * * * *   REVIEW_EXPECT_PATH=new $HOME/review/bin/run-reviewprs.sh all
 
 # A separate project, reviewed once a day. It waits up to 2h for the lock rather
 # than skipping: a once-a-day job that loses the race does not run at all that day.

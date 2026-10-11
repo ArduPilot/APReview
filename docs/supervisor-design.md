@@ -366,7 +366,7 @@ place but do not hold up unrelated PRs.
 There is no re-sweep during or at the end of a run, and no end-of-run
 recheck of heads that were skipped as unchanged. Both were added after a PR
 labelled in the same minute as discovery was missed on 2026-08-30. With
-all-runs every six hours and followups every three, and with
+all-runs hourly and followups every three hours, and with
 `review-now.sh` able to start at any time because there is no global lock,
 the next selecting run catches anything still eligible. One-off labels,
 author sweeps and unlabelled PR requests need an explicit retry if deferred;
