@@ -5,7 +5,8 @@ An attempt directory is pinned while any PR's claim names it (carried passes
 are copied from it at promotion), or while its run is still live. Unpinned
 attempts of finished runs lose their evidence and build trees but keep the
 records the dashboard and audits read. Runs older than OLD_RUN_DAYS keep only
-their summaries. Anything at the top of the store that the store does not
+their summaries. A finished run that launched no attempt goes after
+EMPTY_RUN_DAYS, except the newest of its kind. Anything at the top of the store that the store does not
 own is litter from passes told to work "under REVIEW_DATA"; it goes once it
 is quiet, unless a live process is using it.
 
@@ -52,6 +53,8 @@ EVIDENCE_DAYS = 2
 LITTER_DAYS = 2
 SCRATCH_DAYS = 7
 OLD_RUN_DAYS = 30
+# an hourly sweep that finds nothing to review leaves a run record each time
+EMPTY_RUN_DAYS = 1
 GONE_RUN_DAYS = 90
 VENV_DAYS = 14
 # a week past the followup window, which reads posting times from receipt files
@@ -186,6 +189,23 @@ def cleaned(attempt):
 def live(record_path):
     record = load(record_path, {})
     return bool(record) and alive(record)
+
+
+def run_kind(run):
+    """The tag a run directory is named for: all-20261010_061301-f5fd967c3bd5 is all."""
+    parts = run.name.rsplit("-", 2)
+    return parts[0] if len(parts) == 3 else run.name
+
+
+def empty_run(run, now):
+    """A finished run that launched no attempt and had no damaged delivery:
+    its record says only that there was nothing to do."""
+    if any(run.glob("attempts/*")):
+        return False
+    summary = load(run / "summary.json", {})
+    return (summary.get("state") == "complete" and summary.get("attempts") == []
+            and not summary.get("delivery_damaged")
+            and now - (summary.get("heartbeat") or now) > EMPTY_RUN_DAYS * 86400)
 
 
 def run_finished(run, now):
@@ -372,13 +392,18 @@ class GC:
         if (self.data / "runs").is_symlink():
             self.skip("attempt evidence", "runs is a symlink")
             return
-        for run in sorted(self.data.glob("runs/*")):
+        runs = sorted(self.data.glob("runs/*"))
+        newest = {run_kind(run): run for run in runs}
+        for run in runs:
             if self.spent():
                 return
             if not run.is_dir() or run.is_symlink() or (run / "attempts").is_symlink():
                 continue
             if not run_finished(run, self.now):
                 self.skip("attempt evidence", "run live")
+                continue
+            if newest[run_kind(run)] != run and empty_run(run, self.now) and not used(run, processes):
+                self.remove("empty run", run)
                 continue
             created = load(run / "run.json", {}).get("created") or run.stat().st_mtime
             old = self.now - created > OLD_RUN_DAYS * 86400

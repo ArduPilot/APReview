@@ -217,6 +217,49 @@ class GC(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in attempt.iterdir()),
                          ["context.json", "empty.json", "job.json", "launch.json", "manager.json", "status.json"])
 
+    def empty(self, name, finished, attempts=(), **summary):
+        run = self.data / "runs" / name
+        write(run / "run.json", {"created": finished - 300})
+        write(run / "summary.json", dict({"state": "complete", "heartbeat": finished,
+                                          "attempts": list(attempts)}, **summary))
+        age_tree(run, finished)
+        return run
+
+    def test_an_old_empty_run_goes_but_the_newest_of_its_kind_stays(self):
+        day = 86400
+        old = self.empty("all-20261001_001301-aaaaaaaaaaaa", time.time() - 3 * day)
+        older = self.empty("all-20260930_231301-bbbbbbbbbbbb", time.time() - 4 * day)
+        newest = self.empty("all-20261002_001301-cccccccccccc", time.time() - 2 * day)
+        recent = self.empty("rsync-20261001_001301-dddddddddddd", time.time() - 3600)
+        recent_newer = self.empty("rsync-20261001_011301-eeeeeeeeeeee", time.time() - 600)
+        report = self.gc("--apply")
+        self.assertFalse(old.exists())
+        self.assertFalse(older.exists())
+        self.assertTrue(newest.exists())
+        # within a day an empty run is kept, newest or not
+        self.assertTrue(recent.exists())
+        self.assertTrue(recent_newer.exists())
+        self.assertEqual(report["removed"]["empty run"]["entries"], 2)
+
+    def test_a_run_that_did_anything_is_not_empty(self):
+        finished = time.time() - 3 * 86400
+        launched = self.empty("all-20261001_001301-aaaaaaaaaaaa", finished, attempts=["a1"])
+        prepared = self.empty("all-20261001_011301-bbbbbbbbbbbb", finished)
+        write(prepared / "attempts" / "a2" / "job.json", {}, age=finished)
+        damaged = self.empty("all-20261001_021301-cccccccccccc", finished, delivery_damaged=["op"])
+        unfinished = self.empty("all-20261001_031301-dddddddddddd", finished, state="running")
+        self.empty("all-20261002_001301-eeeeeeeeeeee", finished)
+        self.gc("--apply")
+        for run in (launched, prepared, damaged, unfinished):
+            self.assertTrue(run.exists(), run.name)
+
+    def test_a_report_keeps_empty_runs(self):
+        old = self.empty("all-20261001_001301-aaaaaaaaaaaa", time.time() - 3 * 86400)
+        self.empty("all-20261002_001301-bbbbbbbbbbbb", time.time() - 2 * 86400)
+        report = self.gc()
+        self.assertTrue(old.exists())
+        self.assertEqual(report["removed"]["empty run"]["entries"], 1)
+
     def test_a_controller_holding_maintenance_stops_all_deletion(self):
         sys.path.insert(0, str(BIN))
         from review_lock import try_lock

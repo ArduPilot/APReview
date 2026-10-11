@@ -60,7 +60,9 @@ worktrees). Rules, in order:
    name.
 2. **Old runs.** A run older than 30 days keeps only `run.json`,
    `summary.json` and the attempts' `status.json`; after 90 days it goes
-   unless something above pins it.
+   unless something above pins it. A finished run that launched no attempt
+   goes after a day, except the newest of its kind: an hourly sweep that
+   finds nothing to review would otherwise leave 24 records a day saying so.
 3. **Scratch areas.** `tmp/`, `scratch/` and `venvs/` at the store root are
    agent litter from before 1b; they are removed once 1b is in place and no
    pass is running. Directory age alone is not proof a tree is unused.
