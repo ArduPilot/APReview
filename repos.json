@@ -191,6 +191,16 @@
    "notes": "AM32 brushless ESC firmware in C, for many MCU families (STM32 F0/F4/G0/G4/L4, GD32, AT32, WCH), each with its own makefile, plus a SITL build with its own tests. Not an ArduPilot repo: judge it against AM32's own conventions, not ArduPilot house rules. Default branch is main. Flash and RAM are tight on the small MCUs, timing and interrupt paths are critical, and the EEPROM layout has a schema checked in CI - a change to it affects existing configurations."
   },
   {
+   "repo": "am32-firmware/am32-configurator",
+   "key": "am32-configurator",
+   "discovery": "explicit",
+   "post_comments": true,
+   "house_rules": "none",
+   "ci": true,
+   "added": "2026-10-12",
+   "notes": "The web configurator for AM32 ESCs: a Nuxt 3 / Vue 3 app in TypeScript, built with yarn, with a Prisma database and a server side that serves firmware releases, bootloaders and the EEPROM schema. Not an ArduPilot repo: judge it against TypeScript and Vue conventions, not ArduPilot house rules. Default branch is master. It talks to ESCs over serial (MSP passthrough and the AM32 bootloader protocol), and its one CI workflow, protocol-matrix.yml, runs that protocol stack against a Python bootloader emulator over transports, bootloader generations and flash sizes (ci/run_matrix.py) - a protocol change is where a wrong byte bricks a user's ESC, so check it against the AM32 firmware side. An EEPROM layout change on either side should agree with the schema in am32-firmware/AM32."
+  },
+  {
    "repo": "RsyncProject/rsync",
    "key": "rsync",
    "discovery": "rsync-mode",
