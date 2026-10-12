@@ -178,6 +178,14 @@ class GC(unittest.TestCase):
         listed = subprocess.run(["git", "-C", str(elsewhere), "worktree", "list"], capture_output=True, text=True).stdout
         self.assertNotIn("orphan2", listed)
 
+    def test_pruning_stops_when_the_budget_is_spent(self):
+        elsewhere = self.root / "clones" / "repo"
+        subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
+        write(self.data / "runs" / "followup-1" / "run.json",
+              {"created": OLD, "configuration": {"reference_clones": {"o/r": str(elsewhere)}}})
+        report = self.gc("--apply", "--budget", "0")
+        self.assertIn("time budget spent", report["skipped"]["orphan attempt"])
+
     def test_a_clone_is_remembered_after_the_last_run_naming_it_expires(self):
         elsewhere = self.root / "clones" / "kept"
         subprocess.run(["git", "init", "-q", str(elsewhere)], check=True)
@@ -274,18 +282,18 @@ class GC(unittest.TestCase):
         sys.path.insert(0, str(BIN))
         from review_lock import try_lock
         lock = try_lock(self.data / "locks", "maintenance", shared=True)
-        threading.Timer(1.5, lock.close).start()
+        threading.Timer(6, lock.close).start()          # longer than the old 5 s try
         report = self.gc("--apply", "--wait", "30")
         self.assertNotIn("all rules", report["skipped"])
-        self.assertGreaterEqual(report["waited"], 1)
+        self.assertGreaterEqual(report["waited"], 5)
         self.assertFalse((self.data / "runs/followup-1/attempts/free/cold-evidence").exists())
 
     def test_the_deletion_budget_starts_when_the_fence_is_held(self):
         sys.path.insert(0, str(BIN))
         from review_lock import try_lock
         lock = try_lock(self.data / "locks", "maintenance", shared=True)
-        threading.Timer(2, lock.close).start()
-        report = self.gc("--apply", "--wait", "30", "--budget", "1")
+        threading.Timer(6, lock.close).start()
+        report = self.gc("--apply", "--wait", "30", "--budget", "3")
         self.assertFalse(any("time budget spent" in why for why in report["skipped"].values()))
         self.assertFalse((self.data / "runs/followup-1/attempts/free/cold-evidence").exists())
 

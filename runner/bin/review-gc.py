@@ -238,6 +238,9 @@ class GC:
     def spent(self):
         return self.apply and time.monotonic() > self.deadline
 
+    def remaining(self):
+        return max(0, self.deadline - time.monotonic())
+
     @staticmethod
     def walk_open(start_fd, parts):
         """Open each component below start_fd refusing links (no trailing
@@ -373,9 +376,13 @@ class GC:
         if not self.apply:
             return
         for reference in getattr(self, "references", []):
+            # within the budget: a run waiting for the fence gives up at 900 s
+            if self.spent():
+                self.skip("orphan attempt", "time budget spent")
+                return
             try:
                 subprocess.run(["git", "-C", str(reference), "worktree", "prune"],
-                               capture_output=True, timeout=120, check=True)
+                               capture_output=True, timeout=min(120, self.remaining()), check=True)
             except (OSError, subprocess.SubprocessError):
                 self.skip("orphan attempt", "worktree prune failed in %s" % reference)
 
@@ -613,9 +620,11 @@ def main():
     report["seconds"] = round(time.monotonic() - started)
     a.data = data
     os.makedirs(os.path.join(a.data, "gc"), exist_ok=True)
-    with open(os.path.join(a.data, "gc", "last.json.tmp"), "w") as f:
+    # its own temporary: a collector that waited can finish beside the next
+    tmp = os.path.join(a.data, "gc", "last.json.%d.tmp" % os.getpid())
+    with open(tmp, "w") as f:
         json.dump(report, f, indent=1)
-    os.replace(os.path.join(a.data, "gc", "last.json.tmp"), os.path.join(a.data, "gc", "last.json"))
+    os.replace(tmp, os.path.join(a.data, "gc", "last.json"))
     verb = "removed" if a.apply else "would remove"
     for rule, r in report["removed"].items():
         print("%s %-18s %6d entries %9d files %8.2f GB" % (verb, rule, r["entries"], r["files"], r["bytes"] / 1e9))
