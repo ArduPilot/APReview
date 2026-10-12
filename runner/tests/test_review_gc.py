@@ -6,6 +6,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -264,10 +265,29 @@ class GC(unittest.TestCase):
         sys.path.insert(0, str(BIN))
         from review_lock import try_lock
         with try_lock(self.data / "locks", "maintenance", shared=True):
-            report = self.gc("--apply")
-        self.assertIn("a controller holds the maintenance lock", report["skipped"]["all rules"])
+            report = self.gc("--apply", "--wait", "0.5")
+        self.assertIn("a controller held the maintenance lock for the whole wait", report["skipped"]["all rules"])
         self.assertTrue((self.data / "pr34599").exists())
         self.assertTrue((self.data / "runs/followup-1/attempts/free/cold-evidence").exists())
+
+    def test_gc_waits_for_a_gap_between_controllers(self):
+        sys.path.insert(0, str(BIN))
+        from review_lock import try_lock
+        lock = try_lock(self.data / "locks", "maintenance", shared=True)
+        threading.Timer(1.5, lock.close).start()
+        report = self.gc("--apply", "--wait", "30")
+        self.assertNotIn("all rules", report["skipped"])
+        self.assertGreaterEqual(report["waited"], 1)
+        self.assertFalse((self.data / "runs/followup-1/attempts/free/cold-evidence").exists())
+
+    def test_the_deletion_budget_starts_when_the_fence_is_held(self):
+        sys.path.insert(0, str(BIN))
+        from review_lock import try_lock
+        lock = try_lock(self.data / "locks", "maintenance", shared=True)
+        threading.Timer(2, lock.close).start()
+        report = self.gc("--apply", "--wait", "30", "--budget", "1")
+        self.assertFalse(any("time budget spent" in why for why in report["skipped"].values()))
+        self.assertFalse((self.data / "runs/followup-1/attempts/free/cold-evidence").exists())
 
     def test_a_symlinked_attempts_directory_is_not_followed(self):
         outside = self.root / "elsewhere2"

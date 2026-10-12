@@ -43,7 +43,9 @@ needed. Each tier must also be bounded, so that work per run grows with what
 ### 1a. `review-gc.py`, a separate cron job
 
 A standalone Python job, hourly under `nice`/`ionice -c3`, holding no review
-locks except where it deletes store state. It has `--dry-run` and prints what
+locks except where it deletes store state. Deleting needs a moment with no
+run live; hourly runs overlap, so it waits up to 40 minutes for a gap and
+counts its deletion budget from when it has one. It has `--dry-run` and prints what
 it would remove per rule. Rules, in order:
 
 GC works by **reachability and verified ownership first, age second**

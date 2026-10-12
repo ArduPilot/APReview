@@ -224,9 +224,16 @@ class GC:
         self.roots = (os.path.realpath(data) + "/", os.path.realpath(cache) + "/")
         self.root_fds = {}
         self.now = time.time()
+        self.budget = budget
         self.deadline = time.monotonic() + budget
         self.removed = {}
         self.skipped = {}
+
+    def begin(self):
+        """Ages and the deletion budget count from when the fence is held,
+        not from a start that may have waited most of an hour for it."""
+        self.now = time.time()
+        self.deadline = time.monotonic() + self.budget
 
     def spent(self):
         return self.apply and time.monotonic() > self.deadline
@@ -541,6 +548,7 @@ def main():
     p.add_argument("--stats", action="store_true", help="count files and bytes per area afterwards")
     p.add_argument("--cache", default=os.path.join(os.environ.get("REVIEW_ROOT", os.path.expanduser("~/review")), "cache"))
     p.add_argument("--budget", type=float, default=600, help="seconds of deletion while admission is held")
+    p.add_argument("--wait", type=float, default=2400, help="seconds to wait for a moment with no controller")
     p.add_argument("--root", default=os.environ.get("REVIEW_ROOT", os.path.expanduser("~/review")))
     a = p.parse_args()
     data = os.path.realpath(a.data)
@@ -553,7 +561,12 @@ def main():
     # Every controller holds "maintenance" shared for its life (taken right
     # after its run lock), so holding it exclusively means no run is going and
     # none can start, resume or recover until it is released.
-    fence = acquire(os.path.join(data, "locks"), "maintenance", time.monotonic() + 5) if a.apply else None
+    # Hourly runs overlap, so wait for a gap between them: polling holds
+    # nothing, and a run starting meanwhile waits up to 900 s for the fence,
+    # longer than the deletion budget.
+    fence = acquire(os.path.join(data, "locks"), "maintenance", time.monotonic() + a.wait) if a.apply else None
+    waited = time.monotonic() - started
+    gc.begin()
     legacy = None
     try:
         if a.apply:
@@ -568,7 +581,7 @@ def main():
                     legacy.close()
                 legacy = None
         if a.apply and fence is None:
-            gc.skip("all rules", "a controller holds the maintenance lock")
+            gc.skip("all rules", "a controller held the maintenance lock for the whole wait")
         elif a.apply and legacy is None:
             gc.skip("all rules", "the retired path's run lock is held")
         elif gc.any_live():
@@ -590,7 +603,7 @@ def main():
             legacy.close()
         if fence:
             fence.close()
-    report = dict(at=gc.now, applied=a.apply, unresolved=getattr(gc, "unresolved", [])[:20],
+    report = dict(at=gc.now, applied=a.apply, waited=round(waited), unresolved=getattr(gc, "unresolved", [])[:20],
                   removed={k: dict(entries=v[0], files=v[1], bytes=v[2]) for k, v in gc.removed.items()},
                   skipped=gc.skipped)
     if a.stats:
