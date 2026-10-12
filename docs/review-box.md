@@ -1,12 +1,14 @@
 # The review runner
 
-A machine that runs reviews unattended. Nothing here is required to use
-`/reviewprs` by hand — it is what turns the command into a service that reviews
-every labelled PR around the clock and publishes the results.
+A machine that runs reviews unattended: the supervisor (`review-supervisor.py`)
+and the cron jobs around it, reviewing every labelled PR around the clock and
+publishing the results. How the supervisor works is in
+[supervisor-design.md](supervisor-design.md); this is how to set a box up and
+keep it running.
 
 The reference deployment is a dedicated box: 32 cores, 30G RAM, a few hundred GB
-free, Ubuntu under WSL2. Cores and RAM matter because a run fans out to parallel
-per-PR agents, several of which build and fly SITL.
+free, Ubuntu under WSL2. Cores and RAM matter because a run starts up to eight
+passes per model at once, several of which build and fly SITL.
 
 ## Layout
 
@@ -15,10 +17,15 @@ Run data and scripts live under `~/review`, which is `$REVIEW_ROOT`:
 | path | what |
 |---|---|
 | `~/review/bin/` | the scripts from `runner/bin/` in this repo |
-| `~/review/etc/` | `local.conf`, the run lock, the crontab |
-| `~/review/data/` | all scratch: checkouts, clones, build trees. `$REVIEW_DATA` |
-| `~/review/repositories/` | maintained base clones of every reviewed repo. `$REVIEW_REPOS` |
-| `~/review/work/` | working dir for a run; reports land here, base checkouts stay clean |
+| `~/review/etc/` | `local.conf`, `routing.json`, the crontab |
+| `~/review/data/` | the store and all scratch. `$REVIEW_DATA` |
+| `~/review/data/runs/` | one directory per run, its attempts (worktree, evidence, result) inside |
+| `~/review/data/results/`, `outbox/`, `receipts/`, `membership/` | accepted reviews, owed deliveries, delivered ones, page rows |
+| `~/review/data/references/` | the reference clones passes check out from, one per repository |
+| `~/review/data/locks` | the one lock file every run, pass and drain shares. Never replace it |
+| `~/review/repositories/` | base clones of every reviewed repo, refreshed nightly. `$REVIEW_REPOS` |
+| `~/review/cache/` | caches passes share: virtualenvs, uv, pip, npm |
+| `~/review/work/` | the directory a run starts in, so no base checkout is its working directory; a run refuses to start without it |
 | `~/review/logs/` | run logs, 30-day retention. `$REVIEW_LOGS` |
 
 `$REVIEW_AUTH` is `~/review.auth/` - one directory per account and a symlink per
@@ -27,7 +34,7 @@ inside it, because the reviewing agent is started with `--add-dir $REVIEW_ROOT`.
 A box set up before that changed moves across with
 `runner/bin/migrate-auth-root.sh` (`--dry-run` first), which renames the
 directory and adds the new deny rule without removing existing protections.
-Hold the run lock across the migration and deployment. The migrator has its own
+Pause runs (`pause-runs.sh`) across the migration and deployment. The migrator has its own
 `$HOME/review.auth` default and does not source the deployed environment; for a
 custom location pass `--auth-root /absolute/path` explicitly. It validates every
 account before moving, refuses links whose meaning would change, and resumes
@@ -52,15 +59,28 @@ mkdir -p ~/review/etc
 # deploy step, and the scripts find repos.json beside themselves. A copied bin
 # has no checkout to resolve back to, and clone-repos.sh will say so and stop.
 ln -s ~/APReview/runner/bin ~/review/bin
-ln -sf ~/APReview/commands/reviewprs.md ~/.claude/commands/reviewprs.md
 
 cp ~/APReview/runner/etc/crontab.reviewprs ~/review/etc/
 cp ~/APReview/runner/etc/local.conf.example ~/review/etc/local.conf   # then edit
+echo '{"schema": 1, "repositories": [], "labels": [], "modes": ["all"]}' \
+    > ~/review/etc/routing.json          # everything to the supervisor
 
 ~/review/bin/clone-ardupilot.sh      # base clone with submodules
 ~/review/bin/clone-repos.sh          # everything in repos.json, submodules included
 ~/review/bin/base-build.sh           # proves the toolchain, warms ccache
+
+loginctl enable-linger "$USER"       # passes run as user units; see below
 ```
+
+Then seed a reference clone under `~/review/data/references/` for every repository
+and every ArduPilot-owned submodule, as described in
+[Supervisor operations](#supervisor-operations): a run refuses to start while one is
+missing. Set `REVIEW_GITHUB_WRITES=1` and `GH_TOKEN` in `local.conf` once you want it
+to post. For the accounts, see [Accounts](#accounts) and copy
+`runner/etc/policy.json.example` to `~/review.auth/policy.json`.
+
+`/reviewprs`, the single-session slash command, is not used by the runner. Link
+`commands/reviewprs.md` into `~/.claude/commands/` only to review by hand.
 
 Before enabling cron, merge these settings into `settings.json` in **every Claude
 account directory** a role can select (including `~/.claude` if using the default
@@ -98,63 +118,99 @@ crontab ~/review/etc/crontab.reviewprs
 ```
 
 `local.conf` is where the site-specific settings go: the rsync destination, its
-credentials and the public URL reports appear at. It is never committed. Accounts
+credentials, the public URL reports appear at, the posting token and the alert
+address. It is never committed. Accounts
 are not in it - they are the directories and role links under `~/review.auth/`,
 described below.
 
 ## Scripts
 
+Running reviews:
+
+- `bin/run-reviewprs.sh <mode>` — the cron entry point. `followup` | `all` | `rsync` |
+  any label. Picks the accounts, runs the pre-flights, freezes the run's configuration
+  (`review-run-config.py`) and starts the supervisor.
+- `bin/review-now.sh <mode|PR>` — the same, by hand; a PR asked for by name is reviewed
+  even if it was reviewed recently. `--abort <run>` stops a run.
+- `bin/review-supervisor.py` — one run: discovery (`review_discovery.py`), claims,
+  passes, acceptance and delivery.
+- `bin/review-guardian.py` — owns one pass: its unit, cgroup, timeout and terminal
+  record. Started by the supervisor, never by hand.
+- `bin/review-heavy.sh` — what a pass wraps a build or SITL run in, for a build slot;
+  `--netns` adds a private network namespace through `netns-run.sh`, so parallel SITL
+  keeps the default TCP ports instead of needing `--uds` (which changes SITL UART
+  timing and produces false findings).
+- `bin/run-reviewprs.sh --resume <run>`, `bin/review-resume.py` — continue an
+  unfinished run from its own record.
+- `bin/review-outbox.sh` — drains owed deliveries every minute: pages, comments, board.
+- `bin/post-comments.py` — the comment rules delivery follows: post, edit, or
+  deprecate and repost.
+- `bin/review-retire.py` — takes a PR off a page that can never be published.
+- `bin/pause-runs.sh` — stops new admissions; delivery carries on.
+- `bin/review-route.py`, `bin/review-handoff.py` — which path owns a target, and the
+  move from the legacy runner.
+
+Accounts and quota:
+
+- `bin/review-auth.sh` — sign accounts in, point roles at them, show what each resolves to.
+- `bin/quota.py`, `bin/accounts.py` — what each account has left, and which one a role
+  would run on.
+- `bin/check-auth.py` — mails `REVIEW_ALERT_MAIL` when a role's account cannot
+  run; see [When an account stops working](#when-an-account-stops-working).
+- `bin/claude-usage-probe.sh` — samples the real usage meter, tagged by account.
+
+Keeping the box healthy:
+
 - `bin/review-env.sh` — source this first. Sets `$REVIEW_*`, `TMPDIR`, `CCACHE_DIR`,
   the toolchain PATHs, `GIT_CONFIG_GLOBAL`, the publish variables, and reads `local.conf`.
-- `bin/run-reviewprs.sh <mode>` — the cron entry point. `followup` | `all` | `rsync` | any label.
-- `bin/netns-run.sh` — run a command with its own network namespace, so parallel SITL
-  work keeps the default TCP ports instead of needing `--uds` (which changes SITL UART
-  timing and produces false findings). `--session <dir>` gives one agent a namespace
-  shared by all its commands. `autotest-netns.sh` is a symlink to it.
+- `bin/review-gc.py` — removes build trees, evidence and old runs once nothing can need them.
+- `bin/reap-orphans.sh` — kills processes a run left behind, and reconciles
+  supervisor attempts by their recorded identity.
 - `bin/refresh-repos.sh` — nightly refresh of the base clones, lock-guarded.
 - `bin/clone-ardupilot.sh`, `bin/clone-repos.sh` — the base clones, submodules included.
 - `bin/base-build.sh` — SITL + a ChibiOS board; proves the toolchain and warms ccache.
-- `bin/post-comments.py` — posts or updates the AI review comment on each PR in a
-  plan, deciding post / edit / deprecate-and-repost. Tested in `runner/tests/`.
-- `bin/claude-usage-probe.sh` — samples the real usage meter, tagged by account.
-- `bin/check-auth.py` — mails `REVIEW_ALERT_MAIL` when a role's account cannot
-  run; see [When an account stops working](#when-an-account-stops-working).
-- `bin/reap-orphans.sh` — kills processes a run left behind under `$REVIEW_DATA`.
 - `bin/make-runs-page.py`, `bin/publish-runs-page.sh` — the runs dashboard.
   The publisher never fails its caller; what goes wrong (build, upload, lock
   busy, killed at the timeout) is in `logs/runs-page.log`.
-- `bin/pause-runs.sh`, `bin/review-now.sh` — hold the lock; run a mode on demand.
-- `bin/fmt-stream.py` — turns `--output-format stream-json` into a readable log.
+- `bin/project-sync.py` — the results board; see below.
+- `bin/review-context.py`, `bin/review-baseline.py` — what fills each pass's context,
+  and per-run pass counts and minutes.
+- `bin/review-pilot.py` — freezes, runs and scores a paired quality pilot
+  ([quality-pilot.md](quality-pilot.md)).
 
 ## Things the deployment gets wrong if you skip them
 
-**One lock for everything.** All review runs and the repo refresh share
-`etc/reviewprs.lock`. The label sub-runs share a report file and follow-up reads
-what they publish, so overlap corrupts output. A blocked slot logs `SKIPPED`
-rather than queueing, and only the exit path of a run that *held* the lock is
-allowed to reap processes.
+**Never replace `data/locks`.** Every lock is a kernel lock on a byte range of that
+one file: a PR, a page, a provider's session slots, an account, a build slot, the
+reference refresh, a run, the board, pause. They die with their holder and vanish
+on reboot, so nothing needs cleaning up after a crash, but a new file with the same
+name is a new set of locks, and two runs would each hold "the" lock on one PR. A
+stale header written inside it is not a stale lock.
 
-**The agent pool needs its own cgroup scope.** `setsid` alone leaves the pool in
-the launching terminal's cgroup, so when it runs the box out of memory, systemd-oomd
-kills that whole cgroup — editor included. `run-reviewprs.sh` launches the pool in a
-transient `systemd-run --user --scope` with `MemoryMax`, `TasksMax` and, where the
-`cpu` controller is delegated, `CPUQuota`.
+**Linger must be on.** Each pass runs in its own `systemd-run --user` unit with a
+payload cgroup beneath it, outside the supervisor's cgroup, so a dying supervisor
+does not take running passes with it and an out-of-memory kill takes one pass, not
+the terminal it was started from. User units die with the user manager when the
+last login session ends unless `loginctl enable-linger` is set. Each unit is
+throttled (`MemoryHigh`) at 80% of RAM divided by the build slots and killed
+(`MemoryMax`) past 40% of RAM.
 
-**Every agent gets a two-level working directory.** `<scratch>/agents/<pr>/wt` for
-the checkout, so `autotest.py`'s `../buildlogs` — and the `autotest.lck` in it —
-stays inside that agent's own root. Sibling checkouts sharing a parent serialise on
-one lock, however well their networks are isolated.
+**Every pass gets a two-level working directory.** The checkout is
+`runs/<run>/attempts/<attempt>/wt`, a detached worktree of the reference clone, so
+`autotest.py`'s `../buildlogs` — and the `autotest.lck` in it — stays inside that
+attempt's own directory. Sibling checkouts sharing a parent serialise on one lock,
+however well their networks are isolated.
 
-**Never `--uds`.** See the SITL section of `commands/reviewprs.md`: AF_UNIX changes
-the anti-lag throttle from 1024 to 65536 bytes of outqueue, so tests behave
-differently from what the PR author sees. Wrap the test in `netns-run.sh` instead —
-and wrap the *test*, not the agent: inside the namespace `lo` is the only
-interface, so an agent started there cannot reach its own model API.
+**Never `--uds`.** AF_UNIX changes the SITL anti-lag throttle from 1024 to 65536
+bytes of outqueue, so tests behave differently from what the PR author sees. The
+Claude passes' prompts say so (the Codex passes run sandboxed with no network and
+fly no SITL); a pass wraps the test in `review-heavy.sh --netns` instead — and
+wraps the *test*, not itself: inside the namespace `lo` is the only interface, so a
+CLI started there cannot reach its own model API.
 
-**Base clones carry their submodules.** `clone-repos.sh` populates them, taking the
-objects from another base where the submodule is a repo already kept locally. Agents
-then clone with `--shared` plus `submodule.alternateLocation=superproject`, which
-costs seconds and transfers no objects.
+**Reference clones are full clones.** Discovery fetches each PR's head into the
+reference clone, and a pass gets a worktree of it, so nothing is downloaded twice. A
+partial clone (`--filter`) is refused when a pass is prepared.
 
 ## Accounts
 
@@ -164,7 +220,7 @@ which account that role uses. Nothing here is in git — these hold credentials.
 ```
 auth/claude-ardupilot/   a CLAUDE_CONFIG_DIR   auth/claude-default -> claude-ardupilot
 auth/claude-personal/                          auth/claude-rsync   -> claude-personal
-auth/codex-ardupilot/    a CODEX_HOME          auth/codex-default  -> codex-personal
+auth/codex-work/         a CODEX_HOME          auth/codex-default  -> codex-work
 auth/codex-personal/                           auth/codex-rsync    -> codex-personal
 ```
 
@@ -308,9 +364,8 @@ account the role has been left on rather than reporting success.
 
 ### Reading what an account has left
 
-`runner/bin/quota.py` asks each account what quota it has, and records it.
-Observation only - nothing selects an account on it yet, which is the point:
-the readings get checked against reality before anything depends on them.
+`runner/bin/quota.py` asks each account what quota it has, and records it. The
+selector below reads those records.
 
 ```
 quota.py            a table of every account
@@ -420,10 +475,9 @@ makes two processes contend for the OAuth refresh below.
 
 ### What a run does with it
 
-`run-reviewprs.sh` selects **after taking the run lock**, not before. A run that
-waited two hours for the lock would otherwise choose on a reading taken before
-the wait, and a run that never gets the lock would pin - and be charged for - an
-account it never spends.
+`run-reviewprs.sh` selects once per run, and the run's configuration freezes the
+choice: a resumed run spends the account it started on, even if a role link or the
+quota has moved since.
 
 Every check that follows - signed in, subscription login, first-party provider,
 the directory the CLI actually read, the `ACCOUNT` record, Codex's `config.toml`
@@ -432,12 +486,11 @@ the role links decided alone. The runner also re-checks the chosen directory
 against the same containment and ownership rules a role link must satisfy
 (`account_dir_ok`), rather than taking `accounts.py`'s word for the path.
 
-With every listed account spent, the run **defers**: it prints
-`status=deferred-no-quota`, starts nothing, and leaves the slot to the next
-scheduled run. That is deliberate - running the review without the Codex
-validation pass was the alternative, and a review is not worth having without
-it. The dashboard shows those runs as `deferred`, counted under *Blocked on
-quota* rather than as failures.
+With every listed account spent, the run still starts, but **starts no
+inference**: it logs `quota: inference deferred; supervisor will drain
+deliveries`, recovers unfinished work and delivers what is owed, and leaves the
+reviews to the next run. Reviewing without the Codex passes was the alternative,
+and a review is not worth having without them.
 
 Three ways out of the selector, and they are different:
 
@@ -445,7 +498,7 @@ Three ways out of the selector, and they are different:
 | --- | --- |
 | no `policy.json` | the feature is not configured; the role links decide, as before |
 | `policy.json` unreadable or invalid | `status=account-policy-error`, the run stops |
-| policy fine, every account spent | `status=deferred-no-quota`, the run defers |
+| policy fine, every account spent | inference deferred; delivery and recovery go ahead |
 
 The second is not the first. A policy that is meant to be in force and is not
 would leave a run choosing its own account, which is the one thing this must
@@ -458,11 +511,12 @@ token, and leaves it behind if the refresh fails - reporting the failure as its
 output and exiting zero. Anything that starts next finds it and dies with
 "another Claude Code process is refreshing it".
 
-A run clears a stale one before it starts, and again immediately before
-launching the agent. The second clear is the one that matters: between them the
-run takes its own usage reading, and `claude -p /usage` is exactly the sort of
-short invocation that meets an expired token, fails to refresh, and leaves the
-lock a few seconds before the agent needs it. That was the 2026-09-19 19:47
+A run clears a stale one before it reads the quotas, and again once its accounts
+are chosen and checked. The second clear is the one that matters: between them
+the run takes its own usage reading, and `claude -p /usage` is exactly the sort
+of short invocation that meets an expired token, fails to refresh, and leaves the
+lock a few seconds before the first pass needs it. A lock is only removed when no
+live `claude` is using that directory. That was the 2026-09-19 19:47
 followup and three others in the five days before it - each one a whole slot
 lost, three hours apart.
 
@@ -630,11 +684,13 @@ Two triggers, both calling `bin/project-sync.sh`, which cannot fail its caller:
 
 ### Where the verdict comes from
 
-The posted comment, not the published report. Each label's report page is
-overwritten by the next run of that label, so it only ever covers the most
-recent sweep: measured on 2026-09-26, the reports held a verdict for **35** of
-the 168 open labelled PRs, against **166** from the comments. Where both had one
-they disagreed ten times, the report being the stale one.
+The posted comment, not the published report. Under the legacy runner each
+label's report page was overwritten by the next run of that label, so it only
+ever covered the most recent sweep: measured on 2026-09-26, the reports held a
+verdict for **35** of the 168 open labelled PRs, against **166** from the
+comments. Where both had one they disagreed ten times, the report being the
+stale one. Pages are now rendered from the store and keep every PR, but the
+comment is still what the PR's author and reviewers see, so it stays the source.
 
 `apreview_verdict.py` reads it from line 2 of the comment, directly under the
 AI-generated marker line:
@@ -744,10 +800,10 @@ fields either. A refused sweep that had already created a column was printing
 One sync at a time: `project-sync.sh` holds a lock, because the cron sweep and a
 run's exit path can fire together and interleave - the first reads the board,
 the second adds a row, the first deletes it as "not in my search". Every `gh`
-call has a deadline, since the sync runs while the run lock is still held.
+call has a deadline, since the sync can run from a run's exit path.
 
-Called from the run's exit trap, the wrapper inherits fd 9 already open on the
-run lock. It closes that copy before opening its own lock, and if the sync lock
+Called from a legacy run's exit trap, the wrapper inherits fd 9 already open on
+the run lock. It closes that copy before opening its own lock, and if the sync lock
 cannot be opened it logs and skips: otherwise `flock` would be asked about the
 inherited run lock, say yes, and the sync would run with no lock at all. The
 lock descriptor is then handed to python, which does the work and so holds the
@@ -759,9 +815,23 @@ paging each stop on a cursor that fails to advance.
 
 Reports go out with `rsync`, either to an rsync daemon (`rsync://user@host` plus a
 password file) or over ssh (`host:path`, no auth option). Set `REVIEW_PUBLISH`,
-`RSYNC_AUTH` and `REVIEW_PUBLIC_URL` in `local.conf`; the command reads its own
-previous reports back from `REVIEW_PUBLIC_URL` and links to it from the comments it
-posts. With `REVIEW_PUBLISH` unset, a run keeps its report local and says so.
+`RSYNC_AUTH` and `REVIEW_PUBLIC_URL` in `local.conf`; comments link to the pages
+under `REVIEW_PUBLIC_URL`. With `REVIEW_PUBLISH` unset, a run keeps its report local
+and says so.
+
+Pages are rendered from the store, not from a run, so a page always shows every
+PR that belongs on it, whichever run reviewed it last. Each is a delivery in the
+outbox: a failed upload retries hourly without end, and the comment that links to
+a page waits until the page is up. What goes where:
+
+| page | what |
+|---|---|
+| `DevCallReviews/<label>/devcall_pr_reviews.html` | each label's PRs; `DevCallReviews/<YYYY_MM_DD>/<label>/` keeps a dated copy, for a dev-call label the date of its next call |
+| `DevCallReviews/followups/<stamp>/devcall_pr_reviews.html` | one followup run's re-reviews |
+| `<REVIEW_RETAINED_PREFIX>/<owner>/<repo>/<n>/index.html` | a PR reviewed by name (default prefix `PRReviews`) |
+| `UserReviews/<author>.html` | an author sweep |
+| `RsyncReviews/index.html` | the rsync target |
+| `DevCallReviews/runs.html` | the runs dashboard |
 
 `REVIEW_PUBLIC_URL` is always used as `<url>/<Module>/...`, so moving the whole
 tree is a change to that one variable and nothing in the code.
@@ -801,14 +871,16 @@ on GitHub and cannot be rewritten. The path after the module name is carried
 over unchanged, so deep links and their `#pr<number>` anchors still land in the
 right place. The old files are deliberately left in place underneath; nothing
 serves them now, but they are the fallback if the new site has to be rebuilt.
-## Supervisor operations (opt-in)
+## Supervisor operations
 
-The legacy runner remains the default. A missing
-`$REVIEW_ROOT/etc/routing.json` means everything is old-owned; an invalid file
-stops admission. Copy `runner/etc/routing.json.example` only on first install.
-The three arrays list new-owned canonical repositories, labels and modes.
-Repository ownership applies to manual URLs, bare/qualified PR references,
-followup, author and all-label discovery. Query it without starting a run:
+`$REVIEW_ROOT/etc/routing.json` says which targets the supervisor owns; the rest
+go to the legacy prompt-driven runner. The reference box has been fully cut over
+since 2026-09-29: its routing names the mode `all`, which hands everything to the
+supervisor. A missing file means everything is legacy-owned, and an invalid one
+stops admission. The three arrays list supervisor-owned canonical repositories,
+labels and modes; repository ownership applies to manual URLs, bare and
+qualified PR references, followup, author and all-label discovery. Query it
+without starting a run:
 
 ```bash
 . "$HOME/review/bin/review-env.sh"
@@ -817,12 +889,11 @@ python3 "$REVIEW_ROOT/bin/review-route.py" 'RsyncProject/rsync#123'
 "$REVIEW_ROOT/bin/run-reviewprs.sh" rsync --dry-run
 ```
 
-The prompt's `review-route.py --filter old` step is mandatory for every
-candidate source, including manifests and board rows. New discovery applies
-the inverse ownership boundary in code. During the rsync canary, shared label
-and author report destinations remain old-owned and new cross-owner requests
-are deferred. Use `@author` for author mode. Do not transfer a mutable PR label
-as a substitute for the drained repository handoff.
+On a box where both paths still own something, the prompt's
+`review-route.py --filter old` step is mandatory for every candidate source,
+including manifests and board rows, and new discovery applies the inverse
+boundary in code. Use `@author` for author mode. Do not transfer a mutable PR
+label as a substitute for the drained repository handoff.
 
 The shared lock file is `$REVIEW_DATA/locks`. **Never replace or unlink it**:
 ownership is on its inode, with separate OFD byte regions for PRs, pages,
@@ -833,7 +904,7 @@ both pause and the old lock (pause is immediate even while an old run finishes).
 `pause-runs.sh status` and `pause-runs.sh resume` inspect/signal the recorded
 process identity. Delivery continues while admission is paused.
 
-Before production, enable linger and test the real user-systemd backend:
+Check linger and the user-systemd backend on a new box:
 
 ```bash
 loginctl enable-linger "$USER"
