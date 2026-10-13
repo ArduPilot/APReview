@@ -391,6 +391,17 @@ class GC(unittest.TestCase):
             child.wait()
 
 
+    def test_a_second_collector_leaves_it_to_the_first(self):
+        import fcntl
+        (self.data / "gc").mkdir(parents=True, exist_ok=True)
+        with open(self.data / "gc" / "collector.lock", "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            r = self.gc("--apply", ok=False)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("another collector is running", r.stdout)
+        self.assertFalse((self.data / "gc" / "last.json").exists())
+        self.assertTrue((self.data / "runs/followup-1/attempts/free/cold-evidence").exists())
+
     def finished(self, name, status=None, result=None, run="all-2"):
         """An attempt in a live run whose payload is gone, with a build tree."""
         attempt = self.data / "runs" / run / "attempts" / name

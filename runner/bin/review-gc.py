@@ -620,6 +620,15 @@ def main():
     p.add_argument("--root", default=os.environ.get("REVIEW_ROOT", os.path.expanduser("~/review")))
     a = p.parse_args()
     data = os.path.realpath(a.data)
+    if a.apply:
+        # a collector that waited long can still be going at the next hour's
+        os.makedirs(os.path.join(data, "gc"), exist_ok=True)
+        running = open(os.path.join(data, "gc", "collector.lock"), "a")
+        try:
+            fcntl.flock(running, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            print("another collector is running")
+            return
     gc = GC(data, a.apply, a.legacy, a.cache, a.budget)
     started = time.monotonic()
     # needs no fence, so it goes first, on its own budget
