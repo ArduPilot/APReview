@@ -145,6 +145,40 @@ def cleanup_attempt(path, deadline):
     return bool(unit)
 
 
+def scratch_waste(attempt):
+    """What a finished attempt's scratch holds beyond the files its result
+    cites (promotion copies those), or None when the result cannot be read."""
+    attempt = Path(os.path.realpath(attempt))
+    scratch = attempt / "scratch"
+    if scratch.is_symlink() or not scratch.is_dir():
+        return []
+    try:
+        name = FILES[read(attempt / "job.json", {})["kind"]]
+        result = read(attempt / name)
+        cited = [p for p in evidence_paths(result) if isinstance(p, str)] if result is not None else []
+    except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        return None
+    keep = set()
+    for relative in cited:
+        # as written and as resolved, with every directory leading to it
+        for path in (Path(os.path.normpath(attempt / relative)), (attempt / relative).resolve()):
+            while path.is_relative_to(scratch):
+                keep.add(path)
+                path = path.parent
+    waste = []
+
+    def walk(directory):
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                path = Path(entry.path)
+                if path not in keep:
+                    waste.append(path)
+                elif entry.is_dir(follow_symlinks=False):
+                    walk(path)
+    walk(scratch)
+    return waste
+
+
 def memory_limits(heavy=None, total=None):
     """An attempt's CLI and its builds share one cgroup. Throttle it at its
     share of the box's memory across the build slots, and kill only past

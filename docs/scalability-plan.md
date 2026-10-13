@@ -55,6 +55,14 @@ original attempt), a deferred PR's selected passes, or a live guardian
 (process and cgroup checked, as the design requires before disposing of
 worktrees). Rules, in order:
 
+0. **Finished scratch.** An attempt's `scratch/` (its build trees, 3-7 GB
+   for an ArduPilot pass) goes once its payload is proved gone and no
+   claim names it, except files its result cites, which promotion copies.
+   It needs no idle moment: later passes read an attempt's directory only
+   through its PR's claim, which GC re-reads holding the PR's lock, so no
+   claim can name the attempt while it is cut. Hourly runs leave no idle moment, and before this
+   blu6 held 166 GB of such scratch. A PR's current claim still pins its
+   latest review's scratch.
 1. **Unpinned attempt evidence.** Delete evidence and build trees from
    unpinned attempts of finished runs after 2 days, keeping `job.json`,
    `status.json`, `launch.json`, the result file and `payload.log`.

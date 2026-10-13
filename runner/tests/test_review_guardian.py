@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from review_fixtures import BIN, PR, candidate, stop, until, workspace
-from review_guardian import alive, cleanup_attempt, launch
+from review_guardian import alive, cleanup_attempt, launch, scratch_waste
 from review_lock import permit, region, try_lock
 from review_schema import canned, validate
 from review_store import Store, atomic, mkdir, read
@@ -84,6 +84,21 @@ class ReviewGuardian(unittest.TestCase):
         lock = try_lock(self.store.locks, PR)
         self.assertIsNotNone(lock)
         lock.close()
+
+    def test_scratch_waste_spares_cited_files_and_the_paths_to_them(self):
+        atomic(self.attempt / "job.json", {"kind": "primary"})
+        for name in ("scratch/build/a.o", "scratch/keep/log.txt", "scratch/keep/other.o", "real/cited.txt"):
+            mkdir((self.attempt / name).parent)
+            (self.attempt / name).write_text("x")
+        (self.attempt / "scratch" / "via").symlink_to(self.attempt / "real")
+        atomic(self.attempt / "review.json", {"f": [{"evidence": {"artifacts": [
+            "scratch/keep/log.txt", "scratch/via/cited.txt", "evidence/e.txt"]}}]})
+        scratch = Path(os.path.realpath(self.attempt)) / "scratch"
+        self.assertEqual(set(scratch_waste(self.attempt)), {scratch / "build", scratch / "keep" / "other.o"})
+        (self.attempt / "review.json").write_text("{")
+        self.assertIsNone(scratch_waste(self.attempt))
+        (self.attempt / "review.json").unlink()
+        self.assertEqual(set(scratch_waste(self.attempt)), {scratch / "build", scratch / "keep", scratch / "via"})
 
     def test_killed_payload_is_failure_and_releases_only_after_empty(self):
         child = self.start(behavior={"sleep": 2})

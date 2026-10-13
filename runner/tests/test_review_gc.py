@@ -391,5 +391,90 @@ class GC(unittest.TestCase):
             child.wait()
 
 
+    def finished(self, name, status=None, result=None, run="all-2"):
+        """An attempt in a live run whose payload is gone, with a build tree."""
+        attempt = self.data / "runs" / run / "attempts" / name
+        write(attempt / "job.json", {"kind": "cold", "pr": "pr:o/r#2"})
+        write(attempt / "status.json", status or {"state": "terminal", "empty": True})
+        write(attempt / "cold.json", result if result is not None else
+              {"x": {"evidence": {"artifacts": ["scratch/logs/cited.txt", "evidence/e.txt"]}}})
+        write(attempt / "evidence" / "e.txt")
+        write(attempt / "scratch" / "build" / "big.o", age=time.time())
+        write(attempt / "scratch" / "logs" / "cited.txt", age=time.time())
+        write(attempt / "scratch" / "logs" / "other.log", age=time.time())
+        return attempt
+
+    def test_finished_scratch_goes_while_a_run_is_live_but_cited_files_stay(self):
+        sys.path.insert(0, str(BIN))
+        from review_lock import try_lock
+        attempt = self.finished("done")
+        with try_lock(self.data / "locks", "maintenance", shared=True):
+            report = self.gc("--apply", "--wait", "0.2")
+        self.assertIn("all rules", report["skipped"])          # the fenced rules still waited
+        self.assertFalse((attempt / "scratch" / "build").exists())
+        self.assertFalse((attempt / "scratch" / "logs" / "other.log").exists())
+        self.assertTrue((attempt / "scratch" / "logs" / "cited.txt").exists())
+        self.assertTrue((attempt / "evidence" / "e.txt").exists())
+        self.assertEqual(report["removed"]["finished scratch"]["entries"], 2)
+
+    def test_scratch_stays_until_the_payload_is_proved_gone(self):
+        running = self.finished("running", status={"state": "running"})
+        blocked = self.finished("blocked", status={"state": "cleanup_blocked", "empty": False})
+        report = self.gc("--apply")
+        for attempt in (running, blocked):
+            self.assertTrue((attempt / "scratch" / "build" / "big.o").exists())
+        self.assertIn("payload not proved gone", report["skipped"]["finished scratch"])
+
+    def test_scratch_a_claim_names_stays(self):
+        attempt = self.finished("claimed-scratch")
+        write(self.data / "results" / "o" / "r" / "2" / "claim.json",
+              {"attempts": [str(attempt)], "selected": {}})
+        report = self.gc("--apply")
+        self.assertTrue((attempt / "scratch" / "build" / "big.o").exists())
+        self.assertIn("named by a claim", report["skipped"]["finished scratch"])
+
+    def test_scratch_of_a_busy_pr_waits(self):
+        sys.path.insert(0, str(BIN))
+        from review_lock import try_lock
+        attempt = self.finished("busy-pr")
+        with try_lock(self.data / "locks", "pr:o/r#2"):
+            report = self.gc("--apply")
+        self.assertTrue((attempt / "scratch" / "build" / "big.o").exists())
+        self.assertIn("PR busy", report["skipped"]["finished scratch"])
+
+    def test_scratch_stays_when_the_result_cannot_be_read(self):
+        attempt = self.finished("garbled")
+        (attempt / "cold.json").write_text("{not json")
+        report = self.gc("--apply")
+        self.assertTrue((attempt / "scratch" / "build" / "big.o").exists())
+        self.assertIn("result unreadable", report["skipped"]["finished scratch"])
+
+    def test_scratch_a_process_is_using_stays(self):
+        attempt = self.finished("watched")
+        child = subprocess.Popen(["sleep", "30"], cwd=attempt / "scratch" / "build")
+        try:
+            report = self.gc("--apply")
+            self.assertTrue((attempt / "scratch" / "build" / "big.o").exists())
+            self.assertIn("in use", report["skipped"]["finished scratch"])
+        finally:
+            child.kill()
+            child.wait()
+
+    def test_a_link_in_scratch_goes_but_not_what_it_points_at(self):
+        outside = self.root / "outside"
+        write(outside / "precious")
+        attempt = self.finished("linked")
+        (attempt / "scratch" / "out").symlink_to(outside)
+        self.gc("--apply")
+        self.assertFalse(os.path.lexists(attempt / "scratch" / "out"))
+        self.assertTrue((outside / "precious").exists())
+
+    def test_a_report_counts_finished_scratch_but_keeps_it(self):
+        attempt = self.finished("counted")
+        report = self.gc()
+        self.assertTrue((attempt / "scratch" / "build" / "big.o").exists())
+        self.assertEqual(report["removed"]["finished scratch"]["entries"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

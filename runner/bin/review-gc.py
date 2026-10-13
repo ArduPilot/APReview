@@ -6,8 +6,10 @@ are copied from it at promotion), or while its run is still live. Unpinned
 attempts of finished runs lose their evidence and build trees but keep the
 records the dashboard and audits read. Runs older than OLD_RUN_DAYS keep only
 their summaries. A finished run that launched no attempt goes after
-EMPTY_RUN_DAYS, except the newest of its kind. Anything at the top of the store that the store does not
-own is litter from passes told to work "under REVIEW_DATA"; it goes once it
+EMPTY_RUN_DAYS, except the newest of its kind. An unpinned attempt whose
+payload is proved gone loses its scratch within the hour, except files its
+result cites; that needs no idle moment. Anything at the
+top of the store that the store does not own is litter from passes told to work "under REVIEW_DATA"; it goes once it
 is quiet, unless a live process is using it.
 
 Receipts, operations, membership and generations are never touched here.
@@ -26,9 +28,9 @@ import sys
 import time
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from review_guardian import alive  # noqa: E402
+from review_guardian import alive, scratch_waste  # noqa: E402
 from review_lock import boot_id  # noqa: E402
-from review_lock import acquire  # noqa: E402
+from review_lock import acquire, canonical, region, try_lock  # noqa: E402
 from review_schema import FILES  # noqa: E402
 
 # what the store and its runtime own at its top level
@@ -155,11 +157,16 @@ def strings(value):
 
 
 def pinned_attempts(data):
-    """Every attempt any PR's current claim or any owner record names. An
-    unreadable record stops the collector: a lost pin is a lost pass."""
+    """Every attempt any PR's current claim or any owner record names."""
+    return pins_in(data, [*Path(data, "results").glob("*/*/*/claim.json"), *Path(data, "owners").glob("*.json")])
+
+
+def pins_in(data, records):
+    """The attempts these records name. An unreadable record stops the
+    collector: a lost pin is a lost pass."""
     pins = set()
     runs = os.path.realpath(os.path.join(data, "runs")) + "/"
-    for record in [*Path(data, "results").glob("*/*/*/claim.json"), *Path(data, "owners").glob("*.json")]:
+    for record in records:
         value = load(record)
         if value is None:
             if record.exists():
@@ -443,6 +450,60 @@ class GC:
                     if entry.name not in keep:
                         self.remove("old run" if old else "attempt evidence", entry)
 
+    def finished_scratch(self, processes):
+        """Build trees in attempts whose payload is proved gone and that no
+        claim names. Later passes read an attempt's directory only through
+        its PR's claim, so this needs no idle moment: holding the PR's lock
+        keeps that claim from naming the attempt while it is cut. Files the
+        result cites stay: promotion copies them."""
+        if (self.data / "runs").is_symlink():
+            self.skip("finished scratch", "runs is a symlink")
+            return
+        for scratch in sorted(self.data.glob("runs/*/attempts/*/scratch")):
+            if self.spent():
+                self.skip("finished scratch", "time budget spent")
+                return
+            attempt = scratch.parent
+            if any(p.is_symlink() for p in (scratch, attempt, attempt.parent, attempt.parent.parent)):
+                continue
+            try:
+                with os.scandir(scratch) as entries:
+                    if next(entries, None) is None:
+                        continue
+            except OSError:
+                continue
+            if not cleaned(attempt) or live(attempt / "status.json") or live(attempt / "manager.json"):
+                self.skip("finished scratch", "payload not proved gone")
+                continue
+            if used(attempt, processes):
+                self.skip("finished scratch", "in use")
+                continue
+            try:
+                pr = canonical(load(attempt / "job.json", {}).get("pr"))
+                repo, number = pr[3:].split("#")
+            except (ValueError, TypeError, AttributeError):
+                self.skip("finished scratch", "no PR in its job")
+                continue
+            lock = try_lock(self.data / "locks", pr) if self.apply else None
+            if self.apply and lock is None:
+                self.skip("finished scratch", "PR busy")
+                continue
+            try:
+                records = [self.data / "results" / repo / number / "claim.json",
+                           self.data / "owners" / (str(region(pr)) + ".json")]
+                if os.path.realpath(attempt) in pins_in(self.data, records):
+                    self.skip("finished scratch", "named by a claim")
+                    continue
+                waste = scratch_waste(attempt)
+                if waste is None:
+                    self.skip("finished scratch", "result unreadable")
+                    continue
+                for path in waste:
+                    self.remove("finished scratch", path)
+            finally:
+                if lock:
+                    lock.close()
+
     def litter(self, processes):
         cutoff = self.now - LITTER_DAYS * 86400
         for entry in sorted(self.data.iterdir()):
@@ -561,6 +622,8 @@ def main():
     data = os.path.realpath(a.data)
     gc = GC(data, a.apply, a.legacy, a.cache, a.budget)
     started = time.monotonic()
+    # needs no fence, so it goes first, on its own budget
+    gc.finished_scratch(in_use())
     # Deleting holds the admission fence: with "pause" held exclusively no
     # run can start (run-reviewprs.sh defers it to its next slot), so nothing
     # can begin using what is being removed. Collection happens only when no
@@ -571,8 +634,9 @@ def main():
     # Hourly runs overlap, so wait for a gap between them: polling holds
     # nothing, and a run starting meanwhile waits up to 900 s for the fence,
     # longer than the deletion budget.
+    asked = time.monotonic()
     fence = acquire(os.path.join(data, "locks"), "maintenance", time.monotonic() + a.wait) if a.apply else None
-    waited = time.monotonic() - started
+    waited = time.monotonic() - asked
     gc.begin()
     legacy = None
     try:
