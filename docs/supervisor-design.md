@@ -581,7 +581,7 @@ not merely the existence of a pointer:
 | new `current` before old entries reconstructed | traverse predecessors too and apply supersession below to each old intent |
 | promotion before membership/run-state updates | replay idempotent projection intents; accepted bundles override a run's stale belief that inference is unfinished |
 | membership head before promotion | forbidden: projection may reference only an accepted bundle; pending/deferred rows retain the previous head |
-| remote side effect before local receipt | publication verifies served bytes (sampled since step 5 of the scalability plan: every tenth upload of a page or after six hours; a comment's own check still fetches every section it links to), comments reconcile delivery id, board reads target state; never infer failure from a missing receipt |
+| remote side effect before local receipt | publication verifies served bytes (sampled since step 5 of the scalability plan: every tenth upload of a page or after six hours; a comment's own check fetches only the report it links to, not the dozens of listing pages a long-lived PR is on), comments reconcile delivery id, board reads target state; never infer failure from a missing receipt |
 
 Discovery/progress/REUSE/DROPPED updates also need recovery without a new
 review. Journal each as an immutable operation bundle with its membership
@@ -650,13 +650,13 @@ bundle also includes a retained generation page at
 and always included in its complete intent list. An empty followup
 publishes nothing; an empty author or rsync run preserves the useful page.
 Before sending a comment, take all required page regions in sorted,
-deduplicated order, fetch each served page and verify its expected section
-identity/digest, retaining those locks through the GitHub call. An earlier
-receipt is not enough. If a section was dropped or replaced, regenerate
-where membership permits; a destination with a newer removal tombstone is
-superseded. The retained generation page must always verify and is the
-comment's canonical report URL; label refreshes are still separate required
-deliveries. Later label removals therefore cannot break a frozen link.
+deduplicated order, retaining those locks through the GitHub call. Each
+listing page must have its own settled publish receipt; only the retained
+generation page, the comment's canonical report URL and the one page it
+links to, is fetched and its section identity/digest verified (a long-lived
+PR is on dozens of listing pages, and fetching each outran the entry's
+minute). If that section was dropped or replaced, regenerate it. Label
+refreshes are still separate required deliveries. Later label removals therefore cannot break a frozen link.
 A frozen payload's URL cannot change on retry; if it no longer verifies,
 hold for repair rather than send a different payload under the same id.
 

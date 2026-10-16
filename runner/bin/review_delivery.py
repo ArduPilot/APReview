@@ -268,8 +268,8 @@ class Publication:
             raise OSError("rsync failed: " + result.stderr.decode(errors="replace")[:500])
         # The fetch-back is sampled: every VERIFY_EVERY uploads of a page, or
         # when its last check is VERIFY_AGE old. A comment's own check still
-        # fetches every section it links to before posting (verify_comment),
-        # so what a comment points at is always seen served.
+        # fetches the report it links to before posting (verify_comment), so
+        # what a comment points at is always seen served.
         checked = read(directory / "verified.json", {})
         if checked.get("uploads", 0) + 1 >= self.VERIFY_EVERY or time.time() - checked.get("at", 0) > self.VERIFY_AGE:
             served = self.fetch(target, deadline, expected["sections"])
@@ -324,15 +324,13 @@ class Publication:
             digest=sha(__import__("review_render").core(bundle).encode()),
         )
         retained_ok = False
+        # Only the report the comment links to. The listing pages already
+        # have publish receipts, and a long-lived PR is on dozens of them:
+        # fetching each again (about 2.6 s for a 2 MB page) outran the
+        # entry's minute, so the comment was given up.
         for intent in bundle["intents"]:
-            if intent["kind"] != "publish" or intent.get("landing"):
+            if intent["kind"] != "publish" or intent.get("landing") or not intent.get("retained"):
                 continue
-            if not intent.get("retained"):
-                rows = read(
-                    self.store.root / "membership" / (digest(intent["target"]) + ".json"), {}
-                )
-                if rows.get(entry["pr"], {}).get("removed"):
-                    continue
             try:
                 self.fetch(intent["target"], deadline, [expected])
             except OSError:

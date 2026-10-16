@@ -1200,6 +1200,17 @@ class LocalPublication(unittest.TestCase):
             with self.assertRaises(OSError):
                 self.publisher.verify_comment(entry, time.monotonic() + 5)
 
+    def test_a_comment_checks_only_the_report_it_links_to(self):
+        entry = entry_of(self.store, self.bundle, "comment")
+        listings = [dict(kind="publish", target="page:test/%d/devcall_pr_reviews.html" % n)
+                    for n in range(30)]
+        fetched = []
+        with patch("review_delivery.bundle_at",
+                   return_value=dict(self.bundle, intents=listings + self.bundle["intents"])), \
+             patch.object(self.publisher, "fetch", side_effect=lambda target, *a: fetched.append(target)):
+            self.publisher.verify_comment(entry, time.monotonic() + 5)
+        self.assertEqual(fetched, ["page:test/PRReviews/owner/repo/1/1.html"])
+
     def test_drain_freezes_payload_before_request_and_receipts_separately(self):
         gh = FakeGitHub()
         adapter = Delivery(self.store, gh, self.config)
