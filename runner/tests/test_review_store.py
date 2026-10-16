@@ -149,6 +149,36 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(read(outbox / (comment + ".json")), entry)       # never touched again
         self.assertFalse(list(adapter.root.glob("*.json")))
 
+    def test_a_retried_uncertain_comment_is_cancelled_and_frees_the_newer_one(self):
+        # timed out five times mid-send; a newer review's comment waited behind it
+        self.accept()
+        outbox = self.root / "outbox"
+        old = delivery_id(PR, 1, "comment", PR)
+        entry = read(outbox / (old + ".json"))
+        entry.update(state="uncertain", failures=5, next_attempt=0, error="delivery deadline",
+                     payload_digest=digest(entry.get("payload", {})))
+        atomic(outbox / (old + ".json"), entry)
+        claim = complete_claim(self.store, self.lock, run="new", request="new")
+        self.store.accept(self.lock, PR, claim, [{"kind": "comment", "target": PR}])
+        new = delivery_id(PR, 2, "comment", PR)
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        self.store.drain(adapter)
+        self.assertEqual(read(outbox / (old + ".json")), entry)
+        self.assertFalse(self.store.has_receipt(new))
+        child = python((BIN / "review-retry.py").read_text(), "--data", self.root, old,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        out, err = child.communicate(timeout=30)
+        self.assertEqual(child.returncode, 0, err)
+        self.assertEqual(read(outbox / (old + ".json"))["failures"], 0)
+        self.store.drain(adapter)
+        self.store.drain(adapter)
+        self.assertEqual(read(self.root / "receipts" / (old + ".json"))["state"], "superseded")
+        self.assertEqual(read(self.root / "receipts" / (new + ".json"))["state"], "posted")
+        child = python((BIN / "review-retry.py").read_text(), "--data", self.root, old,
+                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.assertEqual(child.wait(timeout=30), 1)          # nothing left to retry
+
     def test_retiring_a_page_supersedes_its_debts_and_frees_the_comment(self):
         self.accept()
         outbox = self.root / "outbox"

@@ -818,6 +818,53 @@ def queue_rows():
     return out
 
 
+def stopped_writes():
+    """GitHub writes that failed five times: nothing retries them, and an
+    uncertain comment among them holds every newer one for its PR."""
+    from review_store import Store
+    t = time.time()
+    stopped, others = [], {}
+    for path in glob.glob(os.path.join(DATA, 'outbox', '*.json')):
+        try:
+            e = json.load(open(path))
+        except Exception:
+            continue
+        if not isinstance(e, dict) or not isinstance(e.get('pr'), str):
+            continue
+        others[e['pr']] = others.get(e['pr'], 0) + 1
+        try:
+            if Store.given_up(e):
+                stopped.append(e)
+        except TypeError:
+            continue                    # a malformed entry; the drain reports it
+    if not stopped:
+        return ''
+    rows = []
+    for e in sorted(stopped, key=lambda e: e['created'] if isinstance(e.get('created'), (int, float)) else 0):
+        pr = str(e.get('pr', ''))
+        m = re.fullmatch(r'pr:([^/#]+)/([^/#]+)#(\d+)', pr)
+        link = ('<a href="https://github.com/%s/%s/pull/%s">%s</a>' % (
+            html.escape(m[1]), html.escape(m[2]), m[3], html.escape(pr[3:]))) if m else html.escape(pr)
+        age = t - e['created'] if isinstance(e.get('created'), (int, float)) else None
+        rows.append('<tr><td>%s</td><td>%s</td><td>%s</td><td>%s</td><td>%d</td><td>%s</td>'
+                    '<td class="wrap"><span class="sub">%s</span></td><td><code>%s</code></td></tr>' % (
+                        link, html.escape(str(e.get('kind'))), html.escape(str(e.get('generation'))),
+                        html.escape(str(e.get('state'))), others.get(e.get('pr'), 1) - 1, _age(age),
+                        html.escape(str(e.get('error') or '')[:90]), html.escape(str(e.get('id')))))
+    return ('<div class="note"><strong>GitHub writes stopped for a human.</strong> Each of these failed '
+            'five times and is not retried, and the PR\'s other outbox entries may be waiting on it. '
+            'Fix the cause, then on the box run <code>review-retry.py --data &quot;$REVIEW_DATA&quot; '
+            '&lt;entry&gt;</code>; an uncertain comment is checked against the thread before any '
+            'repost.<div class="scroll"><table class="sortable"><thead><tr><th>PR</th>'
+            '<th>Kind</th><th>Gen</th><th>State</th><th>Others waiting</th><th>Created</th><th>Error</th>'
+            '<th>Entry</th></tr></thead><tbody>%s</tbody></table></div></div>' % '\n'.join(rows))
+
+
+try:
+    stopped = stopped_writes()
+except Exception as error:                 # the page must still build
+    stopped = '<p class="sub">stopped writes unreadable: %s</p>' % html.escape(str(error)[:120])
+
 try:
     queue = queue_rows()
 except Exception as error:                 # the page must still build
@@ -1055,11 +1102,12 @@ holds page updates, comments, annotations and board syncs; <em>Waiting</em> entr
 need another delivery first, <em>Retrying</em> ones failed and back off, and an
 entry that has failed five times or more is <em>Failing</em>: page updates and board
 syncs keep retrying, at most hourly; comments, notes and deprecations stop until
-someone looks at them.</p>
+someone looks at them, and are listed under the table.</p>
 <div class="scroll"><table class="sortable">
 <thead><tr><th>Queue</th><th>Items</th><th>Ready</th><th>Waiting</th><th>Retrying</th>
 <th>Failing</th><th>Oldest</th><th>Note</th></tr></thead>
 <tbody>__QUEUES__</tbody></table></div>
+__STOPPED__
 
 <h2>Label coverage</h2>
 <p class="sub">Only <code>followup</code>, <code>all</code> and <code>rsync</code> appear as run rows.
@@ -1163,6 +1211,7 @@ doc = (doc.replace('__DAYS__', str(DAYS))
           .replace('__PROJ__', ('~%.0f%%' % projected) if projected is not None else '&mdash;')
           .replace('__QROWS__', '\n'.join(qrows))
           .replace('__QUEUES__', '\n'.join(queue))
+          .replace('__STOPPED__', stopped)
           .replace('__LROWS__', '\n'.join(lrows))
           .replace('__SROWS__', '\n'.join(srows))
           .replace('__CROWS__', '\n'.join(crows))

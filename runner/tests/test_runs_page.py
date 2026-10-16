@@ -424,6 +424,29 @@ class Dashboard(unittest.TestCase):
         self.assertIn('class="bad"', sec.split("outbox: board")[0].rsplit("<tr", 1)[1])
         self.assertEqual(nums("page operations not yet in the outbox")[0], "1")
 
+    def test_stopped_github_writes_are_named_with_their_pr_and_entry(self):
+        data = os.path.join(self.home, "review", "data")
+        os.makedirs(os.path.join(data, "outbox"))
+
+        def put(ident, **fields):
+            with open(os.path.join(data, "outbox", ident + ".json"), "w") as f:
+                json.dump(dict(dict(id=ident, pr="pr:o/r#7", generation=1, created=time.time() - 7200,
+                                    next_attempt=0), **fields), f)
+        put("a" * 64, kind="comment", state="uncertain", failures=5, error="delivery deadline")
+        put("b" * 64, kind="comment", state="owed", failures=0, generation=2)
+        put("c" * 64, kind="board", state="owed", failures=5)              # retried hourly
+        page = self.build()
+        self.assertIn("GitHub writes stopped for a human", page)
+        note = page.split("GitHub writes stopped for a human", 1)[1].split("</table>", 1)[0]
+        self.assertIn('href="https://github.com/o/r/pull/7"', note)
+        self.assertIn("a" * 64, note)
+        self.assertIn("delivery deadline", note)
+        self.assertIn("<td>2</td>", note)                                   # the others waiting
+        self.assertNotIn("c" * 64, note)
+
+    def test_no_stopped_writes_no_note(self):
+        self.assertNotIn("GitHub writes stopped", self.build())
+
     def test_the_last_gc_count_is_shown_and_marked_when_huge(self):
         gc = os.path.join(self.home, "review", "data", "gc")
         os.makedirs(gc)
