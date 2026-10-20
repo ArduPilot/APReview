@@ -554,7 +554,7 @@ class Discovery:
                        if self.store else started)
             cutoff = min(started, covered) - days * 86400 - 6 * 3600
             # a reviewed PR off every page and the board; the updated bound
-            # keeps out those with no local record, which the window cannot
+            # limits these, so they skip the window below
             try:
                 orphans = self.commented(self.swept(), cutoff) - keys
             except (OSError, TimeoutError, KeyError) as error:
@@ -578,7 +578,7 @@ class Discovery:
             if mode in LABELS or mode == "rsync":
                 keys |= set(manifests.get(mode, {}))
         if mode == "followup" and self.store:
-            recent = {pr for pr in keys if self.store.in_followup_window(pr, cutoff)}
+            recent = {pr for pr in keys if pr in orphans or self.store.in_followup_window(pr, cutoff)}
             review_metrics.count("local", "followup outside window", n=len(keys) - len(recent))
             keys = recent
         routing = validate(self.config.get("routing", DEFAULT))

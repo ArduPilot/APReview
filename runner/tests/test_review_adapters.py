@@ -479,6 +479,26 @@ class DiscoveryContract(unittest.TestCase):
         self.assertFalse([c for c in self.gh.request.call_args_list if "/pulls/" in c.args[0]])
         self.assertEqual([c.kwargs.get("kinds") for c in self.gh.thread.call_args_list], [("comment",)])
 
+    def test_an_off_page_pr_skips_the_window_a_listed_one_does_not(self):
+        told = [dict(kind="comment", login="new-bot", id=1, at="1",
+                     body="AI-generated\nReviewed head `" + "b" * 40 + "`.")]
+        old = time.time() - 30 * 86400
+        accepted(self.store)            # a local record for PR (#1) ...
+        for path in (self.store.pr_dir(PR) / "generations").glob("*"):
+            os.utime(path, (old, old))  # ... whose last work is a month old
+        with patch.object(self.store, "receipt_time", return_value=None):
+            self.assertFalse(self.store.in_followup_window(PR, time.time() - 15 * 86400))
+            def search(endpoint, **kw):
+                if endpoint.startswith("search/") and "commenter%3Anew-bot" in endpoint:
+                    return [dict(repository_url="https://api.github.com/repos/owner/repo", number=1)]
+                return []
+            rows = self.off_page(search, told)
+            self.assertEqual([(r["pr"], r["classification"]) for r in rows], [(PR, "REVIEW")])
+            # the same PR on a page keeps the window
+            self.discover.manifests = Mock(return_value={"AIReview": {PR: {}}})
+            self.discover._manifest_cache = {}
+            self.assertEqual(self.discover.discover("followup"), [])
+
     def test_a_failed_commenter_search_leaves_board_and_pages(self):
         def search(endpoint, **kw):
             if endpoint.startswith("search/"):
