@@ -51,6 +51,15 @@ class Presentation(unittest.TestCase):
             self.assertIn("RESOLVED, STILL OPEN or DISPUTED", texts["primary"], variant)
             self.assertEqual("25,000 characters" in texts["primary"], variant == "v4-paging", variant)
 
+    def test_every_variant_posts_comments_as_grouped_findings(self):
+        for variant in ("v1", "v2-schema", "v3-files", "v4-paging"):
+            text = rp.prompts(variant)["reconciliation"]
+            self.assertNotIn("comment_md as prose only", text, variant)
+            self.assertIn("section_md as prose only", text, variant)
+            for rule in ("**Blocking**", "**Should fix**", "(still open)", "<details><summary>Minor",
+                         "Not fully reviewed:"):
+                self.assertIn(rule, text, (variant, rule))
+
     def test_paging_is_its_own_presentation(self):
         self.assertEqual(rp.normalise("v4-paging"), {"inputs": "files", "prompts": "v4-paging", "renderer": 2})
         v3, v4 = rp.prompts("v3-files"), rp.prompts("v4-paging")
