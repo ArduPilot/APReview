@@ -22,7 +22,7 @@ from urllib.error import HTTPError
 from html import unescape
 
 import review_metrics
-from review_store import read as read_json
+from review_store import atomic, read as read_json
 
 LABELS = ("DevCallTopic", "DevCallEU", "AIReview")
 
@@ -353,13 +353,20 @@ class Discovery:
                     out.add(canonical(f"pr:{repo}#{item['number']}"))
         return out
 
-    def commented(self, swept, since):
+    def commented(self, swept, since, failed):
         """Open PRs one of our accounts commented on, updated since: one we
-        reviewed that has left every page is followed up only through this."""
+        reviewed that has left every page is followed up only through this.
+        A failed account's search is added to failed; the others still count."""
         day = time.strftime("%Y-%m-%d", time.gmtime(since))
         out = set()
         for login in self.accounts:
-            out |= self.query(f"commenter:{login} updated:>={day}", swept)
+            try:
+                out |= self.query(f"commenter:{login} updated:>={day}", swept)
+            except (OSError, TimeoutError, KeyError) as error:
+                print("discovery: commented search for %s failed, using board and pages: %s"
+                      % (login, str(error)[:200]), file=sys.stderr)
+                review_metrics.count("local", "followup search failed")
+                failed.append(login)
         return out
 
     def ours(self, pr):
@@ -554,14 +561,10 @@ class Discovery:
                        if self.store else started)
             cutoff = min(started, covered) - days * 86400 - 6 * 3600
             # a reviewed PR off every page and the board; the updated bound
-            # limits these, so they skip the window below
-            try:
-                orphans = self.commented(self.swept(), cutoff) - keys
-            except (OSError, TimeoutError, KeyError) as error:
-                print("discovery: commented search failed, using board and pages only: %s"
-                      % str(error)[:200], file=sys.stderr)
-                review_metrics.count("local", "followup search failed")
-                missed.append("search")
+            # limits these, so they skip the window below. Held coverage
+            # widens the cutoff: cap it, so a lasting failure cannot grow this
+            since = max(cutoff, started - 3 * days * 86400)
+            orphans = self.commented(self.swept(), since, missed) - keys
             keys |= orphans
         elif pr_match:
             keys = {canonical(f"pr:{pr_match[1]}#{pr_match[2]}")}
@@ -646,6 +649,10 @@ class Discovery:
                       file=sys.stderr)
                 review_metrics.count("local", "followup coverage held")
                 self.followup_started = None
+                coverage = self.store.root / "followup-coverage.json"
+                if not coverage.exists():
+                    # with none, the next run would measure from its own start
+                    atomic(coverage, {"at": started})
             else:
                 self.followup_started = started
         if mode == "followup" and not any(c["classification"] == "REVIEW" for c in out):

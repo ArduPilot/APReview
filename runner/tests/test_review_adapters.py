@@ -515,6 +515,24 @@ class DiscoveryContract(unittest.TestCase):
         self.assertEqual([(r["pr"], r["classification"]) for r in rows], [(PR, "REVIEW")])
         # nothing holds an unseen orphan in the window but coverage
         self.assertFalse(self.discover.followup_started)
+        # a first run still leaves a watermark for the next to measure from
+        coverage = read(self.store.root / "followup-coverage.json")["at"]
+        self.assertLess(time.time() - coverage, 60)
+
+    def test_one_failed_search_keeps_the_others_and_a_held_window_is_capped(self):
+        def search(endpoint, **kw):
+            if "commenter%3Aold-bot" in endpoint:
+                raise OSError("GitHub 502")
+            return self.found(endpoint)
+        atomic(self.store.root / "followup-coverage.json", {"at": time.time() - 90 * 86400})
+        told = [dict(kind="comment", login="new-bot", id=1, at="1",
+                     body="AI-generated\nReviewed head `" + "b" * 40 + "`.")]
+        rows = self.off_page(search, told)
+        self.assertEqual([r["pr"] for r in rows], ["pr:owner/repo#3"])
+        self.assertFalse(self.discover.followup_started)
+        day = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 42 * 86400))
+        searches = [c.args[0] for c in self.gh.pages.call_args_list if c.args[0].startswith("search/")]
+        self.assertIn("updated%3A%3E%3D" + day, searches[0])
 
     def test_a_failed_marker_read_holds_coverage(self):
         self.gh.thread.side_effect = OSError("GitHub 502")
