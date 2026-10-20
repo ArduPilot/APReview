@@ -106,6 +106,7 @@ class Discovery:
         self._sweep_lock = threading.RLock()
         self._clone_locks = {}
         self._swept = None
+        self._comments = {}
         self.unparsed = []          # manifest keys no repository claims
 
     def swept(self):
@@ -331,23 +332,46 @@ class Discovery:
         return {canonical("pr:" + key): row for key, row in board.project_items(project).items()}
 
     def search(self, mode, swept):
+        selector = (
+            "label:AIReview"
+            if mode == "rsync"
+            else (
+                "label:" + mode
+                if mode in LABELS or mode in self.config.get("labels", [])
+                else "author:" + mode.lstrip("@")
+            )
+        )
+        return self.query(selector, swept)
+
+    def query(self, selector, swept):
         out = set()
         for owner in sorted({repo.split("/")[0] for repo in swept}):
-            selector = (
-                "label:AIReview"
-                if mode == "rsync"
-                else (
-                    "label:" + mode
-                    if mode in LABELS or mode in self.config.get("labels", [])
-                    else "author:" + mode.lstrip("@")
-                )
-            )
             query = f"is:pr is:open org:{owner} {selector}"
             for item in self.gh.pages("search/issues?q=" + quote(query), field="items"):
                 repo = item["repository_url"].split("/repos/")[-1].lower()
                 if repo in swept:
                     out.add(canonical(f"pr:{repo}#{item['number']}"))
         return out
+
+    def commented(self, swept, since):
+        """Open PRs one of our accounts commented on, updated since: one we
+        reviewed that has left every page is followed up only through this."""
+        day = time.strftime("%Y-%m-%d", time.gmtime(since))
+        out = set()
+        for login in self.accounts:
+            out |= self.query(f"commenter:{login} updated:>={day}", swept)
+        return out
+
+    def ours(self, pr):
+        """Whether a PR carries one of our review comments: a human comment
+        from the same account must not bring it into followup."""
+        repo, number = pr[3:].split("#")
+        thread = self.gh.thread(repo, int(number), kinds=("comment",))
+        if not any(c["login"] in self.accounts and POST.MARKER in c["body"] for c in thread):
+            return False
+        # its candidate reuses this read
+        self._comments[pr] = thread
+        return True
 
     def resolve(self, argument):
         value = argument.strip()
@@ -512,9 +536,33 @@ class Discovery:
         if mode != "rsync":
             self.swept()
         manifests = self.manifests(mode)
+        orphans, missed = set(), []
         pr_match = re.fullmatch(r"(?:https://github.com/)?([^/]+/[^/#]+)(?:/pull/|#)(\d+)", mode)
         if mode == "followup":
             keys = set(self.board_rows()) | {p for rows in manifests.values() for p in rows}
+            # Only PRs we worked on recently: everything older would cost its
+            # GitHub reads every followup, for ever. Decided locally; a PR
+            # outside the window comes back when it is labelled or asked for.
+            # A followup interval of overlap, so a push just before a PR
+            # leaves the window is still seen.
+            # measured from the last followup discovery that completed, so a
+            # failed or interrupted one never moves the window past a PR it
+            # did not look at
+            days = float(self.config.get("followup_days", 14))
+            started = time.time()
+            covered = (read_json(self.store.root / "followup-coverage.json", {}).get("at", started)
+                       if self.store else started)
+            cutoff = min(started, covered) - days * 86400 - 6 * 3600
+            # a reviewed PR off every page and the board; the updated bound
+            # keeps out those with no local record, which the window cannot
+            try:
+                orphans = self.commented(self.swept(), cutoff) - keys
+            except (OSError, TimeoutError, KeyError) as error:
+                print("discovery: commented search failed, using board and pages only: %s"
+                      % str(error)[:200], file=sys.stderr)
+                review_metrics.count("local", "followup search failed")
+                missed.append("search")
+            keys |= orphans
         elif pr_match:
             keys = {canonical(f"pr:{pr_match[1]}#{pr_match[2]}")}
             mode = "pr"
@@ -530,18 +578,6 @@ class Discovery:
             if mode in LABELS or mode == "rsync":
                 keys |= set(manifests.get(mode, {}))
         if mode == "followup" and self.store:
-            # Only PRs we worked on recently: everything older would cost its
-            # GitHub reads every followup, for ever. Decided locally; a PR
-            # outside the window comes back when it is labelled or asked for.
-            # A followup interval of overlap, so a push just before a PR
-            # leaves the window is still seen.
-            # measured from the last followup discovery that completed, so a
-            # failed or interrupted one never moves the window past a PR it
-            # did not look at
-            days = float(self.config.get("followup_days", 14))
-            started = time.time()
-            covered = read_json(self.store.root / "followup-coverage.json", {}).get("at", started)
-            cutoff = min(started, covered) - days * 86400 - 6 * 3600
             recent = {pr for pr in keys if self.store.in_followup_window(pr, cutoff)}
             review_metrics.count("local", "followup outside window", n=len(keys) - len(recent))
             keys = recent
@@ -560,6 +596,23 @@ class Discovery:
         # at a time, 170 PRs took a quarter of an hour.
         workers = int(self.config.get("discovery_workers", 8))
 
+        def marked(pr):
+            if pr not in orphans:
+                return True
+            try:
+                return self.ours(pr)
+            except (OSError, TimeoutError, KeyError) as error:
+                print("discovery: skipping %s: %s" % (pr, str(error)[:200]), file=sys.stderr)
+                missed.append(pr)
+                return False
+
+        if orphans & set(wanted):
+            # one comments read each, not a whole candidate's
+            with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                checked = dict(zip(wanted, pool.map(marked, wanted)))
+            review_metrics.count("local", "followup off-page", n=sum(checked[pr] for pr in orphans if pr in checked))
+            wanted = [pr for pr in wanted if checked[pr]]
+
         def one(pr):
             # one PR GitHub will not describe costs that PR this run, not
             # the run: it keeps its rows and the next run picks it up
@@ -568,6 +621,8 @@ class Discovery:
             except (OSError, TimeoutError, KeyError, subprocess.TimeoutExpired) as error:
                 print("discovery: skipping %s: %s" % (pr, str(error)[:200]), file=sys.stderr)
                 self.skipped.append(pr)
+                if pr in orphans:
+                    missed.append(pr)
                 if mode == "followup" and self.store:
                     # unread, it may have changed: keep it in the window
                     self.store.mark_pending(pr, "discovery error")
@@ -584,7 +639,15 @@ class Discovery:
             # the controller records coverage once these candidates are
             # durable in its run; recording it here could lose a review to a
             # crash before then
-            self.followup_started = started
+            if missed:
+                # an orphan has no row to hold it in the window: the search
+                # finds it again only while coverage stays put
+                print("discovery: followup coverage held, %d off-page reads failed" % len(missed),
+                      file=sys.stderr)
+                review_metrics.count("local", "followup coverage held")
+                self.followup_started = None
+            else:
+                self.followup_started = started
         if mode == "followup" and not any(c["classification"] == "REVIEW" for c in out):
             for c in out:
                 c["destinations"] = []
@@ -599,6 +662,7 @@ class Discovery:
 
     def _candidate(self, pr, mode, manifests=None):
         manifests = self.manifests(mode) if manifests is None else manifests
+        key_pr = pr
         repo, number = pr[3:].split("#")
         number = int(number)
         meta = self.gh.request(f"repos/{repo}/pulls/{number}")
@@ -639,7 +703,7 @@ class Discovery:
             # comments alone. Reviews and inline comments are only fetched
             # for a PR that has moved on and will be reviewed: reading all
             # three for every PR made a followup's discovery take minutes.
-            thread = self.gh.thread(repo, number, kinds=("comment",))
+            thread = self._comments.pop(key_pr, None) or self.gh.thread(repo, number, kinds=("comment",))
             told = [c for c in thread if c["login"] in self.accounts and POST.MARKER in c["body"]]
             last = max(told, key=lambda c: (c["at"] or "", c["id"])) if told else None
             if last and not same_head(head, POST.told_head(last["body"])):

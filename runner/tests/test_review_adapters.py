@@ -438,6 +438,69 @@ class DiscoveryContract(unittest.TestCase):
         self.assertLess(read(coverage)["at"], time.time() - 29 * 86400)
         self.assertTrue(self.discover.followup_started)
 
+    def off_page(self, search, comments):
+        """Followup with an empty board and pages, one PR (#3) found only by
+        the commenter search."""
+        self.discover.swept = Mock(return_value={"owner/repo": {}})
+        self.discover.board_rows = Mock(return_value={})
+        self.discover.manifests = Mock(return_value={})
+        self.gh.pages.side_effect = search
+        self.gh.thread.return_value = comments
+        self.gh.request.side_effect = lambda endpoint, **kw: (
+            dict(self.meta, number=int(endpoint.rsplit("/", 1)[1])) if "/pulls/" in endpoint else {"statuses": []})
+        return self.discover.discover("followup")
+
+    @staticmethod
+    def found(endpoint, **kw):
+        if endpoint.startswith("search/") and "commenter%3Anew-bot" in endpoint:
+            return [dict(repository_url="https://api.github.com/repos/owner/repo", number=3)]
+        return []
+
+    def test_followup_finds_a_reviewed_pr_that_left_every_page(self):
+        told = [dict(kind="comment", login="new-bot", id=1, at="1",
+                     body="AI-generated\nReviewed head `" + "b" * 40 + "`.")]
+        rows = self.off_page(self.found, told)
+        self.assertEqual([(r["pr"], r["classification"]) for r in rows], [("pr:owner/repo#3", "REVIEW")])
+        searches = [c.args[0] for c in self.gh.pages.call_args_list if c.args[0].startswith("search/")]
+        # one search per account, bounded by the window's cutoff
+        self.assertEqual(len(searches), 2)
+        day = time.strftime("%Y-%m-%d", time.gmtime(time.time() - 14 * 86400 - 6 * 3600))
+        for query in searches:
+            self.assertIn("updated%3A%3E%3D" + day, query)
+        # the marker check's read is the candidate's: comments are read once
+        self.assertEqual([c.kwargs.get("kinds") for c in self.gh.thread.call_args_list],
+                         [("comment",), ("review_comment", "review")])
+        self.assertTrue(self.discover.followup_started)
+
+    def test_followup_ignores_an_account_s_human_comments(self):
+        human = [dict(kind="comment", login="new-bot", id=1, at="1", body="looks good to me")]
+        self.assertEqual(self.off_page(self.found, human), [])
+        # settled from its comments alone, never read as a candidate
+        self.assertFalse([c for c in self.gh.request.call_args_list if "/pulls/" in c.args[0]])
+        self.assertEqual([c.kwargs.get("kinds") for c in self.gh.thread.call_args_list], [("comment",)])
+
+    def test_a_failed_commenter_search_leaves_board_and_pages(self):
+        def search(endpoint, **kw):
+            if endpoint.startswith("search/"):
+                raise OSError("GitHub 502")
+            return []
+        self.discover.manifests = Mock(return_value={"AIReview": {PR: {}}})
+        told = [dict(kind="comment", login="new-bot", id=1, at="1",
+                     body="AI-generated\nReviewed head `" + "b" * 40 + "`.")]
+        self.discover.swept = Mock(return_value={"owner/repo": {}})
+        self.discover.board_rows = Mock(return_value={})
+        self.gh.pages.side_effect = search
+        self.gh.thread.return_value = told
+        rows = self.discover.discover("followup")
+        self.assertEqual([(r["pr"], r["classification"]) for r in rows], [(PR, "REVIEW")])
+        # nothing holds an unseen orphan in the window but coverage
+        self.assertFalse(self.discover.followup_started)
+
+    def test_a_failed_marker_read_holds_coverage(self):
+        self.gh.thread.side_effect = OSError("GitHub 502")
+        self.assertEqual(self.off_page(self.found, []), [])
+        self.assertFalse(self.discover.followup_started)
+
     def test_search_restricts_organisations_and_repositories(self):
         self.gh.pages.return_value = [
             dict(repository_url="https://api.github.com/repos/owner/repo", number=1),
