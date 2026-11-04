@@ -4,6 +4,7 @@ import copy
 from pathlib import Path
 import os
 import subprocess
+import sys
 import time
 import unittest
 from unittest.mock import Mock, patch
@@ -673,6 +674,64 @@ class ReviewStore(unittest.TestCase):
         self.store.recover()
         self.assertEqual(list((self.root / "outbox").glob("*.json")), [])
         self.assertFalse(self.store.has_receipt("never-written"))
+
+    def test_a_receipt_keeps_no_copy_of_the_page(self):
+        entry = dict(id="pub", pr=PR, generation=1, kind="publish", target="page:test/p.html")
+        atomic(self.root / "outbox" / "pub.json", entry)
+        self.store.receipt(entry, "published", page_digest="d", revision=3, anchors=["a"],
+                           sections=[{"pr": PR}], views={PR: {}}, consumed=["x"])
+        stored = read(self.root / "receipts" / "pub.json")
+        self.assertEqual(stored["anchors"], ["a"])
+        self.assertEqual(stored["revision"], 3)
+        self.assertFalse({"sections", "views", "consumed"} & set(stored))
+
+    def test_slimming_old_receipts_keeps_their_times(self):
+        entry = dict(id="old", pr=PR, generation=1, kind="publish", target="page:test/p.html")
+        fat = dict(entry, state="published", page_digest="d", anchors=["a"], sections=["x" * 200000], views={},
+                   consumed=[])
+        atomic(self.root / "receipts" / "old.json", fat)
+        atomic(self.root / "receipts" / "old2.json", dict(fat, id="old2"))
+        atomic(self.root / "receipts" / "lean.json", dict(entry, id="lean", state="published"))
+        for ident in ("old", "old2"):
+            os.utime(self.root / "receipts" / (ident + ".json"), (1000, 1000))
+        self.store.compact_receipts(time.time() + 60)
+        atomic(self.root / "receipts" / "new.json", dict(fat, id="new"))
+        os.utime(self.root / "receipts" / "new.json", (2000, 2000))
+
+        def slim(*args):
+            # one row per ledger batch, so the batching is exercised
+            return subprocess.run([sys.executable, str(BIN / "review-slim-receipts.py"), "--data", str(self.root),
+                                   "--batch", "1", *args], capture_output=True, text=True, check=True).stdout
+        self.assertIn("ledger 2 files 1", slim("--dry-run"))
+        self.assertEqual(Store(self.root).receipt_of("old"), fat)
+        self.assertEqual(read(self.root / "receipts" / "new.json"), dict(fat, id="new"))
+        # an idle reader, as the drain keeps, must not stop the space coming back
+        reader = Store(self.root)
+        reader.receipt_of("old")
+        self.assertIn("ledger 2 files 1", slim("--vacuum"))
+        self.assertLess((self.root / "receipts.db").stat().st_size, 100000)
+        self.assertEqual((self.root / "receipts.db-wal").stat().st_size, 0)
+        self.assertEqual(reader.receipt_of("old")["id"], "old")
+        store = Store(self.root)
+        for ident, when in (("old", 1000), ("old2", 1000), ("new", 2000)):
+            record = store.receipt_of(ident)
+            self.assertEqual(record, dict(entry, id=ident, state="published", page_digest="d", anchors=["a"]))
+            self.assertEqual(store.receipt_time(ident), when)
+        self.assertEqual(store.receipt_of("lean")["id"], "lean")
+        self.assertEqual(list((self.root / "receipts").glob(".*")), [])
+        # a second pass finds nothing to do
+        self.assertIn("ledger 0 files 0", slim())
+
+    def test_slimming_waits_for_the_collector(self):
+        import fcntl
+        (self.root / "gc").mkdir(exist_ok=True)
+        with open(self.root / "gc" / "collector.lock", "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            child = subprocess.Popen([sys.executable, str(BIN / "review-slim-receipts.py"), "--data", str(self.root)],
+                                     stdout=subprocess.PIPE, text=True)
+            time.sleep(1)
+            self.assertIsNone(child.poll())
+        self.assertIn("ledger 0 files 0", child.communicate(timeout=30)[0])
 
     def test_a_ledger_from_before_write_times_is_migrated(self):
         import sqlite3

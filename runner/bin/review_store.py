@@ -589,7 +589,13 @@ class Store:
                 pass
         return len(batch)
 
+    # A publish result carries the whole page's sections and row views: used
+    # by the upload itself, kept in confirmed.json and membership, never read
+    # back from a receipt. Storing them made the ledger grow with every page.
+    PAGE_COPY = ("sections", "views", "consumed")
+
     def receipt(self, entry, state, **details):
+        details = {k: v for k, v in details.items() if k not in self.PAGE_COPY}
         record = {"id": entry["id"], "pr": entry["pr"], "generation": entry["generation"],
                   "kind": entry["kind"], "target": entry["target"], "state": state, **details}
         atomic(self.root / "receipts" / (entry["id"] + ".json"), record, self.crash, "receipt")
