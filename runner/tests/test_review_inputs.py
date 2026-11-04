@@ -219,6 +219,8 @@ class Content(unittest.TestCase):
         readme = render("reconciliation", j)[0]["README.md"]
         for name, root in j["result_sources"].items():
             self.assertIn("- %s: %s" % (name, root), readme)
+        # GC may clear an accepted claim's scratch; only cited files are promised
+        self.assertIn("their scratch may have been cleared", readme)
 
     def test_the_fresh_snapshot_beside_the_pinned_facts(self):
         files, j = render("reconciliation")

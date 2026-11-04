@@ -54,6 +54,8 @@ KEEP = PROOFS | METRICS | {"payload.log", *FILES.values()}
 EVIDENCE_DAYS = 2
 LITTER_DAYS = 2
 SCRATCH_DAYS = 7
+# an accepted claim keeps its attempts' build trees this long after they end
+PINNED_SCRATCH_DAYS = 2
 OLD_RUN_DAYS = 30
 # an hourly sweep that finds nothing to review leaves a run record each time
 EMPTY_RUN_DAYS = 1
@@ -459,6 +461,8 @@ class GC:
         if (self.data / "runs").is_symlink():
             self.skip("finished scratch", "runs is a symlink")
             return
+        # permit owners name attempts too, not only the PR's region
+        owned = pins_in(self.data, list((self.data / "owners").glob("*.json")))
         for scratch in sorted(self.data.glob("runs/*/attempts/*/scratch")):
             if self.spent():
                 self.skip("finished scratch", "time budget spent")
@@ -489,9 +493,12 @@ class GC:
                 self.skip("finished scratch", "PR busy")
                 continue
             try:
-                records = [self.data / "results" / repo / number / "claim.json",
-                           self.data / "owners" / (str(region(pr)) + ".json")]
-                if os.path.realpath(attempt) in pins_in(self.data, records):
+                results = self.data / "results" / repo / number
+                real = os.path.realpath(attempt)
+                if real in owned or real in pins_in(self.data, [self.data / "owners" / (str(region(pr)) + ".json")]):
+                    self.skip("finished scratch", "named by a claim")
+                    continue
+                if real in pins_in(self.data, [results / "claim.json"]) and not self.accepted_long_ago(results, attempt):
                     self.skip("finished scratch", "named by a claim")
                     continue
                 waste = scratch_waste(attempt)
@@ -503,6 +510,21 @@ class GC:
             finally:
                 if lock:
                     lock.close()
+
+    def accepted_long_ago(self, results, attempt):
+        """The claim naming this attempt reached a promoted generation (its
+        status stays active after promotion, so the generation decides) and
+        the attempt ended days ago. A later claim carrying the pass reads
+        only its job, status, result and cited files, which stay."""
+        claim = load(results / "claim.json")
+        current = load(results / "current")
+        try:
+            if current["generation"] < claim["generation"]:
+                return False
+            ended = (attempt / "status.json").stat().st_mtime
+        except (OSError, KeyError, TypeError):
+            return False
+        return ended < self.now - PINNED_SCRATCH_DAYS * 86400
 
     def litter(self, processes):
         cutoff = self.now - LITTER_DAYS * 86400

@@ -444,6 +444,45 @@ class GC(unittest.TestCase):
         self.assertTrue((attempt / "scratch" / "build" / "big.o").exists())
         self.assertIn("named by a claim", report["skipped"]["finished scratch"])
 
+    def test_scratch_of_an_accepted_claim_goes_after_two_days(self):
+        results = self.data / "results" / "o" / "r" / "2"
+        old = self.finished("accepted-old")
+        recent = self.finished("accepted-recent")
+        os.utime(old / "status.json", (time.time() - 3 * 86400,) * 2)
+        os.utime(recent / "status.json", (time.time() - 86400,) * 2)
+        # the claim stays active after promotion: the generation decides
+        write(results / "claim.json", {"generation": 4, "status": "active",
+                                       "attempts": [str(old), str(recent)], "selected": {}})
+        write(results / "current", {"generation": 4, "digest": "d"})
+        report = self.gc("--apply")
+        self.assertFalse((old / "scratch" / "build").exists())
+        self.assertTrue((old / "scratch" / "logs" / "cited.txt").exists())
+        self.assertTrue((old / "evidence" / "e.txt").exists())
+        self.assertTrue((recent / "scratch" / "build" / "big.o").exists())
+        self.assertIn("named by a claim", report["skipped"]["finished scratch"])
+
+    def test_scratch_of_an_unpromoted_claim_stays(self):
+        results = self.data / "results" / "o" / "r" / "2"
+        attempt = self.finished("unpromoted")
+        os.utime(attempt / "status.json", (time.time() - 30 * 86400,) * 2)
+        write(results / "claim.json", {"generation": 5, "status": "deferred",
+                                       "attempts": [str(attempt)], "selected": {}})
+        write(results / "current", {"generation": 4, "digest": "d"})
+        self.gc("--apply")
+        self.assertTrue((attempt / "scratch" / "build" / "big.o").exists())
+        # nor while the PR's owner record names it, whatever the claim says
+        write(results / "current", {"generation": 5, "digest": "d"})
+        sys.path.insert(0, str(BIN))
+        from review_lock import region
+        for key in ("pr:o/r#2", "permit:codex:0"):
+            owner = self.data / "owners" / (str(region(key)) + ".json")
+            write(owner, {"attempts": [str(attempt)]})
+            self.gc("--apply")
+            self.assertTrue((attempt / "scratch" / "build" / "big.o").exists())
+            owner.unlink()
+        self.gc("--apply")
+        self.assertFalse((attempt / "scratch" / "build").exists())
+
     def test_scratch_of_a_busy_pr_waits(self):
         sys.path.insert(0, str(BIN))
         from review_lock import try_lock
