@@ -64,7 +64,7 @@ which is what decides how much of it is safe to drop.
 | 19 | Claude transcripts | `~/.claude/projects`, `~/review.auth/claude-personal/projects` | 4.4 GB + 0.7 GB, ~13 k files | ~3 GB, ~8 k files | `review-context` (3 days), `make-runs-page` (globs every transcript every 10 min, then filters by mtime) | delete transcripts older than 30 days that no live process has open; set `cleanupPeriodDays` in the role config dirs | low: dashboards look back 10 days at most |
 | 20 | Codex sessions and state | `~/review.auth/codex-work/sessions`, `thread_history_1.sqlite`, `~/.codex` | 14 GB + 5.7 GB | ~8 GB | `review_context.py` (globs every date dir for one thread id), `make-runs-page` `read_quota` | delete `sessions/YYYY/MM/DD` older than 30 days; find out whether Codex can bound `thread_history` (else compact it offline when no Codex is running) | low for sessions; unknown for the sqlite |
 | 21 | Package caches | `~/.cache/uv` 29 GB, `review/cache/uv` 5.8 GB, `pip` 1.4+2.0 GB, `~/.npm` 2.8 GB | 41 GB | unbounded | builds | weekly `uv cache prune` and `pip cache purge` at a size threshold when no pass is running; find what still uses `~/.cache/uv` | low |
-| 22 | One-off leftovers | `~/review/pilots` 78 GB, `~/review/work` 38 MB, old `logs/*` dirs (~70 MB) | 78 GB | 0 | none | delete after tridge confirms | none |
+| 22 | One-off leftovers | `~/review/pilots` 78 GB, the contents of `~/review/work` 38 MB (the directory itself is run-reviewprs.sh's working directory and must exist), old `logs/*` dirs (~70 MB) | 78 GB | 0 | none | delete after tridge confirms | none |
 | 23 | Logs and metrics | `review/logs/*.jsonl`, `*.log`, `reviewprs-*.log` (894), `data/metrics/*.jsonl` | 81 MB; metrics 5.5 MB | ~+10 MB; ~900 wrapper logs/month | `quota.py` reads all of `quota.jsonl` (`readlines`); `make-runs-page` reads every wrapper log before filtering | monthly rollover of the jsonl files; read only the tail; filter wrapper logs by mtime before opening; metrics kept 180 days | none |
 | 24 | Reference clones | `data/references/*` | 13 GB; packs: wiki 117, MethodicConfigurator 142 | slow | worktree creation | `git maintenance`/`gc --auto` in the nightly refresh; GC already prunes worktrees | none |
 | 25 | Outbox given-up entries | `outbox/` | 5 entries now | grows only with failures | every drain pass and controller save reads every entry; `_coalesce` re-globs the outbox for each publish | leave them in the outbox (moving them would make `materialize` recreate them with fresh retry state and lose uncertain-write records); keep a small in-memory or on-disk index of due entries so scans skip them | low |
@@ -176,7 +176,8 @@ still find the last 10 days.
 
 *Status 2026-11-05:* `~/review/pilots`, `~/review/work` and `~/.cache/uv`
 deleted with tridge's agreement (100 GB freed; uv cache was 22 GB at
-removal). Still to do: what writes `~/.cache/uv`, and the weekly prune.
+removal). `~/review/work` had to be recreated empty: run-reviewprs.sh
+refuses to start without it, which lost the 06:13 all run. Still to do: what writes `~/.cache/uv`, and the weekly prune.
 
 Confirm, then delete `~/review/pilots`, `~/review/work` and the retired
 `logs/*` directories. Find what still writes `~/.cache/uv` (likely a pass
