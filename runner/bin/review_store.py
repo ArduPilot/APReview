@@ -534,13 +534,21 @@ class Store:
                 yield record
         if (self.root / "receipts.db").exists():
             import sqlite3
-            try:
-                rows = self.ledger().execute("SELECT id, body FROM receipt").fetchall()
-            except sqlite3.Error as error:
-                raise OSError("receipt ledger: %s" % error) from error
-            for ident, body in rows:
-                if ident not in seen:
-                    yield json.loads(body)
+            # in batches by key, which a VACUUM never renumbers: the whole
+            # ledger at once was gigabytes
+            last = ""
+            while True:
+                try:
+                    rows = self.ledger().execute("SELECT id, body FROM receipt WHERE id > ? "
+                                                 "ORDER BY id LIMIT 1000", (last,)).fetchall()
+                except sqlite3.Error as error:
+                    raise OSError("receipt ledger: %s" % error) from error
+                if not rows:
+                    break
+                last = rows[-1][0]
+                for ident, body in rows:
+                    if ident not in seen:
+                        yield json.loads(body)
 
     def compact_receipts(self, older_than, limit=10000, deadline=None):
         """Move receipt files last changed before older_than into the ledger:

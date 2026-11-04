@@ -675,6 +675,16 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(list((self.root / "outbox").glob("*.json")), [])
         self.assertFalse(self.store.has_receipt("never-written"))
 
+    def test_a_full_scan_reads_the_ledger_in_batches(self):
+        db = self.store.ledger()
+        with db:
+            db.executemany("INSERT INTO receipt (id, body, written) VALUES (?, ?, 0)",
+                           [("r%05d" % n, '{"id": "r%05d"}' % n, ) for n in range(2500)])
+        atomic(self.root / "receipts" / "r00007.json", {"id": "r00007", "file": True})
+        seen = [r["id"] for r in self.store.receipts()]
+        self.assertEqual(sorted(seen), ["r%05d" % n for n in range(2500)])
+        self.assertEqual(seen[0], "r00007")         # the file wins over its ledger row
+
     def test_a_receipt_keeps_no_copy_of_the_page(self):
         entry = dict(id="pub", pr=PR, generation=1, kind="publish", target="page:test/p.html")
         atomic(self.root / "outbox" / "pub.json", entry)
