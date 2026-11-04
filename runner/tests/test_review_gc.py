@@ -95,8 +95,10 @@ class GC(unittest.TestCase):
         self.assertTrue((attempts / "worktree" / "cold-evidence").exists())
         self.assertTrue((attempts / "stray.txt").exists())
         self.assertTrue((self.data / "runs/all-2/attempts/busy/cold-evidence").exists())
-        # store state is never touched
-        self.assertTrue((self.data / "receipts" / "r1.json").exists())
+        # store state is never lost: an old receipt moves to the ledger
+        sys.path.insert(0, str(BIN))
+        from review_store import Store
+        self.assertTrue(Store(self.data).has_receipt("r1"))
         # litter and old in-store caches go once quiet; recent litter stays
         self.assertFalse((self.data / "pr34599").exists())
         self.assertFalse((self.data / "uv-cache").exists())
@@ -482,6 +484,20 @@ class GC(unittest.TestCase):
             owner.unlink()
         self.gc("--apply")
         self.assertFalse((attempt / "scratch" / "build").exists())
+
+    def test_receipts_older_than_two_days_move_to_the_ledger(self):
+        sys.path.insert(0, str(BIN))
+        from review_store import Store
+        old, recent = time.time() - 3 * 86400, time.time() - 86400
+        for ident, age in (("old", old), ("recent", recent)):
+            write(self.data / "receipts" / (ident + ".json"), {"id": ident, "state": "posted"}, age=age)
+        self.gc("--apply")
+        self.assertFalse((self.data / "receipts" / "old.json").exists())
+        self.assertTrue((self.data / "receipts" / "recent.json").exists())
+        store = Store(self.data)
+        self.assertEqual(store.receipt_of("old"), {"id": "old", "state": "posted"})
+        # the followup window reads the posting time from the ledger
+        self.assertAlmostEqual(store.receipt_time("old"), old, places=3)
 
     def test_scratch_of_a_busy_pr_waits(self):
         sys.path.insert(0, str(BIN))

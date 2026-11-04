@@ -61,8 +61,9 @@ OLD_RUN_DAYS = 30
 EMPTY_RUN_DAYS = 1
 GONE_RUN_DAYS = 90
 VENV_DAYS = 14
-# a week past the followup window, which reads posting times from receipt files
-RECEIPT_DAYS = 21
+# every reader falls back to the ledger, which keeps the file's write time;
+# a file only saves a query, so keep only the receipts the drain touches most
+RECEIPT_DAYS = 2
 HTTP_CACHE_DAYS = 14
 
 
