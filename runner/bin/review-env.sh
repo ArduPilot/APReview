@@ -333,6 +333,8 @@ export CCACHE_DIR="$REVIEW_ROOT/ccache"
 # repeated here or every ChibiOS build fails with "arm-none-eabi-gcc not found".
 export PATH="/usr/lib/ccache:$PATH"
 export PATH="/opt/gcc-arm-none-eabi-10-2020-q4-major/bin:$PATH"
+# AM32 V203 (RISC-V), from AM32's own linux-tools bundle
+export PATH="/opt/riscv-embedded-gcc/bin:$PATH"
 export PATH="$REVIEW_REPOS/ardupilot/Tools/autotest:$PATH"
 export PATH="$REVIEW_ROOT/bin:$HOME/.local/bin:$HOME/.npm-global/bin:$PATH"
 
