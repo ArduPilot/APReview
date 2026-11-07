@@ -201,6 +201,16 @@
    "notes": "The web configurator for AM32 ESCs: a Nuxt 3 / Vue 3 app in TypeScript, built with yarn, with a Prisma database and a server side that serves firmware releases, bootloaders and the EEPROM schema. Not an ArduPilot repo: judge it against TypeScript and Vue conventions, not ArduPilot house rules. Default branch is master. It talks to ESCs over serial (MSP passthrough and the AM32 bootloader protocol), and its one CI workflow, protocol-matrix.yml, runs that protocol stack against a Python bootloader emulator over transports, bootloader generations and flash sizes (ci/run_matrix.py) - a protocol change is where a wrong byte bricks a user's ESC, so check it against the AM32 firmware side. An EEPROM layout change on either side should agree with the schema in am32-firmware/AM32."
   },
   {
+   "repo": "ArduPilot/APWeb",
+   "key": "APWeb",
+   "discovery": "explicit",
+   "post_comments": true,
+   "house_rules": "ardupilot",
+   "ci": false,
+   "added": "2026-11-07",
+   "notes": "ArduPilot web server for companion computers and WiFi bridges, in C (talloc, pthreads): it connects to a MAVLink serial port, forwards MAVLink to UDP 14550 and serves a web interface for parameters, sensor status and a map; the pages and JavaScript under files/ are compiled in by files/embed.py. Judge the C as ArduPilot C, but the flight-code rules (AP_Param names, zeroed new) do not apply. Default branch master, no GitHub Actions, and a long-quiet repo. Its one submodule, modules/mavlink, is the ArduPilot mavlink fork already swept. At master the build does not complete on a current Ubuntu: files/embed.py needs python2, and the generated MAVLink headers fail -Werror=address-of-packed-member with modern gcc. Say so rather than blame the PR. With the warning relaxed every source but web_files.c compiles: make mavlink, then make CFLAGS=\"-Wall -g -std=gnu99\" with the .o files; web_files.c needs the files/embedded.c that the python2 step generates."
+  },
+  {
    "repo": "RsyncProject/rsync",
    "key": "rsync",
    "discovery": "rsync-mode",
