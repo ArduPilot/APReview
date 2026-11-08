@@ -534,13 +534,13 @@ class ReviewSupervisor(unittest.TestCase):
         ops = lambda: sorted((supervisor.store.root / "operations").glob("*.json"))
         rows = lambda: supervisor.store.merge_membership(page, {})
         c = dict(candidate(), pr=PR, destinations=[page], ci={"state": "success", "at": "2026-10-04T01:00"})
-        supervisor._project(dict(c, observation=1), "discovery", quiet=True)
+        supervisor._project(dict(c, observation=1), "discovery")
         self.assertEqual(len(ops()), 1)                 # new on the page: journalled
         supervisor.store.drain(StubAdapter(supervisor.store.root))
         # observed again: same CI state the same day, so the page is unchanged
         supervisor.run_id = str(self.root / "run2")
         supervisor._project(dict(c, observation=2, ci={"state": "success", "at": "2026-10-04T05:00"}),
-                            "discovery", quiet=True)
+                            "discovery")
         self.assertEqual(len(ops()), 1)
         self.assertEqual(rows()[PR]["ticket"], 2)       # but its ticket still fences
         # an older queued removal arriving late cannot undo it
@@ -549,7 +549,7 @@ class ReviewSupervisor(unittest.TestCase):
         # a visible change is journalled
         supervisor.run_id = str(self.root / "run3")
         supervisor._project(dict(c, observation=3, ci={"state": "failure", "at": "2026-10-04T06:00"}),
-                            "discovery", quiet=True)
+                            "discovery")
         self.assertEqual(len(ops()), 2)
         # and a visible change is never written ahead of its journal, so a
         # crash before journalling leaves the change still to be made
@@ -565,17 +565,17 @@ class ReviewSupervisor(unittest.TestCase):
         ops = lambda: len(list((supervisor.store.root / "operations").glob("*.json")))
         ci = {"state": "success", "at": "2026-10-04T01:00"}
         c = dict(candidate(), pr=PR, destinations=[page], ci=ci)
-        supervisor._project(dict(c, observation=1), "discovery", quiet=True)
+        supervisor._project(dict(c, observation=1), "discovery")
         supervisor.store.drain(StubAdapter(supervisor.store.root))
         supervisor.run_id = str(self.root / "run2")
-        supervisor._project(dict(c, observation=2), "discovery", quiet=True)
+        supervisor._project(dict(c, observation=2), "discovery")
         self.assertEqual(ops(), 1)                       # unchanged: suppressed
         # a claim appears after the page was published: what it shows differs
         # from what it was last asked to show, so the next observation publishes
         atomic(supervisor.store.pr_dir(PR) / "claim.json",
                dict(generation=1, status="deferred", attempts=[], selected={}))
         supervisor.run_id = str(self.root / "run3")
-        supervisor._project(dict(c, observation=3), "discovery", quiet=True)
+        supervisor._project(dict(c, observation=3), "discovery")
         self.assertEqual(ops(), 2)
 
     def quiet_supervisor(self):
@@ -589,7 +589,7 @@ class ReviewSupervisor(unittest.TestCase):
     def observe(self, supervisor, c, n, **changes):
         supervisor.run_id = str(self.root / ("run%d" % n))
         before = len(list((supervisor.store.root / "operations").glob("*.json")))
-        supervisor._project(dict(c, observation=n, **changes), "discovery", quiet=True)
+        supervisor._project(dict(c, observation=n, **changes), "discovery")
         adapter = StubAdapter(supervisor.store.root)
         adapter.destination_of = lambda e: supervisor.destination(e["target"])
         supervisor.store.drain(adapter)
@@ -634,9 +634,9 @@ class ReviewSupervisor(unittest.TestCase):
         c = dict(candidate(), pr=PR, destinations=[page])
         self.observe(supervisor, c, 1, ci=ok)
         supervisor.run_id = str(self.root / "late")
-        supervisor._project(dict(c, observation=2, ci=bad), "discovery", quiet=True)   # queued
+        supervisor._project(dict(c, observation=2, ci=bad), "discovery")   # queued
         supervisor.run_id = str(self.root / "run3")
-        supervisor._project(dict(c, observation=3, ci=ok), "discovery", quiet=True)    # matches
+        supervisor._project(dict(c, observation=3, ci=ok), "discovery")    # matches
         supervisor.store.drain(StubAdapter(supervisor.store.root))                      # delayed one lands
         self.observe(supervisor, c, 4, ci=bad)
         rows = supervisor.store.merge_membership(page, {})
@@ -658,7 +658,7 @@ class ReviewSupervisor(unittest.TestCase):
                 supervisor.store.write_membership(lock, page, rows)
         c = dict(candidate(), pr=PR, destinations=[page], ci=ci)
         examine = lambda n: supervisor.examine(page, PR, {"ticket": n, "removed": False, "ci": ci,
-                                                          "progress": "discovery"}, True)
+                                                          "progress": "discovery"}) == "unchanged"
         atomic(epoch, 3)
         record(destination=supervisor.destination(page), epoch=3)
         self.assertTrue(examine(2))
@@ -685,16 +685,128 @@ class ReviewSupervisor(unittest.TestCase):
         with try_lock(supervisor.store.locks, a) as lock:
             supervisor.store.write_membership(lock, a, rows)
         c = dict(candidate(), pr=PR, destinations=[a, b], ci=ci, observation=2)
-        supervisor._project(c, "discovery", quiet=True)     # a unchanged, b new
+        supervisor._project(c, "discovery")     # a unchanged, b new
         [op] = (supervisor.store.root / "operations").glob("*.json")
         self.assertEqual([i["target"] for i in read(op)["intents"] if i["kind"] == "projection"], [b])
         # a resumed controller replays discovery: no identity error, no change
-        supervisor._project(c, "discovery", quiet=True)
+        supervisor._project(c, "discovery")
         self.assertEqual(len(list((supervisor.store.root / "operations").glob("*.json"))), 1)
         # acceptance waits on discovery's projection of b only
         deps = {x["target"]: x["dependencies"] for x in supervisor.intents(c, 1) if x["kind"] == "projection"}
         self.assertEqual(deps[a], [])
         self.assertEqual(len(deps[b]), 1)
+
+    def sweep(self, supervisor, c, n, outcome, generation=None, drain=True):
+        """One run's discovery and outcome of a PR; how many journals it made."""
+        supervisor.run_id = str(self.root / ("run%d" % n))
+        ops = lambda: len(list((supervisor.store.root / "operations").glob("*.json")))
+        before = ops()
+        supervisor._project(dict(c, observation=n), "discovery")
+        supervisor._project(dict(c, observation=n), outcome, generation)
+        made = ops() - before
+        if drain:
+            adapter = StubAdapter(supervisor.store.root)
+            adapter.destination_of = lambda e: supervisor.destination(e["target"])
+            supervisor.store.drain(adapter)
+        return made
+
+    def test_an_interval_deferral_journals_only_when_the_page_changes(self):
+        supervisor = self.quiet_supervisor()
+        page = "page:stub/end/a.html"
+        c = dict(candidate(), pr=PR, destinations=[page], ci={"state": "success", "at": "2026-10-04T01:00"})
+        self.assertEqual(self.sweep(supervisor, c, 1, "deferred"), 2)    # new row, then deferred
+        row = supervisor.store.merge_membership(page, {})[PR]
+        # the page shows the outcome, not the discovery that preceded it
+        self.assertEqual(row["progress"], "deferred")
+        self.assertEqual(row["published"]["view"][3], "deferred")
+        import review_metrics
+        review_metrics._counts.clear()
+        self.assertEqual(self.sweep(supervisor, c, 2, "deferred"), 0)
+        self.assertEqual(review_metrics._counts["local/projection deferred label merged"][0], 1)
+        self.assertNotIn("local/intents journalled deferred", review_metrics._counts)
+        self.assertEqual(self.sweep(supervisor, c, 3, "deferred"), 0)
+        self.assertEqual(supervisor.store.merge_membership(page, {})[PR]["ticket"], 3)
+        # an upload since, even one that failed, makes the record stale
+        epoch = supervisor.store.root / "pages" / digest(page) / "epoch.json"
+        atomic(epoch, read(epoch, 0) + 1)
+        supervisor.config["stub"] = False
+        self.assertEqual(self.sweep(supervisor, c, 4, "deferred", drain=False), 2)
+
+    def test_a_new_outcome_after_rediscovery_is_shown(self):
+        # Codex's sequence, through finish(): reused, then rediscovered and
+        # deferred without a claim; then deferred by this run's own claim
+        supervisor = self.quiet_supervisor()
+        supervisor.owned = {}
+        page = "page:stub/end/a.html"
+        adapter = StubAdapter(supervisor.store.root)
+        adapter.destination_of = lambda e: supervisor.destination(e["target"])
+        shown = lambda: supervisor.store.merge_membership(page, {})[PR]["published"]["view"][3]
+        def run(n, review, reason=None, claim=False):
+            supervisor.run_id = str(self.root / ("run%d" % n))
+            c = dict(candidate(), pr=PR, observation=n, destinations=[page])
+            supervisor.config["candidates"] = [c]
+            supervisor.states = {PR: {"candidate": c}}
+            supervisor.project(c, "discovery")
+            if claim:
+                lock = try_lock(supervisor.store.locks, PR)
+                supervisor.store.allocate(lock, PR, supervisor.run_id, "request", c)
+                supervisor.owned[PR] = lock
+                supervisor.project(c, "refresh-%d" % n)
+            supervisor.finish(PR, review, reason)
+            supervisor.store.drain(adapter)
+            if claim:
+                lock.close()
+        run(1, "reused")
+        self.assertEqual(shown(), "reused")
+        run(2, "deferred", "quota paused")
+        self.assertEqual(shown(), "deferred")
+        run(3, "reused")
+        self.assertEqual(shown(), "reused")
+        run(4, "deferred", "aborted", claim=True)
+        self.assertEqual(supervisor.store.claim(PR)["status"], "deferred")
+        self.assertEqual(shown(), "deferred")
+
+    def test_an_outcome_on_a_busy_page_or_a_new_destination_journals(self):
+        supervisor = self.quiet_supervisor()
+        page, other = "page:stub/end/a.html", "page:stub/end/b.html"
+        c = dict(candidate(), pr=PR, destinations=[page])
+        self.sweep(supervisor, c, 1, "deferred")
+        with patch.object(SUPERVISOR, "try_lock", return_value=None):
+            self.assertEqual(self.sweep(supervisor, c, 2, "deferred"), 2)
+        self.assertEqual(self.sweep(supervisor, c, 3, "deferred"), 0)
+        journals = lambda: set((supervisor.store.root / "operations").glob("*.json"))
+        before = journals()
+        self.assertEqual(self.sweep(supervisor, dict(c, destinations=[page, other]), 4, "deferred", drain=False), 2)
+        # only the new page is journalled
+        self.assertEqual({i["target"] for op in journals() - before for i in read(op)["intents"]}, {other})
+
+    def test_claim_allocation_and_acceptance_publish_once_each(self):
+        from review_fixtures import complete_claim
+        supervisor = self.quiet_supervisor()
+        page = "page:stub/end/a.html"
+        c = dict(candidate(), pr=PR, destinations=[page])
+        self.sweep(supervisor, c, 1, "deferred")
+        ops = lambda: len(list((supervisor.store.root / "operations").glob("*.json")))
+        adapter = StubAdapter(supervisor.store.root)
+        adapter.destination_of = lambda e: supervisor.destination(e["target"])
+        supervisor.run_id = str(self.root / "run2")
+        supervisor._project(dict(c, observation=2), "discovery")
+        self.assertEqual(ops(), 2)
+        # a claim for a new review changes what the page shows
+        with try_lock(supervisor.store.locks, PR) as lock:
+            claim = complete_claim(supervisor.store, lock)
+            supervisor._project(dict(c, observation=2), "refresh-2")
+            self.assertEqual(ops(), 3)
+            supervisor.store.drain(adapter)
+            self.assertEqual(supervisor.store.merge_membership(page, {})[PR]["published"]["view"][3], "active")
+            supervisor.store.accept(lock, PR, claim, [])
+        generation = claim["generation"]
+        # its acceptance shows the review: published once
+        self.assertEqual(self.sweep(supervisor, c, 3, "accepted", generation), 2)
+        self.assertEqual(supervisor.store.merge_membership(page, {})[PR]["published"]["view"][3], "accepted")
+        # then accepted again, and deferred by the re-review interval: no change
+        self.assertEqual(self.sweep(supervisor, c, 4, "accepted", generation), 0)
+        self.assertEqual(self.sweep(supervisor, c, 5, "deferred"), 0)
 
     def test_a_controller_that_does_not_deliver_still_recovers(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)

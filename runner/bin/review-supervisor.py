@@ -84,6 +84,16 @@ def phase_record(phases):
     return record
 
 
+def page_kind(target):
+    """A page's kind, for metrics: followup, dated, retained or label."""
+    path = canonical(target)[5:].split("/", 1)[-1]
+    if "followups/" in path:
+        return "followup"
+    if re.search(r"(^|/)\d{4}[-_]\d{2}[-_]\d{2}(/|$)", path):
+        return "dated"
+    return "retained" if "PRReviews/" in path else "label"
+
+
 def refresh(candidate):
     """The slice's read-only adapter uses supplied live metadata."""
     if candidate.get("refresh_error"):
@@ -222,7 +232,7 @@ class Supervisor:
             else ""
         )
 
-    def project(self, candidate, phase, generation=None, quiet=False):
+    def project(self, candidate, phase, generation=None):
         root = self.config["configuration"].get("routing_root")
         pause = None
         if root and candidate["pr"] not in self.owned:
@@ -237,13 +247,14 @@ class Supervisor:
                 from review_routing import load, owner
                 if owner(load(root), candidate.get("mode", self.config["mode"]), candidate["repository"]) != "new":
                     return
-            self._project(candidate, phase, generation, quiet)
+            self._project(candidate, phase, generation)
         finally:
             if pause:
                 pause.close()
 
-    def _project(self, candidate, phase, generation=None, quiet=False):
+    def _project(self, candidate, phase, generation=None):
         pr = candidate["pr"]
+        step = phase.split("-")[0]
         patch = {
             "ticket": candidate.get("observation", self.config["observation"]),
             "ci": candidate.get("ci"),
@@ -292,18 +303,23 @@ class Supervisor:
             # never rebuilt, since recovery fans out what is stored.
             return
         if intents:
-            # A pure re-observation (discovery, reuse) whose page, as last
-            # verified uploaded, already shows exactly what it would show now
-            # is merged directly, its ticket still fencing older queued
-            # observations, and journals nothing. Anything else journals a
-            # projection and publish as before.
+            # An observation or outcome whose page, as last verified uploaded,
+            # already shows exactly what it would show now is merged
+            # directly, its ticket still fencing older queued observations,
+            # and journals nothing. Anything else journals a projection and
+            # publish as before.
             kept = []
             for projection, publish in zip(intents[::2], intents[1::2]):
-                if not self.examine(projection["target"], pr, projection["patches"][pr], quiet):
+                examined = self.examine(projection["target"], pr, projection["patches"][pr])
+                review_metrics.count("local", "projection %s %s %s" % (
+                    step, page_kind(projection["target"]),
+                    "merged" if examined == "unchanged" else "journalled " + examined))
+                if examined != "unchanged":
                     kept += [projection, publish]
             intents = kept
         if intents:
             intents.extend(self.landing_intents(pr, operation, intents, gate="page"))
+            review_metrics.count("local", "intents journalled " + step, n=len(intents))
             self.store.journal(self.run_id, self.phase_name(phase), pr, intents)
 
     def destination(self, target):
@@ -322,20 +338,19 @@ class Supervisor:
         return row_view(row, bundle, self.store.claim(pr), comment_receipts(self.store, bundle),
                         read(self.store.root / "legacy-facts.json", {}) if bundle and bundle.get("legacy") else None)
 
-    def examine(self, target, pr, patch, quiet):
-        """True when a quiet observation was merged directly: the page's last
-        verified upload already shows exactly what it would show now, at this
-        destination. Recorded by delivery from the render it uploaded, never
-        from intent, so a delayed or failed publish cannot make it match.
-        The rows compared are exactly the rows written."""
-        if not quiet:
-            return False
+    def examine(self, target, pr, patch):
+        """Returns "unchanged" when an observation was merged directly: the page's
+        last verified upload already shows exactly what it would show now,
+        at this destination. Recorded by delivery from the render it
+        uploaded, never from intent, so a delayed or failed publish cannot
+        make it match. The rows compared are exactly the rows written.
+        Otherwise why it must be journalled: "changed", "busy" or "error"."""
         try:
             lock = try_lock(self.store.locks, target)
         except RuntimeError:
-            return False
+            return "error"
         if lock is None:
-            return False
+            return "busy"
         try:
             with lock:
                 rows = self.store._merge_membership(lock, target, {pr: patch}, write=False)
@@ -350,12 +365,12 @@ class Supervisor:
                 if published and current and published.get("view") == self.view(rows.get(pr), pr):
                     self.store.write_membership(lock, target, rows)
                     review_metrics.count("local", "projection merged unchanged")
-                    return True
+                    return "unchanged"
                 review_metrics.count("local", "projection journalled")
-                return False
+                return "changed"
         except Exception as error:      # any doubt: journal, as before
             print("projection: %s on %s not examined: %s" % (pr, target, str(error)[:200]), file=sys.stderr)
-            return False
+            return "error"
 
     def generation_receipts(self, pr, generation):
         """The receipts of one generation's publishes, comment and board sync,
@@ -521,8 +536,6 @@ class Supervisor:
                 candidate,
                 review,
                 state.get("generation") if review in ("accepted", "reused") else None,
-                # reuse and drops change no claim; deferral and acceptance do
-                quiet=review in ("reused", "dropped"),
             )
         if reason:
             state["reason"] = reason
@@ -738,11 +751,11 @@ class Supervisor:
             )
         ):
             state["generation"] = current["generation"]
-            self.project(fresh, "reuse", current["generation"], quiet=True)
+            self.project(fresh, "reuse", current["generation"])
             self.finish(pr, "accepted" if same_request else "reused")
             return
         if fresh.get("classification") == "REUSE":
-            self.project(fresh, "reuse", quiet=True)
+            self.project(fresh, "reuse")
             self.finish(pr, "reused", fresh.get("reason"))
             return
         claim = self.store.claim(pr)
@@ -1267,7 +1280,7 @@ class Supervisor:
 
     def admit_snapshot(self):
         for candidate in self.config["candidates"]:
-            self.project(candidate, "discovery", quiet=True)
+            self.project(candidate, "discovery")
             self.states[candidate["pr"]] = {
                 "review": "pending",
                 "phase": self.config.get("active_phase", "initial"),
@@ -1394,7 +1407,7 @@ class Supervisor:
             os.environ["REVIEW_GUARDIAN_PLAIN"] = "1" if self.config["plain_guardians"] else "0"
             atomic(self.directory / "startup-runs.json", self.startup_runs)
             for candidate in self.config["candidates"]:
-                self.project(candidate, "discovery", quiet=True)
+                self.project(candidate, "discovery")
                 self.states.setdefault(
                     candidate["pr"],
                     {"review": "pending", "publish": {}, "comment": "owed", "board": "owed"},
