@@ -484,6 +484,41 @@ class ReviewStore(unittest.TestCase):
         self.assertFalse(rows[PR]["removed"])
         self.assertEqual(rows[PR]["ticket"], 12)
 
+    def test_an_outcome_replaces_its_own_discovery_in_either_order(self):
+        page = "page:end/progress"
+        merge = lambda **patch: self.store.merge_membership(page, {PR: dict(removed=False, **patch)})[PR]
+        merge(ticket=5, progress="discovery")
+        self.assertEqual(merge(ticket=5, progress="deferred")["progress"], "deferred")
+        # discovery of the same observation merged late does not regress it
+        self.assertEqual(merge(ticket=5, progress="discovery")["progress"], "deferred")
+        # a refresh of the same observation is an earlier step than its outcome
+        self.assertEqual(merge(ticket=5, progress="refresh-5")["progress"], "deferred")
+        # an older observation still changes nothing, whatever its step
+        row = merge(ticket=4, progress="dropped", ci={"state": "failure"})
+        self.assertEqual((row["ticket"], row["progress"], row.get("ci")), (5, "deferred", None))
+        # equal ticket moves progress only, never removal
+        self.assertFalse(self.store.merge_membership(page, {PR: {"ticket": 5, "removed": True,
+                                                                 "progress": "x"}})[PR]["removed"])
+
+    def test_rediscovery_keeps_the_last_outcome_of_a_listed_row(self):
+        page = "page:end/progress"
+        merge = lambda **patch: self.store.merge_membership(page, {PR: patch})[PR]
+        merge(ticket=1, removed=False, progress="deferred")
+        row = merge(ticket=2, removed=False, progress="discovery", ci={"state": "success"})
+        self.assertEqual((row["ticket"], row["progress"], row["ci"]["state"]), (2, "deferred", "success"))
+        self.assertEqual(merge(ticket=3, removed=False, progress="refresh-3")["progress"], "refresh-3")
+        # a different outcome of the new observation replaces the kept one,
+        # merged after its discovery or before it
+        for first, second in (("discovery", "reused"), ("reused", "discovery")):
+            page = "page:end/order-" + first
+            merge = lambda **patch: self.store.merge_membership(page, {PR: patch})[PR]
+            merge(ticket=1, removed=False, progress="deferred")
+            merge(ticket=2, removed=False, progress=first)
+            self.assertEqual(merge(ticket=2, removed=False, progress=second)["progress"], "reused")
+        # a row that was removed starts again from discovery
+        merge(ticket=4, removed=True, progress="dropped")
+        self.assertEqual(merge(ticket=5, removed=False, progress="discovery")["progress"], "discovery")
+
     def test_a_lost_comment_response_is_reconciled_not_reposted(self):
         self.accept()
         self.lock.close()

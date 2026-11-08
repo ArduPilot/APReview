@@ -124,6 +124,18 @@ def delivery_id(pr, generation, kind, target):
     return digest(["delivery-v1", canonical(pr), generation, kind, target])
 
 
+def progress_rank(progress):
+    """Order of the steps of one observation: discovery, then reuse or a
+    refresh, then the outcome."""
+    if progress is None:
+        return -1
+    if progress == "discovery":
+        return 0
+    if progress == "reuse" or str(progress).startswith("refresh-"):
+        return 1
+    return 2
+
+
 def bundle_digest(path):
     def file_digest(path):
         with open(path, "rb") as stream:
@@ -684,9 +696,24 @@ class Store:
                 for field in ("ci", "progress", "unreachable"):
                     if field in patch:
                         row[field] = patch[field]
+                if "progress" in patch:
+                    row["step"] = progress_rank(patch["progress"])
+                    # rediscovery learns nothing about the review: a listed
+                    # row keeps showing its last outcome until the next one
+                    if (patch["progress"] == "discovery" and not old.get("removed")
+                            and progress_rank(old.get("progress")) > 0):
+                        row["progress"] = old["progress"]
+                else:
+                    row.pop("step", None)
                 current = self.current(pr)
                 if not row["removed"] and current:
                     row["generation"] = max(row.get("generation", 0), current["generation"])
+            elif ("ticket" in patch and patch["ticket"] == old["ticket"] and "progress" in patch
+                  and progress_rank(patch["progress"]) > old.get("step", progress_rank(old.get("progress")))):
+                # the same observation, a later step of it (discovery, then
+                # its outcome), in whichever order the two are merged; step
+                # is how far this ticket got, whatever progress it still shows
+                row.update(progress=patch["progress"], step=progress_rank(patch["progress"]))
             if "generation" in patch and not row["removed"]:
                 generation = patch["generation"]
                 accepted = {b["generation"] for b in self.chain(pr)}
