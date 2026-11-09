@@ -12,17 +12,23 @@ generations do not inherit the page.
 import argparse
 import time
 
-from review_lock import canonical, try_lock
+from review_lock import acquire, canonical, try_lock
 from review_store import Store, read
 
 p = argparse.ArgumentParser()
 p.add_argument("--data", required=True)
 p.add_argument("--reason", required=True)
+p.add_argument("--wait", type=float, default=60, help="seconds to wait out maintenance")
 p.add_argument("page", help="page:<endpoint>/<path> the PR is leaving")
 p.add_argument("prs", nargs="+", help="pr:<owner>/<repo>#<n>")
 a = p.parse_args()
 store = Store(a.data)
 page = canonical(a.page)
+# shared, as a controller holds it: GC and the landing migration hold it
+# exclusively and must see no receipt written meanwhile
+maintenance = acquire(store.locks, "maintenance", time.monotonic() + a.wait, shared=True)
+if maintenance is None:
+    raise SystemExit("maintenance in progress; try again later")
 busy = 0
 for pr in map(canonical, a.prs):
     # The counter first: the drain orders PR before page, and the ticket
