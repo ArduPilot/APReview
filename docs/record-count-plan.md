@@ -197,6 +197,11 @@ is excluded, controller delivery included. Then remove the receipt fallback
 (`review_delivery.py:163-190`), add `anchors` to `Store.PAGE_COPY`, slim the
 files and the ledger with `review-slim-receipts.py`, and VACUUM. Dated label
 uploads already write their anchors into the index (`review_delivery.py:306`).
+*As built:* `review-landing-migrate.py` also writes `landing/.migrated` last,
+covering endpoints with no dated label upload before the cutover. The
+render refuses a landing page until either marker exists (no fallback: new
+receipts have no anchors to fall back on). The slim script keeps anchors
+until `landing/.migrated` exists.
 *Check:* measured ledger size, expected ~0.5 GB; a landing page rendered
 after the cutover lists the same labels as before it.
 

@@ -535,33 +535,6 @@ class Store:
     def has_receipt(self, ident):
         return (self.root / "receipts" / (ident + ".json")).exists() or self.receipt_of(ident) is not None
 
-    def receipts(self):
-        """Every receipt, files and ledger; for the rare full scan. An
-        unreadable receipt raises: no scan may take it as absent."""
-        seen = set()
-        for path in (self.root / "receipts").glob("*.json"):
-            record = read(path)
-            if record:
-                seen.add(path.stem)
-                yield record
-        if (self.root / "receipts.db").exists():
-            import sqlite3
-            # in batches by key, which a VACUUM never renumbers: the whole
-            # ledger at once was gigabytes
-            last = ""
-            while True:
-                try:
-                    rows = self.ledger().execute("SELECT id, body FROM receipt WHERE id > ? "
-                                                 "ORDER BY id LIMIT 1000", (last,)).fetchall()
-                except sqlite3.Error as error:
-                    raise OSError("receipt ledger: %s" % error) from error
-                if not rows:
-                    break
-                last = rows[-1][0]
-                for ident, body in rows:
-                    if ident not in seen:
-                        yield json.loads(body)
-
     def compact_receipts(self, older_than, limit=10000, deadline=None):
         """Move receipt files last changed before older_than into the ledger:
         each batch is committed, durably, before its files are removed, so
@@ -609,10 +582,11 @@ class Store:
                 pass
         return len(batch)
 
-    # A publish result carries the whole page's sections and row views: used
-    # by the upload itself, kept in confirmed.json and membership, never read
-    # back from a receipt. Storing them made the ledger grow with every page.
-    PAGE_COPY = ("sections", "views", "consumed")
+    # A publish result carries the whole page's sections, anchors and row
+    # views: used by the upload itself, kept in confirmed.json, membership and
+    # the landing index, never read back from a receipt. Storing them made the
+    # ledger grow with every page.
+    PAGE_COPY = ("sections", "views", "consumed", "anchors")
 
     def receipt(self, entry, state, **details):
         details = {k: v for k, v in details.items() if k not in self.PAGE_COPY}

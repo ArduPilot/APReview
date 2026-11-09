@@ -15,7 +15,7 @@ from review_discovery import LABELS, POST, module
 import review_metrics
 from review_lock import acquire, canonical, region
 from review_render import Renderer, anchor, bundle_at, sha, verify
-from review_store import Store, atomic, create_once, digest, mkdir, read
+from review_store import Store, atomic, digest, mkdir, read
 
 # Line 1 of every comment, verbatim what the command writes today: the tools
 # match "AI-generated" and readers know the sentence.
@@ -99,9 +99,9 @@ class Publication:
         return verify(raw, expected)
 
     def render(self, entry, commit=False):
-        """The page's bytes as the store stands, and the receipts it read.
-        Nothing is saved: a landing page's routes are kept in
-        self.renderer.pending until the page is really published."""
+        """The page's bytes as the store stands. Nothing is saved: a landing
+        page's routes are kept in self.renderer.pending until the page is
+        really published."""
         target = entry["target"]
         endpoint, path = self.endpoint(target)
         retained = (
@@ -112,19 +112,16 @@ class Publication:
         if re.fullmatch(r"DevCallReviews/\d{4}[-_]\d{2}[-_]\d{2}/devcall_pr_reviews.html", path):
             date = path.split("/")[1]
             pages = {}
-            revisions = {}
-            consumed = []
             # Each dated label page records its latest upload in
-            # landing/<endpoint>/<date>/<label>.json, written under its own
-            # page lock as it is published: a handful of reads instead of
-            # parsing every receipt in the store. The index is trusted only
-            # once marked complete; until then the receipts are scanned and
-            # any label missing from the index is backfilled, never
-            # overwriting a fresher entry, and the mark written.
+            # landing/<endpoint>/<date>/<label>.json, under its own page lock
+            # as it is published. review-landing-migrate.py backfilled every
+            # earlier date from the receipts, so once it has run the index is
+            # the whole story; before that this page waits.
             endpoint_name = canonical(target)[5:].split("/", 1)[0]
-            index = self.store.root / "landing" / endpoint_name / date
-            complete = (index / ".complete").exists()
-            indexed = {}
+            landing = self.store.root / "landing"
+            if not ((landing / endpoint_name / ".migrated").exists() or (landing / ".migrated").exists()):
+                raise ValueError("landing: index not migrated; run review-landing-migrate.py")
+            index = landing / endpoint_name / date
             for record in sorted(index.glob("*.json")) if index.is_dir() else ():
                 try:
                     page = read(record)
@@ -140,73 +137,12 @@ class Publication:
                     # this page waits for repair; the drain carries on
                     raise ValueError("landing: damaged index record %s" % record)
                 if page.get("state") in ("published", "superseded"):
-                    indexed[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
-                                                anchors=page.get("anchors", []), target=page["target"])
-                    revisions[record.stem] = page.get("revision", 0)
-            pages.update(indexed)
-            indexed_revisions = dict(revisions)
-            scan = not complete
-            # an unreadable receipt raises: this page waits, rather than being
-            # published without a label the receipt may hold
-            for receipt in (self.store.receipts() if scan else ()):
-                # only page receipts have page keys: a board receipt targets a
-                # project id, which canonical() rejects and must not end the scan.
-                # A receipt that may be one of this page's labels but is damaged
-                # raises: the page waits rather than going out without it.
-                if not (isinstance(receipt, dict) and isinstance(receipt.get("target"), str)):
-                    raise ValueError("landing: a receipt is not a record")
-                where = receipt["target"]
-                try:
-                    where = canonical(where) if where.startswith("page:") else ""
-                except ValueError:
-                    where = ""
-                match = re.fullmatch(
-                    r"page:(" + re.escape(endpoint_name) + r")/DevCallReviews/" + date
-                    + r"/([^/]+)/devcall_pr_reviews.html",
-                    where,
-                )
-                if match and not (isinstance(receipt.get("state"), str) and isinstance(receipt.get("id"), str)
-                                  and isinstance(receipt.get("revision", 0), int)
-                                  and isinstance(receipt.get("anchors", []), list)
-                                  and all(isinstance(a, str) for a in receipt.get("anchors", []))):
-                    raise ValueError("landing: damaged receipt %s for %s" % (receipt.get("id"), match[2]))
-                if match and receipt.get("state") in ("published", "superseded"):
-                    # every label publish this render saw; the page then shows
-                    # that label at this revision or a later one
-                    consumed.append(receipt.get("id"))
-                if (
-                    match
-                    and receipt.get("state") in ("published", "superseded")
-                    and receipt.get("revision", 0) >= revisions.get(match[2], -1)
-                ):
-                    revisions[match[2]] = receipt.get("revision", 0)
-                    pages[match[2]] = dict(
-                        path=match[2] + "/devcall_pr_reviews.html",
-                        anchors=receipt.get("anchors", []),
-                        target=receipt["target"],
-                    )
-            if scan:
-                # The scan took, per label, whichever of index entry and receipt
-                # has the higher revision. Missing labels are backfilled, never
-                # replacing an entry; the index is marked complete only when no
-                # receipt is newer than its entry, which happens only if a crash
-                # cut off an index write, and the label's next upload repairs.
-                mkdir(index)
-                for label, page in pages.items():
-                    if label not in indexed:
-                        create_once(index / (label + ".json"), dict(
-                            target=canonical(page["target"]), state="published",
-                            revision=revisions.get(label, 0), anchors=page["anchors"]))
-                if all(revisions.get(label, 0) <= indexed_revisions.get(label, revisions.get(label, 0))
-                       for label in pages):
-                    atomic(index / ".complete", True)
+                    pages[record.stem] = dict(path=record.stem + "/devcall_pr_reviews.html",
+                                              anchors=page.get("anchors", []), target=page["target"])
             with review_metrics.timed("local", "render landing"):
-                raw = self.renderer.landing(date, pages, commit=commit)
-        else:
-            consumed = []
-            with review_metrics.timed("local", "render page"):
-                raw = self.renderer.render(target, retained)
-        return raw, consumed
+                return self.renderer.landing(date, pages, commit=commit)
+        with review_metrics.timed("local", "render page"):
+            return self.renderer.render(target, retained)
 
     VERIFY_EVERY = 10
     VERIFY_AGE = 6 * 3600
@@ -231,14 +167,14 @@ class Publication:
         render equal to an upload that is still the latest publication of the
         page proves that upload shows the store's current state. Local only."""
         directory = self.store.root / "pages" / digest(entry["target"])
-        return dict(page_digest=verify(self.render(entry)[0])["page_digest"],
+        return dict(page_digest=verify(self.render(entry))["page_digest"],
                     revision=read(directory / "revision.json", 0),
                     epoch=read(directory / "epoch.json", 0))
 
     def deliver(self, entry, deadline):
         target = entry["target"]
         endpoint, path = self.endpoint(target)
-        raw, consumed = self.render(entry)
+        raw = self.render(entry)
         landing = bool(re.fullmatch(r"DevCallReviews/\d{4}[-_]\d{2}[-_]\d{2}/devcall_pr_reviews.html", path))
         expected = verify(raw)
         directory = self.store.root / "pages" / digest(target)
@@ -298,7 +234,6 @@ class Publication:
             revision=revision,
             anchors=re.findall(r'<section id="([^"]+)"', raw.decode()),
             url=self.url(target),
-            consumed=consumed,
             epoch=epoch,
             # what each row put on the page this upload served
             views=None if landing or entry.get("retained") else self.renderer.views,

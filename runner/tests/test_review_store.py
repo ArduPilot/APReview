@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Replay each durable boundary instead of inferring success from leftover JSON."""
 import copy
+import json
 from pathlib import Path
 import os
 import subprocess
@@ -701,7 +702,6 @@ class ReviewStore(unittest.TestCase):
         for ident, record in before.items():
             self.assertEqual(self.store.receipt_of(ident), record)
             self.assertTrue(Store(self.root).has_receipt(ident))
-        self.assertEqual(sorted(r["id"] for r in self.store.receipts()), files)
         # the time each was written survives, for the followup window
         for ident in files:
             self.assertIsNotNone(self.store.receipt_time(ident))
@@ -710,15 +710,28 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(list((self.root / "outbox").glob("*.json")), [])
         self.assertFalse(self.store.has_receipt("never-written"))
 
-    def test_a_full_scan_reads_the_ledger_in_batches(self):
+    def test_the_landing_migration_reads_the_ledger_in_batches(self):
+        def label(name):
+            return "page:end/DevCallReviews/2026_10_01/%s/devcall_pr_reviews.html" % name
+        def body(n, name, revision):
+            return json.dumps(dict(id="r%05d" % n, pr=PR, generation="op", kind="publish", target=label(name),
+                                   state="published", revision=revision, anchors=["pr-%d" % n]))
         db = self.store.ledger()
         with db:
             db.executemany("INSERT INTO receipt (id, body, written) VALUES (?, ?, 0)",
-                           [("r%05d" % n, '{"id": "r%05d"}' % n, ) for n in range(2500)])
-        atomic(self.root / "receipts" / "r00007.json", {"id": "r00007", "file": True})
-        seen = [r["id"] for r in self.store.receipts()]
-        self.assertEqual(sorted(seen), ["r%05d" % n for n in range(2500)])
-        self.assertEqual(seen[0], "r00007")         # the file wins over its ledger row
+                           [("r%05d" % n, '{"id": "r%05d"}' % n) for n in range(2500)
+                            if n not in (5, 1500, 2400)])
+            db.executemany("INSERT INTO receipt (id, body, written) VALUES (?, ?, ?)",
+                           [("r00005", body(5, "A", 1), 0), ("r01500", body(1500, "A", 3), 0),
+                            ("r02400", body(2400, "B", 1), 0)])
+        # the file wins over its ledger row
+        atomic(self.root / "receipts" / "r02400.json", json.loads(body(2400, "B", 2)))
+        out = subprocess.run([sys.executable, str(BIN / "review-landing-migrate.py"), "--data", str(self.root)],
+                             capture_output=True, text=True, check=True).stdout
+        self.assertIn("candidates 3 label dates 1 (1 with no index) entries written 2", out)
+        index = self.root / "landing" / "end" / "2026_10_01"
+        self.assertEqual(read(index / "A.json")["anchors"], ["pr-1500"])
+        self.assertEqual(read(index / "B.json")["revision"], 2)
 
     def test_a_receipt_keeps_no_copy_of_the_page(self):
         entry = dict(id="pub", pr=PR, generation=1, kind="publish", target="page:test/p.html")
@@ -726,9 +739,8 @@ class ReviewStore(unittest.TestCase):
         self.store.receipt(entry, "published", page_digest="d", revision=3, anchors=["a"],
                            sections=[{"pr": PR}], views={PR: {}}, consumed=["x"])
         stored = read(self.root / "receipts" / "pub.json")
-        self.assertEqual(stored["anchors"], ["a"])
         self.assertEqual(stored["revision"], 3)
-        self.assertFalse({"sections", "views", "consumed"} & set(stored))
+        self.assertFalse({"sections", "views", "consumed", "anchors"} & set(stored))
 
     def test_slimming_old_receipts_keeps_their_times(self):
         entry = dict(id="old", pr=PR, generation=1, kind="publish", target="page:test/p.html")
@@ -765,6 +777,14 @@ class ReviewStore(unittest.TestCase):
         self.assertEqual(store.receipt_of("lean")["id"], "lean")
         self.assertEqual(list((self.root / "receipts").glob(".*")), [])
         # a second pass finds nothing to do
+        self.assertIn("ledger 0 files 0", slim())
+        # anchors go once the landing index holds them
+        atomic(self.root / "landing" / ".migrated", dict(at=1))
+        self.assertIn("ledger 2 files 1", slim())
+        store = Store(self.root)
+        for ident, when in (("old", 1000), ("old2", 1000), ("new", 2000)):
+            self.assertEqual(store.receipt_of(ident), dict(entry, id=ident, state="published", page_digest="d"))
+            self.assertEqual(store.receipt_time(ident), when)
         self.assertIn("ledger 0 files 0", slim())
 
     def test_slimming_waits_for_the_collector(self):

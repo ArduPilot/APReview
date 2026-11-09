@@ -1140,99 +1140,221 @@ class LocalPublication(unittest.TestCase):
         source.write_bytes(source.read_bytes() + b"<!-- later attempt -->")
         self.assertIsNone(served_copy(self.store, target))
 
+    def migrate(self, *args, check=True):
+        return subprocess.run([sys.executable, str(BIN / "review-landing-migrate.py"), "--data",
+                               str(self.store.root), "--wait", "5", *args],
+                              capture_output=True, text=True, check=check)
+
+    def landing(self, date):
+        return dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
+                    target="page:test/DevCallReviews/%s/devcall_pr_reviews.html" % date)
+
     def test_a_landing_page_is_built_from_label_pages_confirmed_uploads(self):
+        self.migrate()                          # the cutover, before this date existed
         for label in ("DevCallTopic", "AIReview"):
             target = "page:test/DevCallReviews/2026_10_04/%s/devcall_pr_reviews.html" % label
             self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
             with try_lock(self.store.locks, target):
                 self.publisher.deliver(dict(id="pub" + label, pr=PR, generation="op", kind="publish",
                                             target=target, gate="page"), time.monotonic() + 10)
-        landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
-                       target="page:test/DevCallReviews/2026_10_04/devcall_pr_reviews.html")
-        first, _ = self.publisher.render(landing)        # a date's first landing scans once
-        real = Path.glob
+        index = self.store.root / "landing" / "test" / "2026_10_04"
+        self.assertFalse((index / ".complete").exists())
+        # the date's very first render reads only its index
+        real_glob, real_scandir = Path.glob, os.scandir
         def glob(path, pattern):
             if path.name == "receipts":
                 raise AssertionError("landing scanned every receipt")
-            return real(path, pattern)
-        with patch.object(Path, "glob", glob):
-            raw, _ = self.publisher.render(landing)
+            return real_glob(path, pattern)
+        def scandir(path="."):
+            if str(path).endswith("receipts"):
+                raise AssertionError("landing scanned every receipt")
+            return real_scandir(path)
+        def ledger(store):
+            raise AssertionError("landing read the ledger")
+        with patch.object(Path, "glob", glob), patch("os.scandir", scandir), patch.object(Store, "ledger", ledger):
+            raw = self.publisher.render(self.landing("2026_10_04"))
         body = raw.decode()
         self.assertIn("AIReview/devcall_pr_reviews.html", body)
         self.assertIn("DevCallTopic", body)
-        self.assertEqual(raw, first)
 
-    def test_a_landing_index_started_by_one_label_keeps_the_older_ones(self):
+    def test_a_landing_page_waits_for_the_migration(self):
+        with self.assertRaisesRegex(ValueError, "not migrated"):
+            self.publisher.render(self.landing("2026_10_04"))
+        # an endpoint with nothing to migrate is covered by the root marker
+        atomic(self.store.root / "landing" / ".migrated", dict(at=1))
+        self.publisher.render(self.landing("2026_10_04"))
+
+    def test_the_migration_backfills_a_date_known_only_by_receipts(self):
         # labels published before the index existed are known only by their
-        # receipts: the first index entry must not hide them
+        # receipts, which kept their anchors then
         old = "page:test/DevCallReviews/2026_10_06/DevCallTopic/devcall_pr_reviews.html"
-        self.store.receipt(dict(id="old", pr=PR, generation=1, kind="publish", target=old),
-                           "published", revision=1, anchors=["pr-x"])
-        # receipts whose targets are not pages (a board's project id) are in
-        # the same scan and must not end it
+        atomic(self.store.root / "receipts" / "old.json",
+               dict(id="old", pr=PR, generation=1, kind="publish", target=old, state="published",
+                    revision=1, anchors=["pr-x"]))
+        # a page retired before it was ever uploaded: no revision, no anchors
+        gone = "page:test/DevCallReviews/2026_10_06/Gone/devcall_pr_reviews.html"
+        atomic(self.store.root / "receipts" / "gone.json",
+               dict(id="gone", pr=PR, generation=1, kind="publish", target=gone, state="superseded",
+                    reason="unreachable", retired_at=1))
+        # receipts whose targets are not pages (a board's project id) must not end the scan
         self.store.receipt(dict(id="b1", pr=PR, generation=1, kind="board", target="PVT_kwDOARFvZ84BktQT"),
                            "synced")
+        self.store.compact_receipts(time.time() + 60)
+        index = self.store.root / "landing" / "test" / "2026_10_06"
+        self.assertFalse(index.exists())
+        self.assertIn("label dates 1 (1 with no index) entries written 2 dates marked 1 endpoints 1 "
+                      "blocked 0", self.migrate("--dry-run").stdout)
+        self.assertFalse((self.store.root / "landing").exists())
+        self.assertIn("entries written 2 dates marked 1", self.migrate().stdout)
+        self.assertEqual(read(index / "Gone.json"), dict(target=gone, state="superseded", revision=0, anchors=[]))
+        self.assertEqual(read(index / "DevCallTopic.json"),
+                         dict(target=old, state="published", revision=1, anchors=["pr-x"]))
+        self.assertTrue((index / ".complete").exists())
+        self.assertTrue((self.store.root / "landing" / "test" / ".migrated").exists())
+        self.assertTrue((self.store.root / "landing" / ".migrated").exists())
+        # a label uploaded after the cutover joins it
         new = "page:test/DevCallReviews/2026_10_06/AIReview/devcall_pr_reviews.html"
         self.store.merge_membership(new, {PR: dict(ticket=1, removed=False, generation=1)})
         with try_lock(self.store.locks, new):
             self.publisher.deliver(dict(id="pubn", pr=PR, generation="op", kind="publish",
                                         target=new, gate="page"), time.monotonic() + 10)
-        landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
-                       target="page:test/DevCallReviews/2026_10_06/devcall_pr_reviews.html")
-        for _ in range(2):                   # before and after the index is marked complete
-            body = self.publisher.render(landing)[0].decode()
-            self.assertIn("DevCallTopic", body)
-            self.assertIn("AIReview", body)
+        body = self.publisher.render(self.landing("2026_10_06")).decode()
+        self.assertIn("DevCallTopic", body)
+        self.assertIn("pr-x", body)
+        self.assertIn("AIReview", body)
 
-    def test_a_newer_receipt_beats_a_stale_index_entry_and_holds_the_mark_back(self):
+    def test_the_migration_is_idempotent_and_keeps_the_newest_entry(self):
         label = "page:test/DevCallReviews/2026_10_07/DevCallEU/devcall_pr_reviews.html"
         index = self.store.root / "landing" / "test" / "2026_10_07"
         atomic(index / "DevCallEU.json", dict(target=label, state="published", revision=1, anchors=["pr-old"]))
-        self.store.receipt(dict(id="r2", pr=PR, generation=1, kind="publish", target=label),
-                           "published", revision=2, anchors=["pr-new"])
-        landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
-                       target="page:test/DevCallReviews/2026_10_07/devcall_pr_reviews.html")
-        body = self.publisher.render(landing)[0].decode()
+        atomic(self.store.root / "receipts" / "r2.json",
+               dict(id="r2", pr=PR, generation=1, kind="publish", target=label, state="published",
+                    revision=2, anchors=["pr-new"]))
+        atomic(self.store.root / "receipts" / "r1.json",
+               dict(id="r1", pr=PR, generation=1, kind="publish", target=label, state="published",
+                    revision=1, anchors=["pr-old"]))
+        # an entry newer than every receipt (its receipt not yet written) stays
+        other = "page:test/DevCallReviews/2026_10_07/AIReview/devcall_pr_reviews.html"
+        atomic(index / "AIReview.json", dict(target=other, state="published", revision=5, anchors=["pr-5"]))
+        atomic(self.store.root / "receipts" / "r4.json",
+               dict(id="r4", pr=PR, generation=1, kind="publish", target=other, state="published",
+                    revision=4, anchors=["pr-4"]))
+        self.assertIn("entries written 1 dates marked 1", self.migrate().stdout)
+        self.assertEqual(read(index / "DevCallEU.json")["anchors"], ["pr-new"])
+        self.assertEqual(read(index / "AIReview.json")["anchors"], ["pr-5"])
+        cutover = read(self.store.root / "landing" / ".migrated")
+        before = {p.name: p.read_bytes() for p in index.iterdir()}
+        self.assertIn("entries written 0 dates marked 0", self.migrate().stdout)
+        self.assertEqual({p.name: p.read_bytes() for p in index.iterdir()}, before)
+        self.assertEqual(read(self.store.root / "landing" / ".migrated"), cutover)
+        body = self.publisher.render(self.landing("2026_10_07")).decode()
         self.assertIn("pr-new", body)
         self.assertNotIn("pr-old", body)
-        self.assertFalse((index / ".complete").exists())     # a stale entry keeps the scan on
-        atomic(index / "DevCallEU.json", dict(target=label, state="published", revision=2, anchors=["pr-new"]))
-        self.publisher.render(landing)
-        self.assertTrue((index / ".complete").exists())
 
-    def test_a_damaged_landing_record_holds_only_that_page(self):
-        index = self.store.root / "landing" / "test" / "2026_10_08"
-        index.mkdir(parents=True)
-        atomic(index / ".complete", True)
-        (self.store.root / "landing" / "2026_10_08.json").write_text("[]")
-        landing0 = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
-                        target="page:test/DevCallReviews/2026_10_08/devcall_pr_reviews.html")
-        with self.assertRaises(ValueError):                       # route history damaged
-            self.publisher.render(landing0)
-        (self.store.root / "landing" / "2026_10_08.json").write_text("{}")
-        landing = dict(id="land", pr=PR, generation="op", kind="publish", gate="page", landing=True,
-                       target="page:test/DevCallReviews/2026_10_08/devcall_pr_reviews.html")
-        for damage in ("{not json", "[1]", '{"target": "page:x", "revision": 1}'):
-            (index / "Broken.json").write_text(damage)
-            with self.assertRaises(ValueError):
-                self.publisher.render(landing)
-        (index / "Broken.json").unlink()
-        (index / ".complete").unlink()
+    def test_the_migration_trusts_only_uploads_and_whole_entries(self):
+        def label(name):
+            return "page:test/DevCallReviews/2026_10_09/%s/devcall_pr_reviews.html" % name
+        def receipt(ident, name, **details):
+            atomic(self.store.root / "receipts" / (ident + ".json"),
+                   dict(dict(id=ident, pr=PR, generation="op", kind="publish", target=label(name),
+                             state="published", revision=1, anchors=["pr-" + ident]), **details))
+        index = self.store.root / "landing" / "test" / "2026_10_09"
+        # a projection shares the label's target, but nothing was uploaded
+        atomic(self.store.root / "receipts" / "proj.json",
+               dict(id="proj", pr=PR, generation="op", kind="projection", target=label("Projected"),
+                    state="published"))
+        # an entry missing its anchors, or in no shown state, is not as good as a receipt
+        receipt("a", "A")
+        atomic(index / "A.json", dict(target=label("A"), state="published", revision=1))
+        receipt("b", "B")
+        atomic(index / "B.json", dict(target=label("B"), state="invalid", revision=1, anchors=["pr-b"]))
+        # an annotation uploads the whole page too, here after the publish
+        receipt("c1", "C")
+        receipt("c2", "C", kind="annotation", revision=2)
+        self.assertIn("entries written 3", self.migrate().stdout)
+        self.assertEqual(read(index / "C.json")["anchors"], ["pr-c2"])
+        self.assertFalse((index / "Projected.json").exists())
+        self.assertEqual(read(index / "A.json")["anchors"], ["pr-a"])
+        self.assertEqual(read(index / "B.json")["state"], "published")
+
+    def test_the_migration_refuses_what_it_cannot_read(self):
+        label = "page:test/DevCallReviews/2026_10_10/A/devcall_pr_reviews.html"
+        good = dict(id="a", pr=PR, generation="op", kind="publish", target=label, state="published",
+                    revision=1, anchors=["pr-a"])
+        # an upload's receipt without anchors cannot say what the page held
+        atomic(self.store.root / "receipts" / "a.json", {k: v for k, v in good.items() if k != "anchors"})
+        result = self.migrate(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("no anchors", result.stderr)
+        # a damaged file may hide a good ledger row
+        atomic(self.store.root / "receipts" / "a.json", good)
+        self.store.compact_receipts(time.time() + 60)
+        (self.store.root / "receipts" / "a.json").write_text("{")
+        result = self.migrate(check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unreadable receipt a", result.stderr)
+        for shadow in ("null", "{}", '{"id": "a"}'):
+            (self.store.root / "receipts" / "a.json").write_text(shadow)
+            result = self.migrate(check=False)
+            self.assertIn("malformed receipt a", result.stderr)
+        (self.store.root / "receipts" / "a.json").unlink()
+        atomic(self.store.root / "receipts" / "x.json",
+               dict(good, id="x", target="page:test/DevCallReviews/../2026_10_10/A/devcall_pr_reviews.html"))
+        result = self.migrate(check=False)
+        self.assertIn("damaged target in receipt x", result.stderr)
+        self.assertFalse((self.store.root / "landing" / ".migrated").exists())
+        (self.store.root / "receipts" / "x.json").unlink()
+        self.migrate()
+        self.assertEqual(read(self.store.root / "landing" / "test" / "2026_10_10" / "A.json")["anchors"], ["pr-a"])
+
+    def test_the_migration_waits_for_every_delivery_writer(self):
+        import fcntl
+        with open(self.store.root / "drain.lock", "a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            result = self.migrate("--wait", "1", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("drain.lock busy", result.stderr)
+        with try_lock(self.store.locks, "maintenance", shared=True):     # a running controller
+            result = self.migrate("--wait", "1", check=False)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("maintenance", result.stderr)
+        self.assertFalse((self.store.root / "landing" / ".migrated").exists())
+        self.migrate()
+        self.assertTrue((self.store.root / "landing" / ".migrated").exists())
+        # review-retire.py writes receipts, so it waits for the migration too
+        with try_lock(self.store.locks, "maintenance"):
+            result = subprocess.run([sys.executable, str(BIN / "review-retire.py"), "--data", str(self.store.root),
+                                     "--wait", "1", "--reason", "gone", "page:test/x.html", PR],
+                                    capture_output=True, text=True, timeout=120)
+        self.assertIn("maintenance in progress", result.stderr)
+
+    def test_a_damaged_receipt_or_landing_record_holds_its_page(self):
         label = "page:test/DevCallReviews/2026_10_08/Label/devcall_pr_reviews.html"
-        for details in (dict(anchors=[17]), dict(revision="3")):
-            self.store.receipt(dict(id="label", pr=PR, generation="op", kind="publish", target=label),
-                               "published", **details)
-            with self.assertRaises(ValueError):
-                self.publisher.render(landing)
-        atomic(self.store.root / "receipts" / "label.json",
-               dict(id="label", pr=PR, generation="op", kind="publish", target=label, revision=1))
-        with self.assertRaises(ValueError):                       # no state
-            self.publisher.render(landing)
+        for details, error in ((dict(anchors=[17]), "damaged receipt label"),
+                               (dict(revision="3"), "damaged receipt label"),
+                               (dict(state=None), "malformed receipt label")):
+            atomic(self.store.root / "receipts" / "label.json",
+                   dict(dict(id="label", pr=PR, generation="op", kind="publish", target=label,
+                             state="published", revision=1, anchors=[]), **details))
+            result = self.migrate(check=False)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn(error, result.stderr)
+            self.assertFalse((self.store.root / "landing" / ".migrated").exists())
         atomic(self.store.root / "receipts" / "label.json",
                dict(id="label", pr=PR, generation="op", kind="publish", target=label, state="published",
                     revision=1, anchors=[]))
-        self.store.receipt(dict(id="board", pr=PR, generation=1, kind="board", target="PVT_x"), "synced")
-        self.publisher.render(landing)                            # a board receipt is not damage
+        self.migrate()
+        index = self.store.root / "landing" / "test" / "2026_10_08"
+        (self.store.root / "landing" / "2026_10_08.json").write_text("[]")
+        with self.assertRaises(ValueError):                       # route history damaged
+            self.publisher.render(self.landing("2026_10_08"))
+        (self.store.root / "landing" / "2026_10_08.json").write_text("{}")
+        for damage in ("{not json", "[1]", '{"target": "page:x", "revision": 1}'):
+            (index / "Broken.json").write_text(damage)
+            with self.assertRaises(ValueError):
+                self.publisher.render(self.landing("2026_10_08"))
+        (index / "Broken.json").unlink()
+        self.publisher.render(self.landing("2026_10_08"))
 
     def test_a_landing_page_includes_a_label_outside_the_standard_three(self):
         target = "page:test/DevCallReviews/2026_10_05/CustomLabel/devcall_pr_reviews.html"
@@ -1240,9 +1362,8 @@ class LocalPublication(unittest.TestCase):
         with try_lock(self.store.locks, target):
             self.publisher.deliver(dict(id="pubc", pr=PR, generation="op", kind="publish",
                                         target=target, gate="page"), time.monotonic() + 10)
-        raw, _ = self.publisher.render(dict(id="land", pr=PR, generation="op", kind="publish", gate="page",
-                                            landing=True,
-                                            target="page:test/DevCallReviews/2026_10_05/devcall_pr_reviews.html"))
+        atomic(self.store.root / "landing" / ".migrated", dict(at=1))
+        raw = self.publisher.render(self.landing("2026_10_05"))
         self.assertIn("CustomLabel", raw.decode())
 
     def test_publication_uses_frozen_rsync_auth_options(self):
