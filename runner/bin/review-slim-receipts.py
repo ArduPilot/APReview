@@ -3,7 +3,8 @@
 Store.receipt stopped keeping them, in files and the ledger, keeping each
 receipt's write time. Safe to rerun, and to run beside the drain: it holds
 the collector lock, so compaction cannot move a receipt from under its
-rewrite, and the drain never rewrites a receipt.
+rewrite, and the drain never rewrites a receipt. Anchors are kept until
+review-landing-migrate.py has copied them into the landing index.
 
 --vacuum then gives the freed ledger space back to the disk; it needs free
 space about the size of the slimmed ledger.
@@ -28,6 +29,9 @@ if a.batch < 1:
     p.error("--batch must be at least 1")
 store = Store(a.data)
 drop = Store.PAGE_COPY
+if not (store.root / "landing" / ".migrated").exists():
+    drop = tuple(k for k in drop if k != "anchors")
+    print("keeping anchors: run review-landing-migrate.py first", file=sys.stderr)
 
 os.makedirs(store.root / "gc", exist_ok=True)
 collector = open(store.root / "gc" / "collector.lock", "a")
