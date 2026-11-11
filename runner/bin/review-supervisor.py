@@ -49,6 +49,15 @@ DISCOVERY_RETRY = 60
 # attempt errors that mean the payload never started
 STARVED = ("account deadline", "permit deadline")
 
+# Deferrals that are the PR's own failure: later runs back off from it while
+# its head is unchanged, 1 h after the first, doubling to a day. A PR due at a
+# dev call waits at most an hour, so a transient failure is still retried in
+# time for the call.
+FAILED = ("pass failed after retry", "payload cleanup blocked")
+FAILURE_BACKOFF = 3600
+FAILURE_BACKOFF_CAP = 86400
+FAILURE_BACKOFF_CALL = 3600
+
 WALL = {"primary": 5400, "cold": 1800, "validation": 1800, "reconciliation": 2700}
 
 
@@ -542,7 +551,11 @@ class Supervisor:
         # a deferral, with or without a claim, is work still owed: it keeps
         # the PR in the followup window until it is settled
         if review == "deferred":
-            self.store.mark_pending(pr, reason or "deferred")
+            head = (candidate or {}).get("head")
+            if reason in FAILED and head:
+                self.store.mark_pending(pr, reason, failed_head=head)
+            else:
+                self.store.mark_pending(pr, reason or "deferred")
         elif review in ("accepted", "reused") or (review == "dropped" and reason != "label removed"):
             # a label run dropping a PR whose label went does not settle a
             # followup review it may still owe
@@ -628,6 +641,20 @@ class Supervisor:
         except OSError:
             return False
         return age < hours * 3600 and not self.call_soon(candidate)
+
+    def backing_off(self, pr, candidate):
+        """(until, failures) while a PR whose passes failed on this head
+        backs off, else None. A PR asked for by name never waits."""
+        if candidate.get("mode", self.config["mode"]) == "pr":
+            return None
+        record = self.store.failures(pr)
+        if not record or record["head"] != candidate.get("head"):
+            return None
+        wait = min(FAILURE_BACKOFF_CAP, FAILURE_BACKOFF * 2 ** min(record["failures"] - 1, 32))
+        if self.call_soon(candidate):
+            wait = min(wait, FAILURE_BACKOFF_CALL)
+        until = record["failed_at"] + wait
+        return (until, record["failures"]) if time.time() < until else None
 
     @staticmethod
     def call_soon(candidate):
@@ -769,6 +796,18 @@ class Supervisor:
         if soon:
             # pushes come in bursts: one review after the interval covers them all
             self.finish(pr, "deferred", "re-review interval")
+            return
+        try:
+            backoff = None if continuing else self.backing_off(pr, fresh)
+        except Exception as error:      # unreadable records: review it, do not wait
+            print("admission: %s backoff check failed: %s" % (pr, str(error)[:200]), file=sys.stderr)
+            backoff = None
+        if backoff:
+            until, failures = backoff
+            when = time.localtime(until)
+            fmt = "%H:%M" if when[:3] == time.localtime()[:3] else "%a %H:%M"
+            self.finish(pr, "deferred", "failure backoff until %s, %d failure%s"
+                        % (time.strftime(fmt, when), failures, "" if failures == 1 else "s"))
             return
         inputs = self.inputs(fresh)
         if (

@@ -152,6 +152,32 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertEqual(sum(j["kind"] == "cold" for j in jobs), 1)
         self.assertEqual({j["generation"] for j in jobs}, {1})
 
+    def test_failed_passes_back_off_later_runs_until_the_interval_passes(self):
+        failing = candidate(stub={"primary": {"exit": 4}})
+        child, directory, log = self.start("fail1", [failing])
+        summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"][PR]["reason"], "pass failed after retry")
+        record = self.store.failures(PR)
+        self.assertEqual((record["head"], record["failures"]), ("a" * 40, 1))
+        generation = self.store.claim(PR)["generation"]
+        # within the interval: deferred before any claim, no passes started
+        child, directory, log = self.start("fail2", [failing])
+        summary = self.finish(child, directory, log)
+        self.assertTrue(summary["prs"][PR]["reason"].startswith("failure backoff until "), summary["prs"][PR])
+        self.assertTrue(summary["prs"][PR]["reason"].endswith(", 1 failure"))
+        self.assertFalse(list((directory / "attempts").glob("*/job.json")))
+        self.assertEqual(self.store.claim(PR)["generation"], generation)
+        self.assertEqual(self.store.failures(PR)["failures"], 1)                 # the backoff is not a failure
+        self.assertTrue(self.store.in_followup_window(PR, time.time() + 60))
+        # after it: admitted, and an accepted review clears the record
+        pending = self.store.pr_dir(PR) / "pending.json"
+        atomic(pending, dict(read(pending), failed_at=time.time() - 3700))
+        child, directory, log = self.start("fail3", [candidate()])
+        summary = self.finish(child, directory, log)
+        self.assertEqual(summary["prs"][PR]["review"], "accepted", log.read_text())
+        self.assertIsNone(self.store.failures(PR))
+        self.assertFalse(pending.exists())
+
     def test_a_filtered_codex_pass_is_retried_on_the_fallback_model(self):
         child, directory, log = self.start("refuse", [candidate(stub={"cold": [{"refuse": True}, {}]})])
         summary = self.finish(child, directory, log)
@@ -184,6 +210,8 @@ class ReviewSupervisor(unittest.TestCase):
         child, directory, log = self.start("first", [candidate(stub={"reconciliation": {"invalid": True}})])
         summary = self.finish(child, directory, log)
         self.assertEqual(summary["prs"][PR]["review"], "deferred")
+        pending = self.store.pr_dir(PR) / "pending.json"
+        atomic(pending, dict(read(pending), failed_at=time.time() - 3700))     # backoff over
         child, again, log = self.start("second", [candidate()])
         summary = self.finish(child, again, log)
         self.assertEqual(summary["prs"][PR]["review"], "accepted", log.read_text())
@@ -901,6 +929,107 @@ class ReviewSupervisor(unittest.TestCase):
         self.assertFalse(supervisor.too_soon(PR, c))                   # an imported review
         supervisor.config["configuration"]["rereview_hours"] = 0
         self.assertFalse(supervisor.too_soon(PR, c))
+
+    def test_the_failure_backoff_doubles_caps_and_resets(self):
+        import datetime
+        from zoneinfo import ZoneInfo
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = self.store
+        supervisor.config = {"mode": "all", "configuration": {}}
+        c = dict(candidate(), pr=PR, destinations=[])
+        pending = self.store.pr_dir(PR) / "pending.json"
+        def failed(count, ago):
+            atomic(pending, dict(at=0, reason="x", head="a" * 40, failures=count, failed_at=time.time() - ago))
+        self.assertIsNone(supervisor.backing_off(PR, c))                  # never failed
+        for count, wait in ((1, 3600), (2, 7200), (3, 14400), (5, 57600), (6, 86400), (40, 86400)):
+            failed(count, wait - 60)
+            self.assertEqual(supervisor.backing_off(PR, c)[1], count)
+            self.assertAlmostEqual(supervisor.backing_off(PR, c)[0], time.time() + 60, delta=5)
+            failed(count, wait + 60)
+            self.assertIsNone(supervisor.backing_off(PR, c), count)    # interval passed
+        failed(3, 600)
+        self.assertIsNotNone(supervisor.backing_off(PR, c))
+        self.assertIsNone(supervisor.backing_off(PR, dict(c, head="d" * 40)))    # a new head
+        self.assertIsNone(supervisor.backing_off(PR, dict(c, mode="pr")))        # asked for by name
+        self.assertIsNotNone(supervisor.backing_off(PR, dict(c, mode="AIReview")))
+        # due at a call today or tomorrow: an hour at most
+        today = datetime.datetime.now(ZoneInfo("Australia/Canberra")).date()
+        call = dict(c, destinations=["page:review/DevCallReviews/%s/DevCallTopic/devcall_pr_reviews.html"
+                                     % (today + datetime.timedelta(days=1)).strftime("%Y_%m_%d")])
+        failed(6, 1800)
+        self.assertAlmostEqual(supervisor.backing_off(PR, call)[0], time.time() + 1800, delta=5)
+        failed(6, 3700)
+        self.assertIsNone(supervisor.backing_off(PR, call))
+        self.assertIsNotNone(supervisor.backing_off(PR, c))
+        # a new head's failure starts the count again
+        supervisor.owned, supervisor.states = {}, {PR: {"review": "claimed", "candidate": dict(c, head="d" * 40)}}
+        supervisor.config["candidates"] = []
+        supervisor.project = Mock()
+        supervisor.finish(PR, "deferred", "pass failed after retry")
+        self.assertEqual((self.store.failures(PR)["head"], self.store.failures(PR)["failures"]), ("d" * 40, 1))
+        supervisor.finish(PR, "deferred", "payload cleanup blocked")
+        self.assertEqual(self.store.failures(PR)["failures"], 2)
+
+    def test_only_a_prs_own_failures_count_towards_its_backoff(self):
+        supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
+        supervisor.store = self.store
+        supervisor.config = {"mode": "all", "configuration": {}, "candidates": []}
+        supervisor.owned = {}
+        supervisor.states = {PR: {"review": "claimed", "candidate": dict(candidate(), pr=PR)}}
+        supervisor.project = Mock()
+        for reason in ("quota paused", "aborted", "re-review interval", "ownership transferred",
+                       "node id changed", "stored node id changed", "previous payload not empty"):
+            supervisor.finish(PR, "deferred", reason)
+            self.assertIsNone(self.store.failures(PR), reason)
+        supervisor.finish(PR, "deferred", "pass failed after retry")
+        self.assertEqual(self.store.failures(PR)["failures"], 1)
+        supervisor.finish(PR, "deferred", "quota paused")                 # kept, not counted
+        self.assertEqual(self.store.failures(PR)["failures"], 1)
+        supervisor.finish(PR, "accepted")
+        self.assertIsNone(self.store.failures(PR))
+
+    def test_a_starved_pass_is_not_a_failure(self):
+        supervisor = self._bare_supervisor(time.time() + 3600)
+        supervisor.config["candidates"] = []
+        supervisor.project = Mock()
+        attempts = []
+        for n in range(2):
+            path = self.root / "starved" / str(n)
+            atomic(path / "status.json", dict(state="terminal", empty=True, error=SUPERVISOR.STARVED[n]))
+            attempts.append(str(path))
+        lock = try_lock(self.store.locks, PR)
+        self.addCleanup(lock.close)
+        self.store.allocate(lock, PR, "run", "request", candidate())
+        supervisor.owned[PR] = lock
+        supervisor.states[PR].update(review="claimed", attempts={"primary": attempts})
+        supervisor.account_free = Mock(return_value=False)              # launch nothing
+        supervisor.advance(PR)
+        self.assertEqual(supervisor.states[PR]["review"], "claimed")
+        self.assertIsNone(self.store.failures(PR))
+
+    def test_a_backed_off_pr_is_deferred_before_any_claim(self):
+        supervisor = self._bare_supervisor(time.time() + 3600)
+        supervisor.config.update(mode="all", request="request2", candidates=[])
+        supervisor.project = Mock()
+        supervisor.run_id = str(self.root / "run")
+        c = dict(candidate(), pr=PR, destinations=[])
+        supervisor.discovery = Mock()
+        supervisor.discovery.refresh.side_effect = lambda x: dict(x)
+        self.store.mark_pending(PR, "pass failed after retry", failed_head="a" * 40)
+        self.store.mark_pending(PR, "pass failed after retry", failed_head="a" * 40)
+        supervisor.claim_candidate(c)
+        reason = supervisor.states[PR]["reason"]
+        self.assertEqual(supervisor.states[PR]["review"], "deferred")
+        self.assertRegex(reason, r"^failure backoff until (\w{3} )?\d\d:\d\d, 2 failures$")
+        self.assertIsNone(self.store.claim(PR))                          # no claim, no attempts
+        self.assertNotIn(PR, supervisor.owned)
+        self.assertEqual(self.store.failures(PR)["failures"], 2)
+        # asked for by name, it is claimed
+        supervisor.states[PR] = {"review": "pending"}
+        supervisor.claim_candidate(dict(c, mode="pr"))
+        self.assertEqual(supervisor.states[PR]["review"], "claimed")
+        self.assertIsNotNone(self.store.claim(PR))
+        supervisor.owned.pop(PR).close()
 
     def test_the_loops_own_drain_is_short_while_prs_wait(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
