@@ -1,7 +1,8 @@
 """Promotion is the commit point; indices can always be rebuilt from its chain."""
 import hashlib
 import copy
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -267,13 +268,55 @@ class Store:
             times.append(posted)
         return max(times)
 
-    def mark_pending(self, pr, reason):
+    def mark_pending(self, pr, reason, failed_head=None):
         """A review deferred, perhaps before any claim was made: keeps the PR
-        in the followup window until it is reviewed, reused or dropped."""
-        atomic(self.pr_dir(pr) / "pending.json", dict(at=time.time(), reason=reason))
+        in the followup window until it is reviewed, reused or dropped.
+        failed_head counts a failure of its passes on that head (a new head
+        starts again at one); any other deferral keeps the count."""
+        with self.marker(pr, create=True):
+            record = dict(at=time.time(), reason=reason)
+            old = self.failures(pr)
+            if failed_head:
+                count = old["failures"] + 1 if old and old["head"] == failed_head else 1
+                record.update(head=failed_head, failures=count, failed_at=record["at"])
+            elif old:
+                record.update(old)
+            atomic(self.pr_dir(pr) / "pending.json", record)
+
+    @contextmanager
+    def marker(self, pr, create=False):
+        """Serialises changes to pending.json: discovery and a deferral write
+        it without the PR lock. Locks the PR's directory, adding no file."""
+        directory = self.pr_dir(pr)
+        if create:
+            mkdir(directory)
+        try:
+            fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        except FileNotFoundError:
+            fd = None                   # nothing to clear
+        try:
+            if fd is not None:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def failures(self, pr):
+        """The head, count and time of a PR's last failed passes, or None."""
+        try:
+            record = read(self.pr_dir(pr) / "pending.json")
+        except (ValueError, OSError):
+            return None
+        if (not isinstance(record, dict) or not isinstance(record.get("head"), str)
+                or type(record.get("failures")) is not int or record["failures"] < 1
+                or type(record.get("failed_at")) not in (int, float)):
+            return None
+        return {k: record[k] for k in ("head", "failures", "failed_at")}
 
     def clear_pending(self, pr):
-        unlink(self.pr_dir(pr) / "pending.json")
+        with self.marker(pr):
+            unlink(self.pr_dir(pr) / "pending.json")
 
     def in_followup_window(self, pr, cutoff):
         """False only when we know a PR is done with and old: its last work

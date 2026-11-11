@@ -663,6 +663,52 @@ class ReviewStore(unittest.TestCase):
         atomic(receipt, dict(read(receipt), state="held"))
         self.assertTrue(self.store.in_followup_window(PR, cutoff))
 
+    def test_pass_failures_are_counted_per_head_in_the_pending_marker(self):
+        self.assertIsNone(self.store.failures(PR))
+        self.store.mark_pending(PR, "quota paused")
+        self.assertIsNone(self.store.failures(PR))                  # not a failure of its own
+        self.store.mark_pending(PR, "pass failed after retry", failed_head="a" * 40)
+        first = self.store.failures(PR)
+        self.assertEqual((first["head"], first["failures"]), ("a" * 40, 1))
+        self.store.mark_pending(PR, "pass failed after retry", failed_head="a" * 40)
+        self.assertEqual(self.store.failures(PR)["failures"], 2)
+        # another deferral keeps the count and keeps the PR in the window
+        self.store.mark_pending(PR, "aborted")
+        self.assertEqual(self.store.failures(PR)["failures"], 2)
+        self.assertEqual(read(self.store.pr_dir(PR) / "pending.json")["reason"], "aborted")
+        self.assertTrue(self.store.in_followup_window(PR, time.time() + 60))
+        # a new head starts again
+        self.store.mark_pending(PR, "payload cleanup blocked", failed_head="d" * 40)
+        self.assertEqual((self.store.failures(PR)["head"], self.store.failures(PR)["failures"]), ("d" * 40, 1))
+        self.store.clear_pending(PR)
+        self.assertIsNone(self.store.failures(PR))
+        # a damaged marker counts as none and is replaced
+        (self.store.pr_dir(PR) / "pending.json").write_text("{")
+        self.assertIsNone(self.store.failures(PR))
+        self.store.mark_pending(PR, "pass failed after retry", failed_head="d" * 40)
+        self.assertEqual(self.store.failures(PR)["failures"], 1)
+
+    def test_a_concurrent_pending_write_cannot_erase_a_failure(self):
+        import threading
+        self.store.clear_pending(PR)                                 # no directory yet: nothing to do
+        writer = threading.Thread(target=self.store.mark_pending, args=(PR, "discovery error"))
+        with self.store.marker(PR, create=True):
+            writer.start()
+            writer.join(0.3)
+            self.assertTrue(writer.is_alive())                       # waits for the marker
+            atomic(self.store.pr_dir(PR) / "pending.json",
+                   dict(at=0, reason="pass failed after retry", head="a" * 40, failures=3, failed_at=1.0))
+        writer.join(5)
+        self.assertEqual(self.store.failures(PR)["failures"], 3)
+        self.assertEqual(read(self.store.pr_dir(PR) / "pending.json")["reason"], "discovery error")
+        clearer = threading.Thread(target=self.store.clear_pending, args=(PR,))
+        with self.store.marker(PR):
+            clearer.start()
+            clearer.join(0.3)
+            self.assertTrue(clearer.is_alive())
+        clearer.join(5)
+        self.assertIsNone(self.store.failures(PR))
+
     def test_recovery_skips_a_pr_unchanged_since_it_was_recovered(self):
         self.accept()
         self.lock.close()
