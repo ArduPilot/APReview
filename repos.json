@@ -221,6 +221,17 @@
    "notes": "Firmware for the SkyViper video board: a Sonix SN986xx (ARM926EJ-S) SDK on FreeRTOS, with lwIP, the camera and video pipeline, and the ArduPilot MAVLink and web code under app/dashcam/src/main_flow/ArduPilot. Submodules modules/APWeb (ArduPilot/APWeb, swept separately) and modules/mavlink (the ArduPilot mavlink fork, already swept), which carries pymavlink as its own submodule. Judge the ArduPilot code as ArduPilot C; the vendor SDK (kernel, driver, middleware) is third-party, and the flight-code rules (AP_Param names, zeroed new) do not apply. Default branch master, no GitHub Actions, untouched from 2018 until 2026. Build with the bundled crosstool-4.5.2 (32-bit; the i386 libc6 and zlib1g and the Perl Encode::Detect and Digest::CRC modules are installed): git submodule update --init --recursive (map git://github.com/ to https://github.com/, which GitHub requires), then in buildscript: make oldconfig, make clean, make mavlink, make, make install, which writes image/dashcam/FIRMWARE_660R.bin. Build serially: make -j races on generated headers and fails with stddef.h not found. At master the build does not complete: the git:// submodules, an old mavlink that current pymavlink rejects, and an APWeb whose embed.py needs python2. Say so rather than blame a PR that fixes them."
   },
   {
+   "repo": "ArduPilot/plotjuggler-apbin-plugins",
+   "key": "plotjuggler-apbin-plugins",
+   "discovery": "explicit",
+   "post_comments": true,
+   "house_rules": "ardupilot",
+   "ci": true,
+   "default_branch": "main",
+   "added": "2026-11-13",
+   "notes": "The ArduPilot DataFlash (.bin) log loader plugin for PlotJuggler, in C++ with Qt5 (DataLoadAPBin/). It parses FMT, FMTU, UNIT, MULT and MSG messages, so a parser change should be checked against the DataFlash format in ardupilot's libraries/AP_Logger. Judge it as ArduPilot C++, but the flight-code rules (AP_Param names, zeroed new) do not apply. Default branch main; GitHub Actions build.yml builds PlotJuggler 3.9.2 and the plugin on Ubuntu 22.04 and Windows with the ADD_UNITS and ADD_RCOU_FUNCTION_LABELS options on and off, then runs the headless smoke test. PlotJuggler 3.9.2 is installed at /opt/plotjuggler-3.9.2. Build: cmake -S . -B build -Dplotjuggler_DIR=/opt/plotjuggler-3.9.2/lib/cmake/plotjuggler -DCMAKE_BUILD_TYPE=Release, cmake --build build, cmake --install build --prefix plugin_install; then cmake -S tests -B tests/build -DPJ_INCLUDE_DIR=/opt/plotjuggler-3.9.2/include, cmake --build tests/build, and QT_QPA_PLATFORM=offscreen tests/test_plugin.sh plugin_install/bin/libDataAPBin.so --verify, adding --expect-units or --expect-rcou to match the options built. At main this builds and parses tests/logs/00000001.BIN."
+  },
+  {
    "repo": "RsyncProject/rsync",
    "key": "rsync",
    "discovery": "rsync-mode",
