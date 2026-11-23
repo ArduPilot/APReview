@@ -1270,9 +1270,11 @@ class Store:
                         atomic(path, entry)
                         result = adapter.deliver(entry, deadline)
                         self.crash("remote_effect")
-                if entry["kind"] == "publish" and not entry.get("retained"):
+                if entry["kind"] in ("publish", "annotation") and not entry.get("retained"):
                     # before the receipt: a crash between leaves the entry
-                    # owed, never a receipted upload with an older record
+                    # owed, never a receipted upload with an older record.
+                    # An annotation uploads the whole page too: unrecorded,
+                    # it left every row on the page stale.
                     page_lock = lock if gate == "page" else side_locks.get(region(entry["target"]))
                     self.record_published(page_lock, entry["target"], result,
                                           self.destination(adapter, entry))
@@ -1306,7 +1308,7 @@ class StubAdapter:
                   "deprecate": "deprecated", "note": "posted"}
         result = {"state": entry.get("outcome", states.get(entry["kind"], "published")),
                   "payload_digest": entry["payload_digest"], "target_id": entry["id"]}
-        if entry["kind"] == "publish":
+        if entry["kind"] in ("publish", "annotation"):
             result["page_digest"] = self.current(entry)["page_digest"]
             if not entry.get("retained") and not entry.get("landing"):
                 from review_render import Renderer

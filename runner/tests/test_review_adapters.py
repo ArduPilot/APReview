@@ -1445,6 +1445,21 @@ class LocalPublication(unittest.TestCase):
         self.assertIn("Comment held for a human", body)
         self.assertIn("gh pr comment --body-file held.md", body)
 
+    def test_a_drained_annotation_records_what_it_uploaded_on_each_row(self):
+        target = "page:test/report.html"
+        self.store.merge_membership(target, {PR: dict(ticket=1, removed=False, generation=1)})
+        entry = dict(id=digest("annotation"), pr=PR, generation=1, kind="annotation", target=target,
+                     state="owed", failures=0, next_attempt=0, created=time.time())
+        atomic(self.store.root / "outbox" / (entry["id"] + ".json"), entry)
+        self.store.drain(Delivery(self.store, FakeGitHub(), self.config), seconds=10, snapshot=[entry])
+        self.assertEqual(self.store.receipt_of(entry["id"])["state"], "published")
+        directory = self.store.root / "pages" / digest(target)
+        upload = read(directory / "confirmed.json")
+        row = read(self.store.root / "membership" / (digest(target) + ".json"))[PR]
+        self.assertIsNotNone(upload["views"][PR])
+        self.assertEqual(row["published"], dict(view=upload["views"][PR], epoch=read(directory / "epoch.json"),
+                                                destination=self.publisher.destination(target)))
+
     def test_http_success_with_wrong_page_digest_is_not_publication(self):
         entry = entry_of(self.store, self.bundle, "publish")
         with patch.object(

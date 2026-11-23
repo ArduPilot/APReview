@@ -690,13 +690,63 @@ class ReviewSupervisor(unittest.TestCase):
         atomic(epoch, 3)
         record(destination=supervisor.destination(page), epoch=3)
         self.assertTrue(examine(2))
-        # another upload since (an annotation, a comment repair, or one that
-        # died before recording): stale
+        # another upload since that recorded nothing (a comment repair, or
+        # one that died before recording): stale
         atomic(epoch, 4)
         self.assertFalse(examine(3))
         # a stub-recorded view has no destination: never enough for a live run
         record(destination=None, epoch=4)
         self.assertFalse(examine(4))
+
+    def counting_stub(self, supervisor):
+        """The stub, counting each page's upload attempts as delivery does."""
+        adapter = StubAdapter(supervisor.store.root)
+        adapter.destination_of = lambda e: supervisor.destination(e["target"])
+        deliver = adapter.deliver
+        def counted(entry, deadline):
+            path = supervisor.store.root / "pages" / digest(entry["target"]) / "epoch.json"
+            atomic(path, read(path, 0) + 1)
+            if entry.get("fail"):
+                raise OSError("upload failed")
+            return dict(deliver(entry, deadline), epoch=read(path))
+        adapter.deliver = counted
+        return adapter
+
+    def test_an_annotation_upload_restamps_its_pages_rows(self):
+        supervisor = self.quiet_supervisor()
+        supervisor.config["stub"] = False
+        page = "page:stub/end/a.html"
+        epoch = supervisor.store.root / "pages" / digest(page) / "epoch.json"
+        adapter = self.counting_stub(supervisor)
+        c = dict(candidate(), pr=PR, destinations=[page], ci={"state": "success", "at": "2026-10-04T01:00"})
+        def observe(n):
+            supervisor.run_id = str(self.root / ("run%d" % n))
+            before = len(list((supervisor.store.root / "operations").glob("*.json")))
+            supervisor._project(dict(c, observation=n), "discovery")
+            supervisor.store.drain(adapter)
+            return len(list((supervisor.store.root / "operations").glob("*.json"))) - before
+        def annotate(ident, **extra):
+            entry = dict(id=digest(ident), pr=PR, generation=1, kind="annotation", target=page,
+                         state="owed", failures=0, next_attempt=0, created=time.time(), **extra)
+            atomic(supervisor.store.root / "outbox" / (entry["id"] + ".json"), entry)
+            supervisor.store.drain(adapter)
+            return entry
+        stamp = lambda: supervisor.store.merge_membership(page, {})[PR]["published"]
+        self.assertEqual(observe(1), 1)
+        self.assertEqual(observe(2), 0)
+        # a comment's annotation uploads the page again and records what it showed
+        entry = annotate("annotation 1")
+        self.assertEqual(supervisor.store.receipt_of(entry["id"])["state"], "published")
+        self.assertEqual(stamp()["epoch"], read(epoch))
+        self.assertEqual(stamp()["destination"], supervisor.destination(page))
+        self.assertEqual(observe(3), 0)
+        # one that fails after counting its attempt leaves the rows stale
+        before = stamp()
+        annotate("annotation 2", fail=True)
+        self.assertIsNone(supervisor.store.receipt_of(digest("annotation 2")))
+        self.assertEqual(stamp(), before)
+        self.assertEqual(read(epoch), before["epoch"] + 1)
+        self.assertEqual(observe(4), 1)
 
     def test_a_partly_suppressed_discovery_resumes_and_feeds_acceptance(self):
         supervisor = SUPERVISOR.Supervisor.__new__(SUPERVISOR.Supervisor)
