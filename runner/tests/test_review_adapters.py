@@ -771,13 +771,50 @@ class PatchHistory(unittest.TestCase):
         self.addCleanup(os.environ.pop, "GIT_ALLOW_PROTOCOL", None)
         # the URL is put back from .gitmodules and the clone is made from the
         # reference's own checkout, never the network
-        init_submodules(worktree, False, self.root)
+        init_submodules(worktree, self.root)
         self.assertTrue((worktree / "modules/sub/f").exists())
         url = run("git", "config", "submodule.modules/sub.url").stdout.decode().strip()
         self.assertEqual(url, upstream)
         run("git", "worktree", "add", "-q", "--detach", str(second))
-        init_submodules(second, False, self.root)
+        init_submodules(second, self.root)
         self.assertTrue((second / "modules/sub/f").exists())
+
+    def test_nested_submodules_come_from_other_reference_clones(self):
+        import shutil
+        import subprocess
+        from review_inference import init_submodules
+        env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_ALLOW_PROTOCOL="file",
+                   GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@t", GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@t")
+        run = lambda *a, cwd=self.root: subprocess.run(a, cwd=cwd, check=True, capture_output=True, env=env)
+        inner = self.root.parent / (self.root.name + "-inner")
+        outer = self.root.parent / (self.root.name + "-outer")
+        worktree = self.root.parent / (self.root.name + "-nwt")
+        for path in (inner, outer, worktree):
+            self.addCleanup(shutil.rmtree, path, True)
+        # two other reference clones, as the nightly refresh leaves them:
+        # outer names inner by its https URL but has not checked it out
+        for path, url in ((inner, "https://github.com/O/inner.git"), (outer, "https://github.com/O/outer")):
+            path.mkdir()
+            run("git", "init", "-q", cwd=path)
+            run("git", "remote", "add", "origin", url, cwd=path)
+        (inner / "f").write_text("x")
+        run("git", "add", ".", cwd=inner)
+        run("git", "commit", "-qm", "i", cwd=inner)
+        run("git", "-c", "url.%s.insteadOf=https://github.com/O/inner.git" % inner,
+            "-c", "protocol.file.allow=always",
+            "submodule", "add", "-q", "https://github.com/O/inner.git", "inner", cwd=outer)
+        run("git", "commit", "-qm", "o", cwd=outer)
+        run("git", "submodule", "deinit", "-q", "--all", cwd=outer)
+        # the PR's repository names outer the old way, git:// and .git
+        run("git", "-c", "url.%s.insteadOf=git://github.com/O/outer.git" % outer,
+            "-c", "protocol.file.allow=always",
+            "submodule", "add", "-q", "git://github.com/O/outer.git", "modules/outer")
+        run("git", "commit", "-qm", "with nested")
+        run("git", "worktree", "add", "-q", "--detach", str(worktree))
+        os.environ["GIT_ALLOW_PROTOCOL"] = "file"
+        self.addCleanup(os.environ.pop, "GIT_ALLOW_PROTOCOL", None)
+        init_submodules(worktree, self.root, [str(inner), str(outer), str(self.root)])
+        self.assertTrue((worktree / "modules/outer/inner/f").exists())
 
     def test_a_worktree_git_cannot_remove_in_time_is_deleted_and_pruned(self):
         import shutil

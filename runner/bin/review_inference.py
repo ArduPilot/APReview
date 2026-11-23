@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -329,28 +330,48 @@ def main():
         sys.exit(2)
     os.chdir(job["worktree"])
     # Prefetch dependencies before any test enters an isolated network namespace.
-    init_submodules(job["worktree"], job["repository"] == "ardupilot/ardupilot", job.get("reference_clone"))
+    others = (job.get("configuration") or {}).get("reference_clones", {}).values()
+    init_submodules(job["worktree"], job.get("reference_clone"), others)
     os.execvpe(job["cli_command"][0], job["cli_command"], os.environ)
 
 
-def local_submodules(reference):
-    """Every submodule the reference clone has checked out, nested ones
-    included, as git -c url rewrites from its upstream URL to the local copy."""
-    if not reference:
-        return []
-    out = subprocess.run(
-        ["git", "submodule", "foreach", "--quiet", "--recursive",
-         'echo "$toplevel/$sm_path $(git config --get remote.origin.url)"'],
-        cwd=reference, capture_output=True, text=True, timeout=60)
+def url_forms(url):
+    """The spellings a .gitmodules may use for one GitHub repository."""
+    m = re.match(r"(?:https?|git)://github\.com/(.+?)(?:\.git)?/?$", url)
+    if not m:
+        return [url]
+    return ["%s://github.com/%s%s" % (scheme, m.group(1), suffix)
+            for scheme in ("https", "http", "git") for suffix in ("", ".git")]
+
+
+def local_submodules(reference, others=()):
+    """git -c url rewrites to local copies: every submodule the reference
+    clone has checked out, nested ones included, and every other reference
+    clone and its submodules, so nested submodules come from them too."""
+    pairs = []
+    for clone in (reference, *others):
+        if not clone or not Path(clone).is_dir():
+            continue
+        if clone != reference:
+            origin = subprocess.run(["git", "config", "--get", "remote.origin.url"],
+                                    cwd=clone, capture_output=True, text=True, timeout=20)
+            pairs.append((str(clone), origin.stdout.strip()))
+        out = subprocess.run(
+            ["git", "submodule", "foreach", "--quiet", "--recursive",
+             'echo "$toplevel/$sm_path $(git config --get remote.origin.url)"'],
+            cwd=clone, capture_output=True, text=True, timeout=60)
+        for line in out.stdout.splitlines():
+            local, _, url = line.rpartition(" ")
+            if url and local and Path(local).is_dir():
+                pairs.append((local, url))
     rewrites = []
-    for line in out.stdout.splitlines():
-        local, _, url = line.rpartition(" ")
-        if url and local and Path(local).is_dir():
-            rewrites += ["-c", "url.%s.insteadOf=%s" % (local, url)]
+    for local, url in pairs:
+        for form in url_forms(url) if url else ():
+            rewrites += ["-c", "url.%s.insteadOf=%s" % (local, form)]
     return rewrites
 
 
-def init_submodules(worktree, recursive, reference=None):
+def init_submodules(worktree, reference=None, others=()):
     if not (Path(worktree) / ".gitmodules").exists():
         return
     # Worktrees share the reference clone's config. A reviewer once pointed
@@ -361,7 +382,7 @@ def init_submodules(worktree, recursive, reference=None):
     # ChibiOS from the network at once ran past the time limit.
     command = [
         "git",
-        *local_submodules(reference),
+        *local_submodules(reference, others),
         "-c",
         "protocol.file.allow=always",
         "-c",
@@ -373,9 +394,8 @@ def init_submodules(worktree, recursive, reference=None):
         "--init",
         "--jobs",
         "8",
+        "--recursive",
     ]
-    if recursive:
-        command += ["--recursive"]
     subprocess.run(command, cwd=worktree, check=True, timeout=600)
 
 
