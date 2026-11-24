@@ -46,6 +46,16 @@ def scaled_wall(base, diff):
 
 DISCOVERY_RETRY = 60
 
+# A page busy at a projection (the drain uploading it) is waited for, up to
+# PAGE_WAIT seconds per projection, before journalling. A page still busy at
+# the end is not waited for again for PAGE_WAIT_COOLDOWN seconds. Waiting
+# spends at most PAGE_WAIT_SHARE of the controller's time, after a burst of
+# PAGE_WAIT_BURST seconds.
+PAGE_WAIT = 2.0
+PAGE_WAIT_COOLDOWN = 60
+PAGE_WAIT_SHARE = 0.25
+PAGE_WAIT_BURST = 10.0
+
 # attempt errors that mean the payload never started
 STARVED = ("account deadline", "permit deadline")
 
@@ -318,8 +328,10 @@ class Supervisor:
             # and journals nothing. Anything else journals a projection and
             # publish as before.
             kept = []
+            # in place, so no observation can overtake another
+            deadline = time.monotonic() + PAGE_WAIT
             for projection, publish in zip(intents[::2], intents[1::2]):
-                examined = self.examine(projection["target"], pr, projection["patches"][pr])
+                examined = self.examine(projection["target"], pr, projection["patches"][pr], deadline)
                 review_metrics.count("local", "projection %s %s %s" % (
                     step, page_kind(projection["target"]),
                     "merged" if examined == "unchanged" else "journalled " + examined))
@@ -347,18 +359,37 @@ class Supervisor:
         return row_view(row, bundle, self.store.claim(pr), comment_receipts(self.store, bundle),
                         read(self.store.root / "legacy-facts.json", {}) if bundle and bundle.get("legacy") else None)
 
-    def examine(self, target, pr, patch):
+    def examine(self, target, pr, patch, deadline=None):
         """Returns "unchanged" when an observation was merged directly: the page's
         last verified upload already shows exactly what it would show now,
         at this destination. Recorded by delivery from the render it
         uploaded, never from intent, so a delayed or failed publish cannot
         make it match. The rows compared are exactly the rows written.
-        Otherwise why it must be journalled: "changed", "busy" or "error"."""
+        Otherwise why it must be journalled: "changed", "busy" or "error".
+        A busy page is waited for until deadline, within PAGE_WAIT's limits."""
+        cold = self.__dict__.setdefault("_page_cold", {})
+        now = time.monotonic()
+        bucket = self.__dict__.setdefault("_page_wait", [PAGE_WAIT_BURST, now])
+        bucket[:] = [min(PAGE_WAIT_BURST, bucket[0] + PAGE_WAIT_SHARE * (now - bucket[1])), now]
+        limit = None
         try:
             lock = try_lock(self.store.locks, target)
+            if (lock is None and deadline is not None and bucket[0] > 0
+                    and cold.get(target, 0) <= now < deadline):
+                limit = min(deadline, now + bucket[0])
+                try:
+                    lock = acquire(self.store.locks, target, limit)
+                except OSError:
+                    return "error"
+                finally:
+                    bucket[0] -= time.monotonic() - now
         except RuntimeError:
             return "error"
         if lock is None:
+            if limit is not None:
+                review_metrics.count("local", "projection wait timed out")
+            if limit == deadline:       # not when only the budget ran out
+                cold[target] = time.monotonic() + PAGE_WAIT_COOLDOWN
             return "busy"
         try:
             with lock:
@@ -374,6 +405,8 @@ class Supervisor:
                 if published and current and published.get("view") == self.view(rows.get(pr), pr):
                     self.store.write_membership(lock, target, rows)
                     review_metrics.count("local", "projection merged unchanged")
+                    if limit is not None:
+                        review_metrics.count("local", "projection merged after wait")
                     return "unchanged"
                 review_metrics.count("local", "projection journalled")
                 return "changed"

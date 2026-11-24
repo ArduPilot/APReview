@@ -637,11 +637,129 @@ class ReviewSupervisor(unittest.TestCase):
         ok, bad = {"state": "success", "at": "2026-10-04T01:00"}, {"state": "failure", "at": "2026-10-04T02:00"}
         c = dict(candidate(), pr=PR, destinations=[page])
         self.observe(supervisor, c, 1, ci=ok)
-        with patch.object(SUPERVISOR, "try_lock", return_value=None):
+        with patch.object(SUPERVISOR, "try_lock", return_value=None), \
+                patch.object(SUPERVISOR, "acquire", return_value=None):
             self.assertEqual(self.observe(supervisor, c, 2, ci=bad), 1)
         # back to passing: the page shows failing, so this must publish
         self.assertEqual(self.observe(supervisor, c, 3, ci=ok), 1)
         self.assertEqual(self.observe(supervisor, c, 4, ci=ok), 0)
+
+    def hold_page(self, supervisor, page):
+        """Another process holding the page lock, as the drain does, until
+        a line on its stdin."""
+        child = python("import sys\nfrom review_lock import try_lock\n"
+                       "lock = try_lock(sys.argv[1], sys.argv[2])\nprint('held', flush=True)\n"
+                       "sys.stdin.readline()\nlock.close()\nprint('released', flush=True)\n"
+                       "sys.stdin.readline()", supervisor.store.locks, page,
+                       stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+        self.addCleanup(child.stdout.close)
+        self.addCleanup(child.stdin.close)
+        self.addCleanup(stop, child)
+        self.assertEqual(child.stdout.readline().strip(), "held")
+        return child
+
+    def waiting(self, release=None):
+        """Counts metrics and waits; a child given is released as the wait starts."""
+        counts, waits, real = [], [], SUPERVISOR.acquire
+        def acquire(path, key, deadline):
+            waits.append(key)
+            if release:
+                release.stdin.write("\n")
+                release.stdin.flush()
+                self.assertEqual(release.stdout.readline().strip(), "released")
+            return real(path, key, deadline)
+        from contextlib import ExitStack
+        stack = ExitStack()
+        stack.enter_context(patch.object(SUPERVISOR, "acquire", acquire))
+        stack.enter_context(patch.object(SUPERVISOR.review_metrics, "count",
+                                         lambda scope, name, n=1: counts.append(name)))
+        return counts, waits, stack
+
+    def test_a_page_released_within_the_wait_merges_without_a_journal(self):
+        supervisor = self.quiet_supervisor()
+        page = "page:stub/end/a.html"
+        c = dict(candidate(), pr=PR, destinations=[page])
+        self.observe(supervisor, c, 1)
+        child = self.hold_page(supervisor, page)
+        counts, waits, stack = self.waiting(release=child)
+        with patch.object(SUPERVISOR, "PAGE_WAIT", 30), stack:
+            self.assertEqual(self.observe(supervisor, c, 2), 0)
+        self.assertEqual(waits, [page])
+        self.assertEqual(supervisor.store.merge_membership(page, {})[PR]["ticket"], 2)
+        self.assertEqual([n for n in counts if n.startswith("projection discovery")],
+                         ["projection discovery label merged"])
+        self.assertIn("projection merged after wait", counts)
+
+    def test_a_page_held_past_the_wait_journals_and_is_not_waited_for_again(self):
+        supervisor = self.quiet_supervisor()
+        page, other = "page:stub/end/a.html", "page:stub/end/b.html"
+        c = dict(candidate(), pr=PR, destinations=[page, other])
+        self.observe(supervisor, c, 1)
+        self.hold_page(supervisor, page)
+        self.hold_page(supervisor, other)
+        ops = lambda: len(list((supervisor.store.root / "operations").glob("*.json")))
+        counts, waits, stack = self.waiting()
+        with patch.object(SUPERVISOR, "PAGE_WAIT", 0.3), stack:
+            supervisor.run_id = str(self.root / "run2")
+            supervisor._project(dict(c, observation=2), "discovery")
+            # one deadline for the projection's pages: the second is not waited for
+            self.assertEqual(waits, [page])
+            self.assertEqual(ops(), 2)
+            # the first page cooling down, only the second is waited for
+            supervisor.run_id = str(self.root / "run3")
+            supervisor._project(dict(c, observation=3), "discovery")
+            self.assertEqual(waits, [page, other])
+            supervisor.run_id = str(self.root / "run4")
+            supervisor._project(dict(c, observation=4), "discovery")
+            self.assertEqual(waits, [page, other])
+        self.assertEqual(ops(), 4)
+        self.assertEqual([n for n in counts if n.startswith("projection discovery")],
+                         ["projection discovery label journalled busy"] * 6)
+        self.assertEqual(counts.count("projection wait timed out"), 2)
+
+    def test_waiting_for_pages_is_bounded_by_its_budget_and_cooldown(self):
+        supervisor = self.quiet_supervisor()
+        pages = ["page:stub/end/%s.html" % n for n in "abc"]
+        c = dict(candidate(), pr=PR, destinations=pages)
+        self.observe(supervisor, c, 1)
+        clock, waits = [time.monotonic() + 60], []
+        def acquire(path, key, deadline):
+            # always busy: each wait runs to its limit on a fake clock
+            waits.append((key, round(deadline - clock[0], 3)))
+            clock[0] = deadline
+        fake = Mock(monotonic=lambda: clock[0], time=time.time)
+        def project(n, advance=0):
+            clock[0] += advance
+            supervisor.run_id = str(self.root / ("run%d" % n))
+            supervisor._project(dict(c, observation=n), "discovery")
+        with patch.object(SUPERVISOR, "time", fake), \
+                patch.object(SUPERVISOR, "try_lock", return_value=None), \
+                patch.object(SUPERVISOR, "acquire", acquire), \
+                patch.object(SUPERVISOR, "PAGE_WAIT", 0.3), \
+                patch.object(SUPERVISOR, "PAGE_WAIT_BURST", 0.5):
+            with patch.object(SUPERVISOR, "PAGE_WAIT_SHARE", 0):
+                project(2)      # a to its deadline, then b and c have none left
+                project(3)      # a cooling down; b only to what the burst has left
+                project(4)      # nothing left
+            self.assertEqual(waits, [(pages[0], 0.3), (pages[1], 0.2)])
+            with patch.object(SUPERVISOR, "PAGE_WAIT_SHARE", 0.25):
+                start = clock[0]
+                project(5, advance=0.4)     # refilled by 0.1 s
+                self.assertEqual(waits[2], (pages[1], 0.1))
+                # a quarter of the time since, at most
+                self.assertLessEqual(sum(w for _, w in waits[2:]), 0.25 * (clock[0] - start) + 1e-6)
+                before = len(waits)
+                project(6, advance=61)      # a's cooldown over, burst refilled
+                self.assertEqual(waits[before], (pages[0], 0.3))
+
+    def test_a_lock_error_while_waiting_journals(self):
+        supervisor = self.quiet_supervisor()
+        page = "page:stub/end/a.html"
+        c = dict(candidate(), pr=PR, destinations=[page])
+        self.observe(supervisor, c, 1)
+        with patch.object(SUPERVISOR, "try_lock", return_value=None), \
+                patch.object(SUPERVISOR, "acquire", side_effect=OSError("lock file")):
+            self.assertEqual(self.observe(supervisor, c, 2), 1)
 
     def test_a_new_destination_publishes_even_when_nothing_else_changed(self):
         supervisor = self.quiet_supervisor()
@@ -849,7 +967,8 @@ class ReviewSupervisor(unittest.TestCase):
         page, other = "page:stub/end/a.html", "page:stub/end/b.html"
         c = dict(candidate(), pr=PR, destinations=[page])
         self.sweep(supervisor, c, 1, "deferred")
-        with patch.object(SUPERVISOR, "try_lock", return_value=None):
+        with patch.object(SUPERVISOR, "try_lock", return_value=None), \
+                patch.object(SUPERVISOR, "acquire", return_value=None):
             self.assertEqual(self.sweep(supervisor, c, 2, "deferred"), 2)
         self.assertEqual(self.sweep(supervisor, c, 3, "deferred"), 0)
         journals = lambda: set((supervisor.store.root / "operations").glob("*.json"))
