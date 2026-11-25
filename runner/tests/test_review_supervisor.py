@@ -752,6 +752,39 @@ class ReviewSupervisor(unittest.TestCase):
                 project(6, advance=61)      # a's cooldown over, burst refilled
                 self.assertEqual(waits[before], (pages[0], 0.3))
 
+    def test_a_busy_page_not_waited_for_counts_one_reason(self):
+        supervisor = self.quiet_supervisor()
+        page = "page:stub/end/a.html"
+        clock, counts = [1000.0], []
+        def acquire(path, key, deadline):
+            clock[0] = deadline
+        fake = Mock(monotonic=lambda: clock[0], time=time.time)
+        def reasons(deadline, cold=0, budget=None):
+            del counts[:]
+            supervisor._page_cold = {page: cold}
+            if budget is not None:
+                supervisor._page_wait = [budget, clock[0]]
+            self.assertEqual(supervisor.examine(page, PR, {}, deadline), "busy")
+            return [n for n in counts if n.startswith("projection not waited")]
+        with patch.object(SUPERVISOR, "time", fake), \
+                patch.object(SUPERVISOR, "try_lock", return_value=None), \
+                patch.object(SUPERVISOR, "acquire", acquire), \
+                patch.object(SUPERVISOR.review_metrics, "count",
+                             lambda scope, name, n=1: counts.append(name)):
+            now = clock[0]
+            # precedence: no deadline, deadline spent, cooldown, budget empty
+            self.assertEqual(reasons(None, cold=now + 60, budget=0), ["projection not waited: no deadline"])
+            self.assertEqual(reasons(now, cold=now + 60, budget=0), ["projection not waited: deadline spent"])
+            self.assertEqual(reasons(now + 1, cold=now + 60, budget=0), ["projection not waited: cooldown"])
+            self.assertEqual(reasons(now + 1, budget=0), ["projection not waited: budget empty"])
+            # a wait attempted counts its own outcome, no reason
+            self.assertEqual(reasons(now + 1, budget=5), [])
+            self.assertIn("projection wait timed out", counts)
+            # no wait attempted starts no cooldown
+            supervisor._page_cold = {}
+            supervisor.examine(page, PR, {}, None)
+            self.assertNotIn(page, supervisor._page_cold)
+
     def test_a_lock_error_while_waiting_journals(self):
         supervisor = self.quiet_supervisor()
         page = "page:stub/end/a.html"

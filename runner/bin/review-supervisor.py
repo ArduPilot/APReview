@@ -388,7 +388,14 @@ class Supervisor:
         if lock is None:
             if limit is not None:
                 review_metrics.count("local", "projection wait timed out")
-            if limit == deadline:       # not when only the budget ran out
+            else:
+                # why it was not waited for: the first that applies
+                review_metrics.count("local", "projection not waited: " + (
+                    "no deadline" if deadline is None
+                    else "deadline spent" if now >= deadline
+                    else "cooldown" if cold.get(target, 0) > now
+                    else "budget empty"))
+            if limit is not None and limit == deadline:     # not when only the budget ran out
                 cold[target] = time.monotonic() + PAGE_WAIT_COOLDOWN
             return "busy"
         try:
