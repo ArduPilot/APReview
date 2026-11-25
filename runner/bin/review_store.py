@@ -1000,32 +1000,56 @@ class Store:
         those entries wait on. Caller holds the page region."""
         if deadline and time.monotonic() >= deadline:
             return
-        target = canonical(entry["target"])
-        batch = []
-        for path in (self.root / "outbox").glob("*.json"):
-            try:
-                other = read(path)
-                if (not isinstance(other, dict) or other.get("id") == entry["id"] or other.get("kind") != "publish"
-                        or other.get("gate") != "page" or canonical(other["target"]) != target
-                        or other.get("retained") or not self.same_destination(adapter, entry, other)):
-                    continue
-                if self.has_receipt(other["id"]):
-                    unlink(path)
-                    continue
-                if self.settled(other):
-                    batch.append(other)
-            except Exception:
-                continue                # another entry's trouble is not this one's
+        batch = self.page_batch(entry, adapter, deadline)
         # the batch is frozen before the render, so it can only have seen
         # their dependencies; anything settling later waits its own turn
         if deadline and time.monotonic() >= deadline:
             return
         if not batch or not self.current_matches(adapter, entry, result):
             return
+        self.settle_batch(batch, result, adapter, deadline, lock)
+
+    def page_batch(self, entry, adapter, deadline=None):
+        """The other owed whole publishes of entry's page to the same place
+        whose dependencies have settled, as far as the scan gets by
+        deadline. Caller holds the page region."""
+        target = canonical(entry["target"])
+        batch = []
+        for path in (self.root / "outbox").glob("*.json"):
+            if deadline and time.monotonic() >= deadline:
+                break
+            try:
+                other = read(path)
+                # a receipt removes the outbox file its id names
+                if (not isinstance(other, dict) or other.get("id") != path.stem
+                        or other.get("id") == entry["id"] or other.get("kind") != "publish"
+                        or other.get("gate") != "page" or canonical(other["target"]) != target
+                        or other.get("retained") or not self.same_destination(adapter, entry, other)):
+                    continue
+                if self.has_receipt(other["id"]):
+                    unlink(path)
+                    continue
+                # shaped as the drain's own selection requires
+                if isinstance(other.get("dependencies", []), list) and self.settled(other):
+                    batch.append(other)
+            except Exception:
+                continue                # another entry's trouble is not this one's
+        return batch
+
+    def settle_batch(self, batch, result, adapter, deadline, lock, metric=None):
+        """Settle a batch a render made after its freezing proved shown. A
+        failure leaves the rest owed; it is not the settled entry's."""
         for other in batch:
             if deadline and time.monotonic() >= deadline:
                 return
-            self.settle_from(other, result, lock, self.destination(adapter, other))
+            try:
+                self.settle_from(other, result, lock, self.destination(adapter, other))
+            except Exception:
+                # it is retried in its own turn
+                review_metrics.count("local", "batch settle failed")
+                return
+            if metric:
+                review_metrics.count("local", metric)
 
     @staticmethod
     def destination(adapter, entry):
@@ -1100,6 +1124,8 @@ class Store:
             raise
 
     ENTRY_SECONDS = 60
+    # the most of an entry's minute an optional batch scan may take
+    BATCH_SECONDS = 5
 
     def drain(self, adapter, limit=100, seconds=60, snapshot=None):
         deadline = time.monotonic() + seconds
@@ -1258,11 +1284,16 @@ class Store:
                         # the page's last verified upload to this entry's
                         # destination, proven by rendering now
                         done = getattr(adapter, "confirmed", lambda e: None)(entry) if whole else None
+                        # the page's other owed publishes, frozen before the
+                        # render so it shows what they wait on
+                        batch = (self.page_batch(entry, adapter, min(deadline, time.monotonic() + self.BATCH_SECONDS))
+                                 if done and gate == "page" else [])
                         if done and self.contained(entry, done, adapter):
-                            self.settle_from(entry, done,
-                                             lock if gate == "page" else side_locks.get(region(entry["target"])),
-                                             self.destination(adapter, entry))
+                            page_lock = lock if gate == "page" else side_locks.get(region(entry["target"]))
+                            self.settle_from(entry, done, page_lock, self.destination(adapter, entry))
                             review_metrics.count("local", "publish settled by a render")
+                            self.settle_batch(batch, done, adapter, deadline, page_lock,
+                                              "publish settled by a shared render")
                             return
                         delivered = True
                         entry["state"] = "sending"

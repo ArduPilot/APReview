@@ -626,6 +626,132 @@ class ReviewStore(unittest.TestCase):
         settled = sorted(p.stem for p in receipts.glob("land*.json"))
         self.assertEqual(settled, ["land1", "land2"])
 
+    def shared_render(self, extra=()):
+        """Owed publishes of one page an earlier upload already shows, and
+        a stub that counts its renders."""
+        import review_metrics
+        page, outbox = "page:end/shared", self.root / "outbox"
+        self.store.merge_membership(page, {PR: dict(ticket=1, removed=False)})
+        self.store.receipt(dict(id="proj", pr=PR, generation="op", kind="projection", target=page), "published")
+        for n in range(1, 4):
+            atomic(outbox / f"pub{n}.json", dict(id=f"pub{n}", pr=f"pr:o/r#{n}", generation=f"op{n}",
+                                                 kind="publish", target=page, gate="page", dependencies=["proj"],
+                                                 state="owed", failures=0, next_attempt=0))
+        for ident, changes in extra:
+            atomic(outbox / f"{ident}.json", dict(read(outbox / "pub3.json"), id=ident, **changes))
+        self.lock.close()
+        adapter = StubAdapter(self.root)
+        atomic(adapter.root / "confirmed" / (digest(page) + ".json"),
+               dict(adapter.current({"target": page}), state="published", views={PR: "shown"}))
+        renders = []
+        real = adapter.current
+        adapter.current = lambda entry: renders.append(entry["id"]) or real(entry)
+        adapter.deliver = Mock(side_effect=AssertionError("no upload"))
+        review_metrics._counts.clear()
+        return adapter, renders, lambda what: review_metrics._counts.get("local/" + what, [0])[0]
+
+    def test_one_render_settles_every_owed_publish_of_the_page_it_shows(self):
+        adapter, renders, count = self.shared_render()
+        self.store.drain(adapter, limit=1)
+        self.assertEqual(len(renders), 1)
+        self.assertEqual(sorted(p.stem for p in (self.root / "receipts").glob("pub*.json")), ["pub1", "pub2", "pub3"])
+        self.assertFalse(list((self.root / "outbox").glob("pub*.json")))
+        self.assertEqual((count("publish settled by a render"), count("publish settled by a shared render")), (1, 2))
+        # recorded under the page lock, as an upload's own settle is
+        row = read(self.root / "membership" / (digest("page:end/shared") + ".json"))[PR]
+        self.assertEqual(row["published"]["view"], "shown")
+
+    def test_a_shared_render_settles_nothing_it_does_not_prove(self):
+        adapter, renders, count = self.shared_render([
+            ("zretained", dict(retained=True)),
+            ("zelsewhere", dict(dest="other")),
+            ("zlate", dict(dependencies=["late-proj"])),
+            ("zwaiting", dict(dependencies=["never"]))])
+        # a file whose id names another entry: its receipt would remove that one
+        atomic(self.root / "outbox" / "zmisnamed.json", dict(read(self.root / "outbox" / "pub3.json"), id="zother"))
+        atomic(self.root / "outbox" / "zshape.json", dict(read(self.root / "outbox" / "pub3.json"), id="zshape",
+                                                          dependencies={}))
+        adapter.destination_of = lambda entry: entry.get("dest")
+        real = adapter.current
+        def current(entry):
+            # settles after the batch was frozen: the render may not show it
+            self.store.receipt(dict(id="late-proj", pr=PR, generation="op", kind="projection",
+                                    target=entry["target"]), "published")
+            return real(entry)
+        adapter.current = current
+        self.store.drain(adapter, limit=1)
+        self.assertEqual(sorted(p.stem for p in (self.root / "receipts").glob("*.json") if p.stem != "proj"),
+                         ["late-proj", "pub1", "pub2", "pub3"])
+        self.assertEqual(sorted(p.stem for p in (self.root / "outbox").glob("*.json")),
+                         ["zelsewhere", "zlate", "zmisnamed", "zretained", "zshape", "zwaiting"])
+
+    def test_a_render_that_shows_a_change_settles_no_batch(self):
+        adapter, renders, count = self.shared_render()
+        self.store.merge_membership("page:end/shared", {"pr:o/r#9": dict(ticket=1, removed=False)})
+        adapter.deliver = lambda entry, deadline: (_ for _ in ()).throw(OSError("down"))
+        self.store.drain(adapter, limit=1)
+        self.assertFalse(list((self.root / "receipts").glob("pub*.json")))
+        self.assertEqual(count("publish settled by a shared render"), 0)
+
+    def test_a_crash_midway_through_a_shared_render_leaves_each_entry_whole(self):
+        adapter, renders, count = self.shared_render()
+        receipts = []
+        def crash(point):
+            if point == "receipt_file":
+                receipts.append(1)
+                if len(receipts) == 2:
+                    raise Crash()
+        self.store.crash = crash
+        with self.assertRaises(Crash):
+            self.store.drain(adapter, limit=1)
+        owed = {p.stem for p in (self.root / "outbox").glob("pub*.json")}
+        done = {p.stem for p in (self.root / "receipts").glob("pub*.json")}
+        self.assertEqual(len(done), 1)
+        self.assertEqual(owed | done, {"pub1", "pub2", "pub3"})
+        self.assertFalse(owed & done)
+        self.store.crash = lambda point: None
+        self.store.drain(adapter)
+        self.assertEqual({p.stem for p in (self.root / "receipts").glob("pub*.json")}, {"pub1", "pub2", "pub3"})
+
+    def test_a_failed_batch_settle_is_not_charged_to_the_settled_entry(self):
+        adapter, renders, count = self.shared_render()
+        real = self.store.settle_from
+        def settle_from(entry, *args):
+            if entry["id"] != "pub1":
+                raise OSError("disk full")
+            return real(entry, *args)
+        self.store.settle_from = settle_from
+        self.store.drain(adapter, limit=1)
+        self.assertEqual(sorted(p.stem for p in (self.root / "receipts").glob("pub*.json")), ["pub1"])
+        outbox = self.root / "outbox"
+        self.assertEqual(sorted(p.stem for p in outbox.glob("pub*.json")), ["pub2", "pub3"])
+        self.assertEqual([read(outbox / f"pub{n}.json")["failures"] for n in (2, 3)], [0, 0])
+
+    def test_a_slow_batch_scan_leaves_the_entry_its_deadline(self):
+        adapter, renders, count = self.shared_render([("z%d" % n, {}) for n in range(10)])
+        # the page changed: the entry must upload after the scan
+        self.store.merge_membership("page:end/shared", {"pr:o/r#9": dict(ticket=1, removed=False)})
+        adapter.deliver = StubAdapter(self.root).deliver
+        clock, real = [time.monotonic()], self.store.settled
+        def settled(entry):
+            clock[0] += 10
+            return real(entry)
+        self.store.settled = settled
+        with patch("review_store.time.monotonic", lambda: clock[0]):
+            self.store.drain(adapter, limit=1)
+        self.assertTrue(self.store.has_receipt("pub1"))
+        self.assertFalse((self.root / "outbox" / "pub1.json").exists())
+
+    def test_a_shared_render_stops_settling_at_the_entry_deadline(self):
+        adapter, renders, count = self.shared_render()
+        real, late = time.monotonic, []
+        current = adapter.current
+        adapter.current = lambda entry: late.append(1) or current(entry)
+        with patch("review_store.time.monotonic", lambda: real() + (3600 if late else 0)):
+            self.store.drain(adapter, limit=1)
+        self.assertEqual(sorted(p.stem for p in (self.root / "receipts").glob("pub*.json")), ["pub1"])
+        self.assertEqual(count("publish settled by a shared render"), 0)
+
     def test_last_worked_is_the_newest_generation_or_its_posting(self):
         self.assertIsNone(self.store.last_worked(PR))
         self.accept()
