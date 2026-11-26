@@ -52,7 +52,7 @@ DISCOVERY_RETRY = 60
 # spends at most PAGE_WAIT_SHARE of the controller's time, after a burst of
 # PAGE_WAIT_BURST seconds.
 PAGE_WAIT = 2.0
-PAGE_WAIT_COOLDOWN = 60
+PAGE_WAIT_COOLDOWN = 10
 PAGE_WAIT_SHARE = 0.25
 PAGE_WAIT_BURST = 10.0
 
